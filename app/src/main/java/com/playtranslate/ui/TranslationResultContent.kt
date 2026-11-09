@@ -554,11 +554,11 @@ class TranslationResultContent(
         }
     }
 
-    /** Fresh-result scroll reset: always the top. Deliberately NOT the
-     *  hidden-section park the over-game panel does: a page starts at its
-     *  top, and a self-inflicted scroll here reads as user intent (in
-     *  dual-screen live mode it tripped the scroll listener → pause on every
-     *  incoming result). */
+    /** Fresh-result scroll reset: always the top, a hidden section's header
+     *  included (a hidden section is its header, in place). Silent, because
+     *  a self-inflicted scroll here reads as user intent (in dual-screen
+     *  live mode it tripped the scroll listener → pause on every incoming
+     *  result). */
     private fun scrollToFreshResultStart() {
         scrollView.scrollToTopSilently(scrollListener)
     }

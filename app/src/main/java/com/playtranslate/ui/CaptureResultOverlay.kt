@@ -18,11 +18,9 @@ import android.graphics.Paint
 import android.graphics.Point
 import android.graphics.Rect
 import android.graphics.RectF
-import android.graphics.Typeface
 import android.os.Build
 import android.text.InputType
 import android.text.Layout
-import android.util.TypedValue
 import android.view.Gravity
 import android.view.KeyEvent
 import android.view.MotionEvent
@@ -47,7 +45,6 @@ import android.widget.ImageButton
 import android.widget.LinearLayout
 import android.widget.ProgressBar
 import android.widget.TextView
-import android.widget.Toast
 import androidx.core.view.isVisible
 import androidx.core.widget.NestedScrollView
 import com.playtranslate.AnkiManager
@@ -92,9 +89,11 @@ import kotlin.math.abs
 import kotlin.math.ceil
 
 /**
- * The over-game capture result panel: a bottom-anchored sheet (default 40% of
- * the screen) showing the source section on the left and the target section on
- * the right (stacked when too narrow), drawn over the game without leaving it.
+ * The over-game capture result panel: a bottom-anchored sheet that grows to
+ * fit its result (up to half the screen, further by a drag) and shows the
+ * results sections in the shared [ResultSectionsLayout]: the source section
+ * beside the target section on a wide screen, stacked on a narrow one. It is
+ * drawn over the game without leaving it.
  * The grabber floats in a transparent strip above the sheet's top edge; content
  * buffers above the navigation bar the way a top sheet buffers under the status
  * bar (the fill still reaches the screen edge behind the system bar).
@@ -499,11 +498,6 @@ class CaptureResultOverlay(
      *  so a plain floor write during flight is overwritten and useless. */
     private var heightAnimatorTargetPx = 0
 
-    /** One-shot: after a bind with the translation section hidden, the next
-     *  layouts park the scroll just past its collapsed header (see hiddenTopPx).
-     *  Cleared once the scroll lands so later user scrolling is untouched. */
-    private var pendingHiddenTopScroll = false
-
     private var sessionJob: Job? = null
     /** The active service one-shot session (OCR + translate). Held so dismissal
      *  cancels the headless service work, not just our UI collector. */
@@ -536,7 +530,8 @@ class CaptureResultOverlay(
     private val scroll = object : NestedScrollView(ctx) {
         override fun getTopFadingEdgeStrength(): Float = 0f
     }
-    private val contentRow = LinearLayout(ctx)
+    /** The sections' layout, the scroll's content (see [buildContent]). */
+    private val sections = ResultSectionsLayout(ctx)
     private val handle = HandleView(ctx)
     // The "an overlay is up" signal for as long as this sheet is up, sliver
     // included (see [EdgeIndicator]): a frame around the display edges
@@ -586,22 +581,19 @@ class CaptureResultOverlay(
      *  Every "is a popover up" rule here (touch, B, nav) asks it. */
     private val popovers = PopoverHost(root, below = focusRing)
 
-    // Side-by-side column collapse: hiding a section shrinks it to a button-wide
-    // strip (rotated label) and the other section fills the freed width.
-    private var isSideBySide = false
-    private var sourceColumn: SectionColumn? = null
-    private var targetColumn: SectionColumn? = null
+    /** Whether Original and Translation sit side by side. Decided once, in
+     *  [show] (see there for why once), and held by the sections' layout,
+     *  which arranges the two and their hidden states from it. Everything
+     *  here that differs by arrangement reads it back from the layout. */
+    private val paired: Boolean
+        get() = sections.fixedArrangement == ResultSectionsLayout.Arrangement.PAIRED
 
-    // Auto-height + text fit. The card frame's inset (rounded-corner overlap +
-    // stroke) is constant, so it's measured once while the cards are still wrap;
-    // the header + in-card overhead (which includes the target's note row) are
-    // read LIVE each fit. Plus the load-time grow-to-fit animator.
-    private var sourceCardInsetPx = 0
-    private var targetCardInsetPx = 0
-    // Stacked only: the non-card vertical chrome (both headers + divider + bottom
-    // padding), measured once while the cards still wrap.
-    private var stackedNonCardPx = 0
-    private var cardInsetMeasured = false
+    // Auto-height + text fit. Every part of the content's height is read
+    // LIVE each fit (the headers, each card's inset and in-card overhead,
+    // which includes the target's note row, and the texts at max size) and
+    // summed; the laid-out content's own height is never read, because the
+    // fill ([applyCardFill]) stretches the cards to the panel. Plus the
+    // load-time grow-to-fit animator.
     private var heightAnimator: ValueAnimator? = null
     // Height that shows all content at max text size — the drag-resize ceiling, so
     // the user can't grow the panel into empty space beyond what the content needs.
@@ -680,7 +672,7 @@ class CaptureResultOverlay(
             isFillViewport = true
             visibility = View.GONE
             // This view stays unpadded — the content buffer lives INSIDE
-            // contentRow (buildContent) and the nav-bar buffer on the body —
+            // the sections' layout (buildContent) and the nav-bar buffer on the body —
             // which pins the fade band exactly to the viewport bottom with
             // nothing able to draw past it. (A scroll-level padding +
             // clipToPadding=false variant let content render below the fade
@@ -688,7 +680,7 @@ class CaptureResultOverlay(
             isVerticalFadingEdgeEnabled = true
             setFadingEdgeLength(dp(24))
             addView(
-                contentRow,
+                sections,
                 FrameLayout.LayoutParams(MATCH, WRAP),
             )
         }
@@ -834,27 +826,6 @@ class CaptureResultOverlay(
         )
         modePill.onSelect = { selectOverlayMode(it) }
         modePill.onCollapsedChanged = { prefs.captureOverlayPillCollapsed = it }
-        // One-shot after each bind: park the scroll just past the hidden
-        // translation section's collapsed header (see hiddenTopPx). Layout-
-        // driven because the needed scroll range only exists once the grow
-        // animation's card fill has laid out.
-        scroll.addOnLayoutChangeListener { _, _, _, _, _, _, _, _, _ ->
-            if (!pendingHiddenTopScroll) return@addOnLayoutChangeListener
-            // Stable-state recheck: a pref flip or layout-mode change while
-            // waiting cancels the parking rather than leaving it pending.
-            if (isSideBySide || !prefs.hideTranslationSection) {
-                pendingHiddenTopScroll = false
-                return@addOnLayoutChangeListener
-            }
-            // Await measurement: 0 means the target header hasn't laid out yet
-            // (fresh overlay, showWithResult) — not "nothing to park".
-            if (hiddenTopPx() <= 0) return@addOnLayoutChangeListener
-            // Settle 3dp shy of fully off-screen — parking flush clipped the
-            // source header's first pixels.
-            val target = hiddenTopPx() - dp(3)
-            scroll.scrollTo(0, target)
-            if (scroll.scrollY >= target) pendingHiddenTopScroll = false
-        }
     }
 
     // ── Public API ───────────────────────────────────────────────────────
@@ -938,7 +909,7 @@ class CaptureResultOverlay(
             screenW - side.left - side.right, dp(1),
             (CaptureResultGeometry.SIDE_BY_SIDE_FALLBACK_SECTION_DP * density).toInt(),
         )
-        buildContent(sideBySide)
+        buildContent(paired = sideBySide)
 
         val b = TranslationSectionBinder(
             panel, ctx, prefs, scope,
@@ -950,30 +921,17 @@ class CaptureResultOverlay(
             onAddToAnki = { openSentenceAnkiReview() },
             onAnkiOneTap = { oneTapSentenceFromOverlay() },
         )
-        // Overlay-only: the target header's show-on-screen toggle flips the
-        // on-frame boxes — accent while ON — without moving the panel.
         b.onSectionVisibilityChanged = {
-            applySideBySideCollapse()
-            // Stacked hidden-translation parks the collapsed header above the
-            // scroll fold; bindResult arms the park for fresh results, and a
-            // LIVE eye toggle must arm it too — every height formula subtracts
-            // hiddenTopPx on the assumption the header is scrolled off, so an
-            // unparked toggle left the panel (and its drag ceiling) exactly
-            // one header short: the source text clipped at full drag. The
-            // un-hide direction unwinds the park, else the just-revealed
-            // translation section starts half-scrolled-off.
-            if (!isSideBySide && prefs.hideTranslationSection) {
-                pendingHiddenTopScroll = true
-            } else if (scroll.scrollY != 0) {
-                scroll.scrollTo(0, 0)
-            }
-            // A section was hidden/shown — grow/shrink the panel to the new content.
-            // Two frames: the collapse AND the other column's re-widen must settle
-            // before we measure, else we'd size to the stale pre-collapse layout.
-            // Same settle window before the controller cursor re-targets: its
-            // activated eye may have swapped a whole column for its strip.
-            contentRow.post {
-                contentRow.post {
+            // A section was hidden/shown: the sections' layout re-arranges
+            // itself from the card's visibility (a hidden section keeps its
+            // header; in a pair the other card takes the full width). Then
+            // grow/shrink the panel to the new content. Two frames: that
+            // re-arrangement must lay out before we measure (the surviving
+            // card's text re-wraps at its new width), else we'd size to the
+            // stale layout. Same settle window before the controller cursor
+            // re-targets: the header actions under it may have gone.
+            sections.post {
+                sections.post {
                     if (dismissed) return@post
                     if (lastResult != null) autoSizeAndFit()
                     nav?.revalidateCursor()
@@ -1025,9 +983,6 @@ class CaptureResultOverlay(
             opensWithoutEntry = true,
             wireActions = { lens, resolvedAt -> wireLensActions(lens, resolvedAt) },
         )
-        // Reflect any persisted hide prefs (shared with the results page) up front.
-        applySideBySideCollapse()
-
         // Bottom sheet: buffer the CONTENT above the navigation bar while it's
         // visible, the same way a top sheet buffers under the status bar — the
         // sheet fill keeps reaching the screen edge behind the bar, so nothing
@@ -1971,27 +1926,6 @@ class CaptureResultOverlay(
         )
     }
 
-    /** Extra content height beyond the visible body when the translation
-     *  section (stacked mode's TOP section) is hidden via its eye: its collapsed
-     *  header + the divider live ABOVE the scroll fold — the source card is
-     *  sized as if they weren't there, and a fresh bind parks the scroll just
-     *  below them (scrolling up still reveals the header to un-hide). */
-    private fun hiddenTopPx(): Int {
-        val b = binder ?: return 0
-        if (isSideBySide || !prefs.hideTranslationSection) return 0
-        val headerH = b.targetHeaderHeight()
-        if (headerH <= 0) return 0
-        // Just the header: the stacked layout has no divider, so nothing else
-        // sits between the collapsed header and the source section — reserving
-        // more here would show as phantom buffer under the hidden header.
-        return headerH
-    }
-
-    /** The height the FIT machinery works against: the visible body plus the
-     *  above-the-fold strip from [hiddenTopPx], so the visible sections fill
-     *  the body exactly while the hidden header overflows into scroll range. */
-    private fun fitBodyHeight(panelPx: Int): Int = contentHeight(panelPx) + hiddenTopPx()
-
     // ── State rendering ──────────────────────────────────────────────────
 
     private fun setStatus(
@@ -2098,12 +2032,6 @@ class CaptureResultOverlay(
         // back to advertising its tap.
         statusMessage = null
         updateModeControl()
-        // Fresh result with the translation section hidden: park its collapsed
-        // header above the scroll fold once the fit lays out (see hiddenTopPx).
-        // From STABLE state, not hiddenTopPx() — that reads the header's
-        // measured height, which is still 0 on a fresh overlay's first bind
-        // (and showWithResult), and would silently disable the parking.
-        pendingHiddenTopScroll = !isSideBySide && prefs.hideTranslationSection
         b.bindResult(result)   // also paints furigana (bindResult → bindSource)
         // Tap-a-word → definition: tokenize the source so taps resolve to spans.
         // Readings refine on tap via the resolver, so an empty lookupToReading
@@ -2241,45 +2169,54 @@ class CaptureResultOverlay(
      *  smoothly scaling the text alongside. */
     private fun autoSizeAndFit() {
         val b = binder ?: return
-        if (body.height <= 0 || contentRow.width <= 0) return
-        measureCardInset(b)
+        if (body.height <= 0 || sections.width <= 0) return
         val neededHeight = neededPanelHeight(b)
         maxNeededHeightPx = neededHeight.coerceAtLeast(CaptureResultGeometry.minPanelHeight(screenH))
         // Slivered: measure-only — the height is parked and the sections are
         // faded, so growing the panel here would fight the collapse; the
-        // expand paths re-run this. The measurements above must NOT wait for
+        // expand paths re-run this. The measurement above must NOT wait for
         // that: in the overlays-first flow the panel binds and collapses
-        // without ever fitting expanded, and the sliver DRAG consumes the
-        // baselines directly — maxNeededHeightPx as its ceiling (MAX_VALUE
-        // until measured = a panel draggable into empty space) and the card
-        // chrome via reFitText (zeros = text fitted against phantom room).
-        // Measuring here also happens while the cards are still wrap, which
-        // the once-latched measureCardInset needs; the drag's applyCardFill
-        // pins them and would poison a later first measure.
+        // without ever fitting expanded, and the sliver DRAG consumes
+        // maxNeededHeightPx directly as its ceiling (MAX_VALUE until measured
+        // = a panel draggable into empty space).
         if (sliverMode) return
         val target = CaptureResultGeometry.autoPanelHeight(neededHeight, screenH, autoMaxPx)
         animatePanelHeight(target)
     }
 
     /** Panel height that shows all content at max text size. Caller must have
-     *  run [measureCardInset] and confirmed the content is laid out. */
-    private fun neededPanelHeight(b: TranslationSectionBinder): Int {
-        // A section hidden via the eye contributes only its collapsed strip (the
-        // side-by-side column shrinks to a button-wide strip) or nothing (stacked),
-        // NOT its full text height — so hiding it actually shrinks the panel.
-        val naturalContent = if (isSideBySide) {
-            val srcNeed = if (prefs.hideOriginalSection) (sourceColumn?.collapsed?.height ?: 0)
-                else sideChromeSource(b) + b.sourceTextHeightAtMax()
-            val tgtNeed = if (prefs.hideTranslationSection) (targetColumn?.collapsed?.height ?: 0)
-                else sideChromeTarget(b) + b.targetTextHeightAtMax()
-            maxOf(srcNeed, tgtNeed) + dp(SIDE_BY_SIDE_BOTTOM_BUFFER_DP)
-        } else {
-            stackedChrome(b) +
-                (if (prefs.hideOriginalSection) 0 else b.sourceTextHeightAtMax()) +
-                (if (prefs.hideTranslationSection) 0 else b.targetTextHeightAtMax())
-        }
-        return naturalContent + dp(HANDLE_HEIGHT_DP) + topInsetPx + bottomInsetPx - hiddenTopPx()
-    }
+     *  confirmed the content is laid out. Summed from the content's PARTS and
+     *  never read from its laid-out height: the fill ([applyCardFill])
+     *  stretches the cards to the panel, so the layout's own height says how
+     *  tall the panel is, not what the content needs. */
+    private fun neededPanelHeight(b: TranslationSectionBinder): Int =
+        sections.paddingTop + topBlockNeed(b) + sections.paddingBottom +
+            dp(HANDLE_HEIGHT_DP) + topInsetPx + bottomInsetPx
+
+    /** A section's card with its text at max size: the card frame's inset,
+     *  the in-card overhead (padding + the note row, read live) and the
+     *  text. A section hidden by its eye has no card, so hiding it actually
+     *  shrinks the panel. */
+    private fun sourceCardNeed(b: TranslationSectionBinder): Int =
+        if (!b.isOriginalShown) 0
+        else b.sourceCardInset() + b.sourceContentOverhead() + b.sourceTextHeightAtMax()
+
+    private fun targetCardNeed(b: TranslationSectionBinder): Int =
+        if (!b.isTranslationShown) 0
+        else b.targetCardInset() + b.targetContentOverhead() + b.targetTextHeightAtMax()
+
+    /** The height both headers take: one row when paired (a hidden section
+     *  keeps its header cell in it), one row each when stacked. */
+    private fun headersHeight(b: TranslationSectionBinder): Int =
+        if (paired) maxOf(b.sourceHeaderHeight(), b.targetHeaderHeight())
+        else b.sourceHeaderHeight() + b.targetHeaderHeight()
+
+    /** The Original and Translation sections at max text size: their headers
+     *  over the taller card when paired, over both cards when stacked. */
+    private fun topBlockNeed(b: TranslationSectionBinder): Int =
+        headersHeight(b) +
+            if (paired) maxOf(sourceCardNeed(b), targetCardNeed(b))
+            else sourceCardNeed(b) + targetCardNeed(b)
 
     /**
      * The text-size range changed. The sheet deliberately KEEPS its height and
@@ -2291,98 +2228,45 @@ class CaptureResultOverlay(
      */
     private fun refitForFontRange() {
         val b = binder ?: return
-        if (body.height <= 0 || contentRow.width <= 0) return
-        measureCardInset(b)
+        if (body.height <= 0 || sections.width <= 0) return
         maxNeededHeightPx = neededPanelHeight(b)
             .coerceAtLeast(CaptureResultGeometry.minPanelHeight(screenH))
         reFitText()
     }
 
-    /** The card frame's inset is constant — measure it ONCE while the cards are
-     *  still wrap (after [applyCardFill] pins explicit heights, card − content no
-     *  longer reads the inset). The header + content overhead are read live. */
-    /** The card frame's inset is constant — measure it ONCE while the cards are
-     *  still wrap (after [applyCardFill] pins min-heights, card − content no longer
-     *  reads the inset). Same for the stacked non-card chrome. The header + content
-     *  overhead are read live. */
-    private fun measureCardInset(b: TranslationSectionBinder) {
-        if (cardInsetMeasured) return
-        sourceCardInsetPx = b.sourceCardInset()
-        targetCardInsetPx = b.targetCardInset()
-        if (!isSideBySide) {
-            stackedNonCardPx = (contentRow.height - b.sourceCardHeight() - b.targetCardHeight())
-                .coerceAtLeast(0)
-        }
-        cardInsetMeasured = true
-    }
-
-    // Per-section chrome (the non-text height): header + in-card overhead (padding +
-    // the target's note row, read live) + the once-measured card frame inset.
-    private fun sideChromeSource(b: TranslationSectionBinder): Int =
-        b.sourceHeaderHeight() + b.sourceContentOverhead() + sourceCardInsetPx
-    private fun sideChromeTarget(b: TranslationSectionBinder): Int =
-        b.targetHeaderHeight() + b.targetContentOverhead() + targetCardInsetPx
-
-    /** Stacked non-text chrome, summed from STABLE parts (the min-height the fill
-     *  sets would otherwise inflate a `contentRow.height − text` reading). A hidden
-     *  section's card is GONE (its inset + content overhead — padding + the note row —
-     *  no longer render), so those drop out just like its text does; only its header
-     *  survives, kept in [stackedNonCardPx]. Without this the panel reserves a dead
-     *  card-chrome strip for the hidden section and grows as if it were still shown. */
-    private fun stackedChrome(b: TranslationSectionBinder): Int {
-        var chrome = stackedNonCardPx
-        if (!prefs.hideOriginalSection) chrome += sourceCardInsetPx + b.sourceContentOverhead()
-        if (!prefs.hideTranslationSection) chrome += targetCardInsetPx + b.targetContentOverhead()
-        return chrome
-    }
-
-    /** Stacked: split the card area between the two cards in proportion to each
-     *  section's content-at-max, so both fill the panel (no gap below) and each
-     *  text grows/shrinks to fill its card. */
-    private fun stackedCardHeights(b: TranslationSectionBinder, bodyH: Int): Pair<Int, Int> {
-        val available = (bodyH - stackedNonCardPx).coerceAtLeast(0)
-        // A hidden section claims none of the height, so the visible one fills it.
-        val srcRef = if (prefs.hideOriginalSection) 0
-            else sourceCardInsetPx + b.sourceContentOverhead() + b.sourceTextHeightAtMax()
-        val tgtRef = if (prefs.hideTranslationSection) 0
-            else targetCardInsetPx + b.targetContentOverhead() + b.targetTextHeightAtMax()
+    /** The height each of the two cards is given in a body [bodyH] tall, as
+     *  (source, target), so the two sections fill it exactly: no gap below,
+     *  and each text grows/shrinks to fill its card. Paired, each card takes
+     *  the body beneath the header row. Stacked, the two split what the
+     *  headers leave in proportion to each section's content at max size; a
+     *  hidden section claims none of it, so the visible one fills it. */
+    private fun cardHeights(b: TranslationSectionBinder, bodyH: Int): Pair<Int, Int> {
+        val available =
+            (bodyH - sections.paddingTop - sections.paddingBottom - headersHeight(b)).coerceAtLeast(0)
+        if (paired) return Pair(available, available)
+        val srcRef = sourceCardNeed(b)
+        val tgtRef = targetCardNeed(b)
         val total = (srcRef + tgtRef).coerceAtLeast(1)
         return Pair(available * srcRef / total, available * tgtRef / total)
     }
 
-    /** Fill each card to a MINIMUM height so its background is sized by the view,
-     *  not the text — yet a card whose content runs slightly tall grows + scrolls
-     *  instead of clipping. Side-by-side: each fills its column (minus header +
-     *  bottom buffer). Stacked: the two split the height proportionally. */
+    /** Fill each card to a MINIMUM height ([cardHeights]) so its background is
+     *  sized by the view, not the text — yet a card whose content runs slightly
+     *  tall grows + scrolls instead of clipping. */
     private fun applyCardFill(b: TranslationSectionBinder, bodyH: Int) {
-        if (isSideBySide) {
-            val buffer = dp(SIDE_BY_SIDE_BOTTOM_BUFFER_DP)
-            b.setCardMinHeights(
-                (bodyH - b.sourceHeaderHeight() - buffer).coerceAtLeast(0),
-                (bodyH - b.targetHeaderHeight() - buffer).coerceAtLeast(0),
-            )
-        } else {
-            val (src, tgt) = stackedCardHeights(b, bodyH)
-            b.setCardMinHeights(src, tgt)
-        }
+        val (src, tgt) = cardHeights(b, bodyH)
+        b.setCardMinHeights(src, tgt)
     }
 
     /** Fitted (source, target) text sizes for a body height — each text fills its
      *  card's inner height (the card the fill above sized). */
-    private fun fitSizes(b: TranslationSectionBinder, bodyH: Int): Pair<Float, Float> =
-        if (isSideBySide) {
-            val buffer = dp(SIDE_BY_SIDE_BOTTOM_BUFFER_DP)
-            Pair(
-                b.sourceSizeFor((bodyH - sideChromeSource(b) - buffer).coerceAtLeast(1)),
-                b.targetSizeFor((bodyH - sideChromeTarget(b) - buffer).coerceAtLeast(1)),
-            )
-        } else {
-            val (srcCard, tgtCard) = stackedCardHeights(b, bodyH)
-            Pair(
-                b.sourceSizeFor((srcCard - sourceCardInsetPx - b.sourceContentOverhead()).coerceAtLeast(1)),
-                b.targetSizeFor((tgtCard - targetCardInsetPx - b.targetContentOverhead()).coerceAtLeast(1)),
-            )
-        }
+    private fun fitSizes(b: TranslationSectionBinder, bodyH: Int): Pair<Float, Float> {
+        val (srcCard, tgtCard) = cardHeights(b, bodyH)
+        return Pair(
+            b.sourceSizeFor((srcCard - b.sourceCardInset() - b.sourceContentOverhead()).coerceAtLeast(1)),
+            b.targetSizeFor((tgtCard - b.targetCardInset() - b.targetContentOverhead()).coerceAtLeast(1)),
+        )
+    }
 
     /** Height available to the sections for a given panel height: minus the handle
      *  bar AND the status-bar buffer padding at the body's top. The single conversion
@@ -2395,17 +2279,12 @@ class CaptureResultOverlay(
     private fun reFitText() {
         val b = binder ?: return
         // No content laid out yet — the pre-result status phase keeps the
-        // scroll GONE and the cards unmeasured (a grabber drag is live the
-        // whole time OCR runs). Fitting is meaningless there, and measuring
-        // would LATCH all-zero card insets that the real bind's wrap-measure
-        // could then never replace, undercounting every later fit and drag
-        // ceiling. Same laid-out guard autoSizeAndFit uses.
-        if (contentRow.width <= 0) return
-        // Latch the wrap-measure before the fill below can pin the cards —
-        // free once measured; load-bearing only if a drag outraces the
-        // bind's posted fits to be the very first fit machinery to run.
-        measureCardInset(b)
-        val bodyH = fitBodyHeight(panelHeightPx)
+        // scroll GONE and the sections unmeasured (a grabber drag is live the
+        // whole time OCR runs). There is nothing to fit: the headers have no
+        // height yet, so every card height would be computed against a body
+        // with no headers in it. Same laid-out guard autoSizeAndFit uses.
+        if (sections.width <= 0) return
+        val bodyH = contentHeight(panelHeightPx)
         applyCardFill(b, bodyH)
         val (src, tgt) = fitSizes(b, bodyH)
         b.setSizes(src, tgt)
@@ -2419,9 +2298,9 @@ class CaptureResultOverlay(
         heightAnimatorTargetPx = target
         val b = binder ?: return
         val startH = panelHeightPx
-        val (srcStart, tgtStart) = fitSizes(b, fitBodyHeight(startH))
-        val (srcEnd, tgtEnd) = fitSizes(b, fitBodyHeight(target))
-        applyCardFill(b, fitBodyHeight(startH))
+        val (srcStart, tgtStart) = fitSizes(b, contentHeight(startH))
+        val (srcEnd, tgtEnd) = fitSizes(b, contentHeight(target))
+        applyCardFill(b, contentHeight(startH))
         b.setSizes(srcStart, tgtStart)
         if (startH == target) return
         heightAnimator = ValueAnimator.ofFloat(0f, 1f).apply {
@@ -2435,7 +2314,7 @@ class CaptureResultOverlay(
                 val f = anim.animatedValue as Float
                 val h = (startH + (target - startH) * f).toInt()
                 setPanelHeight(h)
-                applyCardFill(b, fitBodyHeight(h))
+                applyCardFill(b, contentHeight(h))
                 b.setSizes(srcStart + (srcEnd - srcStart) * f, tgtStart + (tgtEnd - tgtStart) * f)
             }
             start()
@@ -2932,14 +2811,9 @@ class CaptureResultOverlay(
         override fun expandFromSliver() = userExpandFromSliver()
 
         override fun navActions(): List<NavAction> {
-            val out = ArrayList<NavAction>()
-            binder?.navigableActions()?.let(out::addAll)
-            // The side-by-side collapsed strips' restore eyes — the only
-            // controls a hidden column still shows. (Visibility is the nav's
-            // own rect check; a shown column's strip is GONE.)
-            sourceColumn?.let { out.add(NavAction(it.eye)) }
-            targetColumn?.let { out.add(NavAction(it.eye)) }
-            return out
+            // A hidden section's restore eye is its header's own (the
+            // header stays), so the headers' actions are the whole list.
+            return binder?.navigableActions().orEmpty()
         }
 
         private val handleLoc = IntArray(2)
@@ -3075,166 +2949,33 @@ class CaptureResultOverlay(
 
     // ── Responsive content ───────────────────────────────────────────────
 
-    private fun buildContent(sideBySide: Boolean) {
-        contentRow.removeAllViews()
-        isSideBySide = sideBySide
-        sourceColumn = null
-        targetColumn = null
+    /** Put the sections into their layout and fix its arrangement for this
+     *  sheet's life. The layout arranges them (and a hidden section's header
+     *  cell) from there on; the sheet only tightens what a sheet rising from
+     *  the bottom wants tighter than a page: the side gutters, the headers'
+     *  top padding and the buffer below the cards. */
+    private fun buildContent(paired: Boolean) {
+        sections.removeAllViews()
+        sections.fixedArrangement =
+            if (paired) ResultSectionsLayout.Arrangement.PAIRED
+            else ResultSectionsLayout.Arrangement.STACKED
         val hPad = dp(SECTION_H_PAD_DP)
-        if (sideBySide) {
-            contentRow.orientation = LinearLayout.HORIZONTAL
-            // Bottom padding = the buffer below the filled cards.
-            contentRow.setPadding(hPad, 0, hPad, dp(SIDE_BY_SIDE_BOTTOM_BUFFER_DP))
-            val source = buildColumn(R.layout.section_source, isSource = true)
-            val target = buildColumn(R.layout.section_target, isSource = false)
-            sourceColumn = source
-            targetColumn = target
-            contentRow.addView(source.col, LinearLayout.LayoutParams(0, WRAP, 1f))
-            contentRow.addView(verticalDivider())
-            contentRow.addView(target.col, LinearLayout.LayoutParams(0, WRAP, 1f))
-        } else {
-            contentRow.orientation = LinearLayout.VERTICAL
-            contentRow.setPadding(hPad, 0, hPad, dp(STACKED_BOTTOM_BUFFER_DP))
-            // Translation ABOVE source: the order the in-app results page uses
-            // (fragment_translation_result includes target before source), and
-            // the reading order that fits a sheet rising from the bottom.
-            inflater().inflate(R.layout.section_target, contentRow, true)
-            // One extra dp over the shared pad for the stacked top section.
-            setHeaderTop(contentRow.getChildAt(0), HEADER_TOP_DP + 1)
-            val sourceHeaderIndex = contentRow.childCount
-            inflater().inflate(R.layout.section_source, contentRow, true)
-            // No divider between the stacked sections, and the source header
-            // rides 1dp tighter than the shared pad — the section boundary is
-            // carried by the cards themselves.
-            setHeaderTop(contentRow.getChildAt(sourceHeaderIndex), HEADER_TOP_DP - 1)
-        }
-    }
-
-    /** A side-by-side column: the inflated section ([expanded]) plus a hidden
-     *  collapsed strip, toggled by [applySideBySideCollapse]. */
-    private fun buildColumn(layoutRes: Int, isSource: Boolean): SectionColumn {
-        val col = LinearLayout(ctx).apply { orientation = LinearLayout.VERTICAL }
-        val expanded = LinearLayout(ctx).apply { orientation = LinearLayout.VERTICAL }
-        inflater().inflate(layoutRes, expanded, true)
-        // One extra dp over the shared pad for the side-by-side headers.
-        setHeaderTop(expanded.getChildAt(0), HEADER_TOP_DP + 1)
-        // The card stays wrap here; its height is pinned explicitly each frame by
-        // [applyCardFill] (deterministic — a weight/fillViewport chain doesn't
-        // reliably shrink the card during a drag).
-        val label = VerticalLabel(ctx)
-        val (collapsed, eye) = buildCollapsedStrip(isSource, label)
-        col.addView(expanded, LinearLayout.LayoutParams(MATCH, WRAP))
-        col.addView(collapsed, LinearLayout.LayoutParams(WRAP, WRAP))
-        return SectionColumn(col, expanded, collapsed, label, eye)
-    }
-
-    /** The strip shown when a side-by-side section is hidden: an eye button to
-     *  restore it, with the section's language name rotated vertically beneath.
-     *  Returns the strip and its eye (the controller cursor's target there). */
-    private fun buildCollapsedStrip(isSource: Boolean, label: VerticalLabel): Pair<View, View> {
-        val eye = ImageButton(ctx).apply {
-            setImageResource(R.drawable.ic_visibility_off)
-            val tv = TypedValue()
-            ctx.theme.resolveAttribute(android.R.attr.selectableItemBackgroundBorderless, tv, true)
-            setBackgroundResource(tv.resourceId)
-            setColorFilter(ctx.themeColor(R.attr.ptTextMuted))
-            contentDescription = ctx.getString(
-                if (isSource) R.string.cd_toggle_original_visibility
-                else R.string.cd_toggle_translation_visibility,
-            )
-            setOnClickListener {
-                if (isSource) binder?.toggleOriginalHidden() else binder?.toggleTranslationHidden()
-            }
-        }
-        val strip = LinearLayout(ctx).apply {
-            orientation = LinearLayout.VERTICAL
-            gravity = Gravity.CENTER_HORIZONTAL
-            visibility = View.GONE
-            addView(eye, LinearLayout.LayoutParams(dp(36), dp(32)).apply { topMargin = dp(8) })
-            addView(label, LinearLayout.LayoutParams(WRAP, WRAP).apply { topMargin = dp(8) })
-        }
-        return strip to eye
-    }
-
-    /** Collapse/expand the side-by-side columns to match the section hide prefs:
-     *  a hidden section shrinks to a button-wide strip and the other fills the
-     *  freed width. No-op in stacked mode (the binder's card GONE already reflows
-     *  there). Source is always the left column and target the right, so
-     *  collapsing in place keeps each on its side of the screen. */
-    private fun applySideBySideCollapse() {
-        if (!isSideBySide) return
-        applyColumnState(sourceColumn, prefs.hideOriginalSection, binder?.sourceSectionLabel())
-        applyColumnState(targetColumn, prefs.hideTranslationSection, binder?.targetSectionLabel())
-        // The re-fit to the new column widths is driven by the caller's
-        // autoSizeAndFit (on a section toggle) or the initial bind — not here, so an
-        // early collapse (before a result) can't pin card min-heights and poison the
-        // one-shot card-inset measurement.
-    }
-
-    private fun applyColumnState(column: SectionColumn?, hidden: Boolean, label: String?) {
-        val c = column ?: return
-        c.expanded.visibility = if (hidden) View.GONE else View.VISIBLE
-        c.collapsed.visibility = if (hidden) View.VISIBLE else View.GONE
-        if (hidden && label != null) c.label.label = label
-        (c.col.layoutParams as? LinearLayout.LayoutParams)?.let { lp ->
-            if (hidden) {
-                lp.width = LinearLayout.LayoutParams.WRAP_CONTENT
-                lp.weight = 0f
-            } else {
-                lp.width = 0
-                lp.weight = 1f
-            }
-            c.col.layoutParams = lp
-        }
-    }
-
-    private class SectionColumn(
-        val col: LinearLayout,
-        val expanded: View,
-        val collapsed: View,
-        val label: VerticalLabel,
-        /** The collapsed strip's restore button — a controller nav target. */
-        val eye: View,
-    )
-
-    /** Draws [label] rotated 90° (reads bottom-to-top) and measures with swapped
-     *  dimensions, so a hidden section's name fits a button-wide strip — a plain
-     *  rotated TextView would still claim its full horizontal width in layout. */
-    private inner class VerticalLabel(c: Context) : View(c) {
-        // Match the section header (style Text.PT.GroupHeader): 11sp,
-        // sans-serif-medium, all-caps, 0.12 letter spacing, ptTextMuted.
-        private val textPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-            color = ctx.themeColor(R.attr.ptTextMuted)
-            textSize = TypedValue.applyDimension(
-                TypedValue.COMPLEX_UNIT_SP, 11f, ctx.resources.displayMetrics,
-            )
-            typeface = Typeface.create("sans-serif-medium", Typeface.NORMAL)
-            letterSpacing = 0.12f
-        }
-        var label: String = ""
-            set(value) { field = value.uppercase(); requestLayout(); invalidate() }
-        init { setWillNotDraw(false) }
-
-        override fun onMeasure(widthMeasureSpec: Int, heightMeasureSpec: Int) {
-            val fm = textPaint.fontMetrics
-            val textH = fm.descent - fm.ascent
-            val textW = textPaint.measureText(label)
-            setMeasuredDimension(
-                View.resolveSize(kotlin.math.ceil(textH.toDouble()).toInt() + paddingLeft + paddingRight, widthMeasureSpec),
-                View.resolveSize(kotlin.math.ceil(textW.toDouble()).toInt() + paddingTop + paddingBottom, heightMeasureSpec),
-            )
-        }
-
-        override fun onDraw(canvas: Canvas) {
-            val fm = textPaint.fontMetrics
-            val textW = textPaint.measureText(label)
-            canvas.save()
-            canvas.translate(0f, height.toFloat())
-            canvas.rotate(-90f)
-            val baseline = width / 2f - (fm.ascent + fm.descent) / 2f
-            canvas.drawText(label, (height - textW) / 2f, baseline, textPaint)
-            canvas.restore()
-        }
+        // Bottom padding = the buffer below the filled cards.
+        sections.setPadding(
+            hPad, 0, hPad,
+            dp(if (paired) SIDE_BY_SIDE_BOTTOM_BUFFER_DP else STACKED_BOTTOM_BUFFER_DP),
+        )
+        inflater().inflate(R.layout.section_target, sections, true)
+        inflater().inflate(R.layout.section_source, sections, true)
+        // One extra dp over the shared pad for a header in the top row. When
+        // stacked the source header is the second row and rides 1dp tighter
+        // than the shared pad: there is no divider between the stacked
+        // sections, the boundary is carried by the cards themselves.
+        setHeaderTop(sections.findViewById(R.id.targetHeaderRow), HEADER_TOP_DP + 1)
+        setHeaderTop(
+            sections.findViewById(R.id.sourceHeaderRow),
+            if (paired) HEADER_TOP_DP + 1 else HEADER_TOP_DP - 1,
+        )
     }
 
     /** Set a section [header]'s top padding (the shared layout uses pt_group_gap;
@@ -3242,16 +2983,6 @@ class CaptureResultOverlay(
     private fun setHeaderTop(header: View?, topDp: Int) {
         header ?: return
         header.setPadding(header.paddingLeft, dp(topDp), header.paddingRight, header.paddingBottom)
-    }
-
-    private fun verticalDivider(): View = View(ctx).apply {
-        setBackgroundColor(ctx.themeColor(R.attr.ptDivider))
-        layoutParams = LinearLayout.LayoutParams(dp(1), MATCH).apply {
-            marginStart = dp(8)
-            marginEnd = dp(8)
-            topMargin = dp(8)
-            bottomMargin = dp(8)
-        }
     }
 
     private fun inflater() = android.view.LayoutInflater.from(ctx)
@@ -3766,12 +3497,15 @@ class CaptureResultOverlay(
         }
     }
 
-    /** The visible bottom sheet. When the content fits (no inner scroll), a
-     *  long vertical down-drag on the body dismisses (swipe-to-dismiss). When
-     *  the content is scrollable it scrolls instead, and dismissal is a tap
-     *  outside — the sheet rule that keeps scroll vs dismiss unambiguous. Drags
-     *  starting on the grabber strip are left to the resize listener, which
-     *  only ever resizes: the sheet bottoms out at the sliver, never off. */
+    /** The visible bottom sheet. While its content is at the top (nothing
+     *  scrolled off above), a long vertical down-drag on the body dismisses
+     *  (swipe-to-dismiss): at the top a downward drag has nothing to scroll,
+     *  so it cannot be mistaken for one. Scrolled anywhere else the drag
+     *  scrolls, and an upward drag always does. (The gate was once "the
+     *  content does not scroll at all", but the sections below the fold make
+     *  every sheet scroll.) Drags starting on the grabber strip are left to
+     *  the resize listener, which only ever resizes: the sheet bottoms out
+     *  at the sliver, never off. */
     private inner class BottomSheetPanel(c: Context) : LinearLayout(c) {
         private var downX = 0f
         private var downY = 0f
@@ -3779,8 +3513,7 @@ class CaptureResultOverlay(
         private var dragging = false
         private var dragTracker: VelocityTracker? = null
 
-        private fun contentScrollable() =
-            scroll.canScrollVertically(1) || scroll.canScrollVertically(-1)
+        private fun contentAtTop() = !scroll.canScrollVertically(-1)
 
         private fun inHandle(y: Float) = y <= dp(HANDLE_HEIGHT_DP)
 
@@ -3791,10 +3524,11 @@ class CaptureResultOverlay(
                 }
                 MotionEvent.ACTION_MOVE -> {
                     if (dragging) return true
-                    if (inHandle(downY) || contentScrollable()) return false
+                    if (inHandle(downY) || !contentAtTop()) return false
                     val dy = ev.y - downY
                     val dx = ev.x - downX
-                    if (abs(dy) > touchSlop && abs(dy) > abs(dx)) {
+                    // Downward only: an upward drag is the content's scroll.
+                    if (dy > touchSlop && dy > abs(dx)) {
                         dragging = true
                         dragTracker = VelocityTracker.obtain().also { it.addMovement(ev) }
                         return true

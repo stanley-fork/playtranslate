@@ -49,8 +49,11 @@ class CaptureResultLayoutReserveTest {
         // Density 1 here: 1280 px is 1280 dp, two 640 dp sections.
         overlay.show(1280, 720)
         shadowOf(Looper.getMainLooper()).idle()
-        return CaptureResultOverlay::class.java.getDeclaredField("isSideBySide")
-            .apply { isAccessible = true }.getBoolean(overlay)
+        // The decision is held by the sheet's sections layout, which the
+        // sheet fixes once at show().
+        val sections = CaptureResultOverlay::class.java.getDeclaredField("sections")
+            .apply { isAccessible = true }.get(overlay) as ResultSectionsLayout
+        return sections.fixedArrangement == ResultSectionsLayout.Arrangement.PAIRED
     }
 
     @Test fun `a wide screen with nothing reserved gets two columns`() {

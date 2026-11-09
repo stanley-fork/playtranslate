@@ -479,10 +479,6 @@ class TranslationSectionBinder(
         onSectionVisibilityChanged?.invoke()
     }
 
-    /** Localized section header names — used for the panel's collapsed strips. */
-    fun sourceSectionLabel(): String = sourceLangLocalizedDisplayName()
-    fun targetSectionLabel(): String = targetLangDisplayName()
-
     /** Bind the target text + note for a Ready result. A blank translation means a
      *  re-translate is in flight (edit commit): show the "Translating…"
      *  placeholder and suppress the now-stale backend label. */
@@ -660,8 +656,10 @@ class TranslationSectionBinder(
     //    padding + (for the target) the "Translated by" note row. Measured LIVE
     //    (the holder wraps its content even when the card is pinned to a fill
     //    height), so the note is always counted even if it laid out a frame late.
-    //  • cardInset — the card frame's own inset (rounded-corner overlap + stroke).
-    //    Constant; the panel measures it ONCE while the card is still wrap.
+    //  • cardInset — the card frame's own inset around its content holder, which
+    //    is the card's padding. Read as that, not as card height minus content
+    //    height: a stretched card (the pair's shared height, the panel's fill) is
+    //    taller than its content by more than its frame.
     fun sourceContentOverhead(): Int {
         val live = originalContent.height - tvOriginal.height
         // Same pre-measure guard as [targetContentOverhead]: the "Scanned by…" row is
@@ -715,12 +713,13 @@ class TranslationSectionBinder(
         }
         return live
     }
-    fun sourceCardInset(): Int = (cardOriginal.height - originalContent.height).coerceAtLeast(0)
-    fun targetCardInset(): Int = (cardTranslation.height - translationContent.height).coerceAtLeast(0)
-    // Whole-card heights — the panel reads these ONCE while the cards still wrap to
-    // derive the stacked non-card chrome (headers + divider + padding).
-    fun sourceCardHeight(): Int = cardOriginal.height
-    fun targetCardHeight(): Int = cardTranslation.height
+    fun sourceCardInset(): Int = cardOriginal.paddingTop + cardOriginal.paddingBottom
+    fun targetCardInset(): Int = cardTranslation.paddingTop + cardTranslation.paddingBottom
+
+    /** Whether each section's card is on screen, which is what "shown"
+     *  means everywhere (a hidden section is its header alone). */
+    val isOriginalShown: Boolean get() = cardOriginal.visibility != View.GONE
+    val isTranslationShown: Boolean get() = cardTranslation.visibility != View.GONE
 
     /** Set each section card's MINIMUM height, so its background fills the column
      *  (sized by the view, not the text). The card still wraps content TALLER than
