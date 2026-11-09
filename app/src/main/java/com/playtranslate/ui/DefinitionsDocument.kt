@@ -5,10 +5,12 @@ import java.util.Locale
 import kotlin.math.roundToInt
 
 /**
- * Assembles the styled-definitions WebView document: a persistent SHELL
- * page loaded once per [YomitanDefinitionsView] (theme tokens, base
- * stylesheet, the swap/scoping script, CSP) and per-lookup CONTENT swapped
- * into it via `ptSwap`.
+ * The definitions page: the SHELL every definitions document loads once
+ * ([documentShellHtml]: the base stylesheet, the row stylesheet, the
+ * scoping script, the page's protocol, the CSP), the theme it is given at
+ * bind ([themeJs]), and the markup of a word's definitions
+ * ([contentHtml], the one sense loop every row of every surface goes
+ * through; the rows' own chrome is [DefRowHtml]'s).
  *
  * Dictionary CSS scoping happens in the page, with the engine's own
  * parser: `ptApplyDictCss` wraps a dictionary's styles.css in
@@ -72,141 +74,12 @@ internal object DefinitionsDocument {
     fun cssAlpha(argb: Int, alpha: Float): String =
         cssHex(((alpha.coerceIn(0f, 1f) * 255f).roundToInt() shl 24) or (argb and 0xFFFFFF))
 
-    /** ARGB Int → CSS color. Alpha-aware: opaque renders #RRGGBB, else
-     *  rgba(). */
-    fun cssHex(argb: Int): String {
-        val a = argb ushr 24
-        val r = (argb shr 16) and 0xFF
-        val g = (argb shr 8) and 0xFF
-        val b = argb and 0xFF
-        // Locale.ROOT is load-bearing, not hygiene: the default-locale
-        // formatter localizes BOTH conversions here — '%.3f' takes a comma
-        // decimal separator (de, fr, ru, pt) and '%d' can take non-Latin
-        // digits (ar). Either turns the value into something the CSS parser
-        // rejects, the declaration drops, and background falls back to
-        // transparent — the same no-fill failure as the color-mix trap
-        // above, reached by a different door and only on some devices.
-        return if (a == 0xFF) {
-            String.format(Locale.ROOT, "#%02X%02X%02X", r, g, b)
-        } else {
-            String.format(Locale.ROOT, "rgba(%d,%d,%d,%.3f)", r, g, b, a / 255f)
-        }
-    }
-
-    // ── Shell ───────────────────────────────────────────────────────────
-
-    fun shellHtml(tokens: Tokens): String {
-        val fg = cssHex(tokens.text)
-        val panel = cssHex(tokens.panel)
-        return """<!doctype html>
-<html><head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; img-src ${YomitanContentHtml.MEDIA_ORIGIN}; script-src 'unsafe-inline'">
-<style>
-:root {
-  --pt-fg: $fg;
-  --pt-secondary: ${cssHex(tokens.textMuted)};
-  --pt-hint: ${cssHex(tokens.textHint)};
-  --pt-accent: ${cssHex(tokens.accent)};
-  --pt-panel: $panel;
-  /* Yomitan theme contract — dictionary CSS adapts to dark mode through
-     these (Jitendex: var(--text-color, var(--fg, #333)) etc.). */
-  --text-color: $fg;
-  --fg: $fg;
-  --background-color: $panel;
-  --canvas: $panel;
-}
-* { box-sizing: border-box; }
-html, body { margin: 0; padding: 0; background: transparent; }
-/* flow-root: children's margins stay inside #root's rect, so the height
-   report can't crop the last block's bottom margin. */
-#root { display: flow-root; }
-body {
-  color: var(--pt-fg);
-  font-family: sans-serif;
-  font-size: ${tokens.baseFontSizePx}px;
-  line-height: 1.4;
-  word-wrap: break-word;
-  -webkit-tap-highlight-color: transparent;
-}
-.pos-h {
-  font-size: .72em; font-weight: 600; letter-spacing: .07em;
-  text-transform: uppercase; color: var(--pt-secondary);
-  margin: .65em 0 .2em;
-}
-.pos-h:first-child { margin-top: .1em; }
-.label-warn { font-size: .8em; color: var(--pt-secondary); margin: .1em 0 .3em; }
-/* The conjugation line, sized like the label. The right margin is the native
-   line's 17dp, clearing the open chevron the lens floats over the page's
-   top-right corner (page px track dp: the root size is the flat body's sp). */
-.inflection { font-size: .8em; color: var(--pt-secondary); margin: 0 17px .3em 0; }
-.meta-row {
-  display: flex; flex-wrap: wrap; gap: .3em; align-items: center;
-  margin: .1em 0 .45em;
-}
-.meta-chip {
-  font-size: .7em; color: var(--pt-secondary);
-  /* Concrete rgba, resolved Android-side — see [cssAlpha]. NEVER color-mix
-     with a var() operand: the fallback declaration above it can't save an
-     engine that lacks the function, and the chip loses its fill entirely. */
-  background: ${cssAlpha(tokens.text, 0.10f)};
-  border-radius: 4px; padding: .18em .55em;
-}
-.meta-chip.common {
-  color: var(--pt-accent);
-  background: ${cssAlpha(tokens.accent, 0.16f)};
-  border-radius: 1em;
-}
-.meta-chip.stars { background: none; padding-left: 0; padding-right: 0; }
-/* Icon-bearing chips only: a text-only chip stays a plain inline box so a
-   long frequency source name can still wrap inside it. */
-.meta-chip.with-icon { display: inline-flex; align-items: center; gap: .35em; }
-/* 1em square, matching the native pill's icon-sized-to-its-text rule
-   ([AnkiDeckBadge.buildPill] bounds the drawable at the text size). */
-.chip-icon { width: 1em; height: 1em; flex: none; }
-.def-row { display: flex; gap: .4em; margin: .18em 0; }
-.def-num { color: var(--pt-hint); font-size: .85em; padding-top: .12em; }
-.def-text { flex: 1; min-width: 0; }
-.dict-group { margin: 0 0 .4em; }
-.gloss-item + .gloss-item { margin-top: .4em; }
-/* Consecutive structured senses were spaced by the rule above while their
-   items were direct siblings in the section; each sense's items now live in
-   their own dictionary scope, so the scopes carry that gap. */
-.gloss-scope + .gloss-scope { margin-top: .4em; }
-/* The Anki word sheet's imported-row curation only ([ImportedCuration]); no
-   other surface emits these classes. The ✕ is a plain box in the row's flex
-   line: no flex of its own (unverified on the API 30 WebView) and no negative
-   margin, since a hit box reaching past its own row could remove a neighbour. */
-.imp-sense { display: flex; align-items: flex-start; }
-.imp-sense + .imp-sense { margin-top: .4em; }   /* replaces the cross-sense .gloss-scope + .gloss-scope gap */
-.imp-body { flex: 1; min-width: 0; }
-/* Under curation the sibling rule above owns the spacing; a flat row's own
-   margins would no longer collapse (its body is a flex item) and would
-   double the gap, so they go. */
-.imp-body > .def-row { margin: 0; }
-.imp-sense > .imp-x {
-  flex: none; width: 40px; min-height: 40px; margin: 0 0 0 .25em; padding: .35em 0 0;
-  border: 0; background: none; font: inherit; font-size: .875em; text-align: center;
-  color: var(--pt-secondary);
-}
-.gloss-link { color: var(--pt-accent); text-decoration: underline; }
-.gloss-image { max-width: 100%; height: auto; border-radius: 4px; vertical-align: text-bottom; }
-.gloss-sc-table-container { overflow-x: auto; max-width: 100%; }
-.gloss-sc-table { border-collapse: collapse; }
-.gloss-sc-th, .gloss-sc-td {
-  border: 1px solid var(--pt-hint); padding: .25em .45em; vertical-align: top;
-}
-.gloss-sc-ul, .gloss-sc-ol { margin: .25em 0; padding-left: 1.5em; }
-.gloss-sc-li { margin: .1em 0; }
-.gloss-sc-details { margin: .2em 0; }
-.gloss-sc-summary { cursor: pointer; color: var(--pt-secondary); }
-ruby > rt { font-size: .5em; }
-</style>
-<script>
-(function () {
-  'use strict';
-  var appliedDicts = {};
+    /**
+     * The page-side dictionary CSS scoping (`ptApplyDictCss`): the nesting
+     * probe, the wrapper path and the legacy per-selector path. No template
+     * tokens: plain script text.
+     */
+    private const val SCOPING_JS = """var appliedDicts = {};
 
   // CSS nesting = Chromium 120+. NOT theoretical: AOSP-bundled WebViews in
   // the field sit far below that (AYN Thor ships Chromium 109), and on
@@ -330,80 +203,576 @@ ruby > rt { font-size: .5em; }
       console.log('ptCss[' + dictId + '] FAILED: ' + e);
     }
   };
+"""
 
-  // Render generation: stamped by each ptSwap and echoed with every
-  // height report, so the Kotlin side can drop reports from a swap that
-  // has since been superseded. Without it, a report scheduled two frames
-  // after swap N can arrive after swap N+1 was issued and be mistaken
-  // for proof that N+1 painted — revealing N's content under N+1's word.
-  var gen = 0;
+    /**
+     * The stylesheet of the content itself: the headers, the meta row, the
+     * sense rows, the curation wrapper and the structured-content classes.
+     * Shared by both shells. [chipFill] and [commonFill] are CSS colour
+     * values: concrete rgba from the old shell (see [cssAlpha] for why a
+     * computed wash is never left to the engine), variables holding the
+     * same from the document shell, which takes its theme at bind.
+     */
+    private fun contentCss(chipFill: String, commonFill: String): String = """.pos-h {
+  font-size: .72em; font-weight: 600; letter-spacing: .07em;
+  text-transform: uppercase; color: var(--pt-secondary);
+  margin: .65em 0 .2em;
+}
+.pos-h:first-child { margin-top: .1em; }
+.label-warn { font-size: .8em; color: var(--pt-secondary); margin: .1em 0 .3em; }
+/* The conjugation line, sized like the label. The right margin is the native
+   line's 17dp, clearing the open chevron the lens floats over the page's
+   top-right corner (page px track dp: the root size is the flat body's sp). */
+.inflection { font-size: .8em; color: var(--pt-secondary); margin: 0 17px .3em 0; }
+.meta-row {
+  display: flex; flex-wrap: wrap; align-items: center;
+  margin: .1em 0 .15em;
+}
+/* Spacing by margins, never flex `gap`: that needs Chromium 84, and an
+   Android 10 WebView that was never updated is older. */
+.meta-row > * { margin: 0 .3em .3em 0; }
+.meta-chip {
+  font-size: .7em; color: var(--pt-secondary);
+  /* Concrete rgba, resolved Android-side — see [cssAlpha]. NEVER color-mix
+     with a var() operand: the fallback declaration above it can't save an
+     engine that lacks the function, and the chip loses its fill entirely. */
+  background: $chipFill;
+  border-radius: 4px; padding: .18em .55em;
+}
+.meta-chip.common {
+  color: var(--pt-accent);
+  background: $commonFill;
+  border-radius: 1em;
+}
+.meta-chip.stars { background: none; padding-left: 0; padding-right: 0; }
+/* Icon-bearing chips only: a text-only chip stays a plain inline box so a
+   long frequency source name can still wrap inside it. */
+.meta-chip.with-icon { display: inline-flex; align-items: center; }
+/* 1em square, matching the native pill's icon-sized-to-its-text rule
+   ([AnkiDeckBadge.buildPill] bounds the drawable at the text size). */
+.chip-icon { width: 1em; height: 1em; flex: none; margin-right: .35em; }
+.def-row { display: flex; margin: .18em 0; }
+.def-num { color: var(--pt-hint); font-size: .85em; padding-top: .12em; margin-right: .4em; }
+.def-text { flex: 1; min-width: 0; }
+.def-misc { font-size: .76em; font-style: italic; color: var(--pt-hint); margin-top: .12em; }
+.dict-group { margin: 0 0 .4em; }
+.gloss-item + .gloss-item { margin-top: .4em; }
+/* Consecutive structured senses were spaced by the rule above while their
+   items were direct siblings in the section; each sense's items now live in
+   their own dictionary scope, so the scopes carry that gap. */
+.gloss-scope + .gloss-scope { margin-top: .4em; }
+/* The Anki word sheet's imported-row curation only ([ImportedCuration]); no
+   other surface emits these classes. The ✕ is a plain box in the row's flex
+   line: no flex of its own (unverified on the API 30 WebView) and no negative
+   margin, since a hit box reaching past its own row could remove a neighbour. */
+.imp-sense { display: flex; align-items: flex-start; }
+.imp-sense + .imp-sense { margin-top: .4em; }   /* replaces the cross-sense .gloss-scope + .gloss-scope gap */
+.imp-body { flex: 1; min-width: 0; }
+/* Under curation the sibling rule above owns the spacing; a flat row's own
+   margins would no longer collapse (its body is a flex item) and would
+   double the gap, so they go. */
+.imp-body > .def-row { margin: 0; }
+.imp-sense > .imp-x {
+  flex: none; width: 40px; min-height: 40px; margin: 0 0 0 .25em; padding: .35em 0 0;
+  border: 0; background: none; font: inherit; font-size: .875em; text-align: center;
+  color: var(--pt-secondary);
+}
+.gloss-link { color: var(--pt-accent); text-decoration: underline; }
+.gloss-image { max-width: 100%; height: auto; border-radius: 4px; vertical-align: text-bottom; }
+.gloss-sc-table-container { overflow-x: auto; max-width: 100%; }
+.gloss-sc-table { border-collapse: collapse; }
+.gloss-sc-th, .gloss-sc-td {
+  border: 1px solid var(--pt-hint); padding: .25em .45em; vertical-align: top;
+}
+.gloss-sc-ul, .gloss-sc-ol { margin: .25em 0; padding-left: 1.5em; }
+.gloss-sc-li { margin: .1em 0; }
+.gloss-sc-details { margin: .2em 0; }
+.gloss-sc-summary { cursor: pointer; color: var(--pt-secondary); }
+ruby > rt { font-size: .5em; }
+"""
 
-  function reportHeight() {
-    // Content-intrinsic metric: the root DIV's rect. NEVER the document
-    // element's scroll height — that is max(content, VIEWPORT), so once
-    // the host sizes the view from one oversized report, every later
-    // report echoes at least that viewport back: a ratchet that can't
-    // shrink (the shipped huge-blank-space bug). The root rect tracks the
-    // content both ways.
-    var rootEl = document.getElementById('root');
-    if (!rootEl) return;
-    // Not laid out yet (zero-width viewport): content would wrap at every
-    // character and report an enormous bogus height. Skip — the resize
-    // listener re-reports the moment the real width arrives.
-    if (document.documentElement.clientWidth < 1) return;
-    if (window.PTBridge && window.PTBridge.onHeight) {
-      window.PTBridge.onHeight(Math.ceil(rootEl.getBoundingClientRect().height), gen);
+    /** ARGB Int → CSS color. Alpha-aware: opaque renders #RRGGBB, else
+     *  rgba(). */
+    fun cssHex(argb: Int): String {
+        val a = argb ushr 24
+        val r = (argb shr 16) and 0xFF
+        val g = (argb shr 8) and 0xFF
+        val b = argb and 0xFF
+        // Locale.ROOT is load-bearing, not hygiene: the default-locale
+        // formatter localizes BOTH conversions here — '%.3f' takes a comma
+        // decimal separator (de, fr, ru, pt) and '%d' can take non-Latin
+        // digits (ar). Either turns the value into something the CSS parser
+        // rejects, the declaration drops, and background falls back to
+        // transparent — the same no-fill failure as the color-mix trap
+        // above, reached by a different door and only on some devices.
+        return if (a == 0xFF) {
+            String.format(Locale.ROOT, "#%02X%02X%02X", r, g, b)
+        } else {
+            String.format(Locale.ROOT, "rgba(%d,%d,%d,%.3f)", r, g, b, a / 255f)
+        }
     }
-  }
 
-  // Semantic tap routing for hosts that overlay their own tap-anywhere
-  // action on this view (the lens's open-detail tap): the page is the one
-  // authority on what a tap actually hit. A click on an external anchor
-  // navigates (the Kotlin client hands it to the browser); any other click
-  // reports up as a plain body tap and the host acts on that instead of
-  // second-guessing the WebView from outside.
-  // An imported row's ✕ (the Anki word sheet's curation) is consumed first:
-  // it reports the row's flat index and is never a navigation or a body tap.
-  document.addEventListener('click', function (e) {
-    var t = e.target;
-    var x = t && t.closest ? t.closest('.imp-x') : null;
-    if (x) {
-      var row = x.closest('.imp-sense');
-      var i = row ? parseInt(row.getAttribute('data-imp'), 10) : -1;
-      if (i >= 0 && window.PTBridge && window.PTBridge.onRemoveImported) window.PTBridge.onRemoveImported(i);
-      return;
+    // ── The document shell ──────────────────────────────────────────────
+
+    /**
+     * A document's theme: the shell's [Tokens] plus the two colours only
+     * rows use, the hairline between them ([divider]) and the sunk band of
+     * a hidden word's stub ([band]). Resolved by the host from its themed
+     * context, like [Tokens].
+     */
+    class DocTheme(
+        val tokens: Tokens,
+        val divider: Int,
+        val band: Int,
+        /** The colour of an action row's text ([DefRow.More]); the accent
+         *  where the surface has no link colour of its own. */
+        val link: Int = tokens.accent,
+        /** The colour of a control that is switched off (an audio row's
+         *  ring, pill and title, its switch's outline). */
+        val outline: Int = tokens.textHint,
+        /** The fill behind a row that is the card's target. */
+        val wash: Int = 0,
+    )
+
+    /**
+     * The `ptTheme` call that gives a loaded shell [theme]. Every colour is
+     * a concrete value computed here, the washes included (see [cssAlpha]):
+     * the stylesheet only ever reads a variable that already holds a colour
+     * the engine can use as is.
+     */
+    fun themeJs(theme: DocTheme, rtl: Boolean): String {
+        val t = theme.tokens
+        val fg = cssHex(t.text)
+        val panel = cssHex(t.panel)
+        val vars = listOf(
+            "--pt-fg" to fg,
+            "--pt-secondary" to cssHex(t.textMuted),
+            "--pt-hint" to cssHex(t.textHint),
+            "--pt-accent" to cssHex(t.accent),
+            "--pt-panel" to panel,
+            "--pt-divider" to cssHex(theme.divider),
+            "--pt-band" to cssHex(theme.band),
+            "--pt-outline" to cssHex(theme.outline),
+            "--pt-wash" to cssHex(theme.wash),
+            "--pt-press" to cssAlpha(t.text, 0.08f),
+            "--pt-cursor" to cssAlpha(t.accent, 0.10f),
+            "--pt-rail" to cssAlpha(t.accent, 0.35f),
+            "--pt-link" to cssHex(theme.link),
+            "--pt-chip" to cssAlpha(t.text, 0.10f),
+            "--pt-common" to cssAlpha(t.accent, 0.16f),
+            // Yomitan's theme contract: dictionary CSS adapts to dark mode
+            // through these.
+            "--text-color" to fg,
+            "--fg" to fg,
+            "--background-color" to panel,
+            "--canvas" to panel,
+        ).joinToString(",") { (k, v) -> "\"$k\":\"$v\"" }
+        return "ptTheme({vars:{$vars},dir:\"${if (rtl) "rtl" else "ltr"}\",fontPx:${t.baseFontSizePx}})"
     }
-    var a = t && t.closest ? t.closest('a[href]') : null;
-    if (a) return;
-    if (window.PTBridge && window.PTBridge.onBodyTap) window.PTBridge.onBodyTap();
-  });
 
-  window.ptSwap = function (html, g) {
-    gen = g || 0;
-    document.getElementById('root').innerHTML = html;
-    // Synchronous first report: getBoundingClientRect forces layout, and
-    // this path works even while the view isn't composited — rAF doesn't
-    // tick for a non-drawn WebView, which is exactly the state the hosts
-    // keep this view in until the first height arrives.
-    reportHeight();
-    // Two-frame refinement: images with declared aspect-ratios have taken
-    // their boxes by then.
-    requestAnimationFrame(function () { requestAnimationFrame(reportHeight); });
-  };
-
-  // Direct, not via rAF: this is the recovery path that fires when the
-  // hidden view first gets its real width.
-  window.addEventListener('resize', reportHeight);
+    /**
+     * The shell of a [DefinitionDocumentView]: one page that holds a whole
+     * surface's rows ([DefRowHtml]) and is told its theme at bind
+     * (`ptTheme`), so a loaded shell fits any surface and can be kept ready.
+     *
+     * To the page: `ptTheme`, `ptApplyDictCss`, `ptSet(html, gen)` (all the
+     * rows), `ptAppend(html, gen)` (more rows at the end), `ptReplace(id,
+     * html, gen)` (one element), `ptCursor(rowId, act)` (the controller's
+     * highlight). From the page: `PTBridge.onLayout(gen, height, targets)`
+     * after every change, `targets` a flat JSON array of rowId, act, left,
+     * top, width, height (CSS px from the root's corner) for every row and
+     * every tappable element; and `PTBridge.onAction(rowId, act)` for a tap.
+     *
+     * The page is the authority on what a tap hit, as in the first shell: a
+     * link navigates (the client hands it to the browser) unless its row is
+     * `data-inert`, and then the tap is the row's. The height is the root's
+     * own rect, never the document's scroll height, and nothing is reported
+     * while the viewport has no width (both rules are the first shell's,
+     * for the same reasons).
+     */
+    fun documentShellHtml(): String = """<!doctype html>
+<html><head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; img-src ${YomitanContentHtml.MEDIA_ORIGIN}; script-src 'unsafe-inline'">
+<style>
+* { box-sizing: border-box; }
+html, body { margin: 0; padding: 0; background: transparent; }
+#root { display: flow-root; }
+body {
+  color: var(--pt-fg);
+  font-family: sans-serif;
+  line-height: 1.4;
+  word-wrap: break-word;
+  -webkit-tap-highlight-color: transparent;
+}
+${contentCss("var(--pt-chip)", "var(--pt-common)")}
+${PitchAccentHtml.PITCH_CSS}
+$ROW_CSS
+</style>
+<script>
+(function () {
+  'use strict';
+  $SCOPING_JS
+$DOCUMENT_JS
 })();
 </script>
 </head><body><div id="root"></div></body></html>"""
+
+    /**
+     * The rows' own chrome. Lengths that the native rows gave in dp are px
+     * here (the viewport is device-width at scale 1, so a CSS px is a dp);
+     * text sizes are em of the body size, which is the surface's scaled
+     * gloss size. Spacing is by margins, never flex `gap` (see [contentCss]),
+     * and the physical left/right pairs are mirrored for right-to-left by
+     * hand, since the logical properties need a newer engine than the floor.
+     */
+    private const val ROW_CSS = """
+.row { position: relative; }
+/* The hairline between rows, inset from the start like the native divider. */
+.row + .row::before {
+  content: ''; position: absolute; top: 0; left: 16px; right: 0; height: 1px;
+  background: var(--pt-divider);
+}
+[dir=rtl] .row + .row::before { left: 0; right: 16px; }
+.cell { padding: 14px 4px 14px 16px; }
+[dir=rtl] .cell { padding: 14px 16px 14px 4px; }
+.cell[data-act]:active, .row.cur { background: var(--pt-press); }
+.cell.stub { padding-top: 8px; padding-bottom: 8px; background: var(--pt-band); }
+.head { display: flex; align-items: center; }
+.title { flex: 1; min-width: 0; display: flex; flex-wrap: wrap; align-items: baseline; }
+.w { font-size: 1.636em; font-weight: 700; letter-spacing: -.02em; margin-right: 10px; }
+[dir=rtl] .w { margin-right: 0; margin-left: 10px; }
+.stub .w { font-size: 1.064em; color: var(--pt-secondary); }
+.rd { font-size: .909em; color: var(--pt-secondary); }
+.rd.b { color: var(--pt-fg); font-weight: 700; }
+.rds { margin: 2px 12px 0 0; }
+.rds .rd { display: inline-block; margin: 0 12px 6px 0; }
+[dir=rtl] .rds { margin: 2px 0 0 12px; }
+[dir=rtl] .rds .rd { margin: 0 0 6px 12px; }
+.act {
+  flex: none; width: 36px; height: 40px; margin: 0 0 0 16px; padding: 0;
+  border: 0; border-radius: 50%; background: none; color: var(--pt-secondary);
+  display: flex; align-items: center; justify-content: center;
+}
+[dir=rtl] .act { margin: 0 16px 0 0; }
+.act.speak, [dir=rtl] .act.speak { margin: 0; }
+.act.chev { color: var(--pt-hint); }
+button.act:active, .act.cur { background: var(--pt-press); }
+.ic { width: 22px; height: 22px; }
+.spin {
+  width: 20px; height: 20px; border-radius: 50%;
+  border: 2px solid var(--pt-accent); border-right-color: transparent;
+  animation: ptspin .8s linear infinite;
+}
+@keyframes ptspin { to { transform: rotate(360deg); } }
+.infl { font-size: .788em; color: var(--pt-secondary); margin: 2px 12px 0 0; }
+.body { margin: .606em 12px 0 0; }
+[dir=rtl] .infl { margin: 2px 0 0 12px; }
+[dir=rtl] .body { margin: .606em 0 0 12px; }
+/* An imported block with structured content is a preview: capped, with a
+   fade when it is cut (the page marks `over` once it knows). */
+.clamp { position: relative; max-height: 8em; overflow: hidden; }
+.clamp.over::after {
+  content: ''; position: absolute; left: 0; right: 0; bottom: 0; height: 28px;
+  background: linear-gradient(transparent, var(--pt-panel));
+}
+/* A flat imported sense keeps the native row's four lines. */
+.imp > .dict-group > .def-row > .def-text {
+  display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 4; overflow: hidden;
+}
+/* The lens's sections: a compact header over the full definitions, a
+   hairline with air above and below between them, and the controller's
+   cursor as a soft rounded wash inside the section, not a full-width band. */
+.lens { padding: 0 12px; }
+.lens + .row, .more { margin-top: 19px; }
+.lens + .row::before, .row + .more::before { top: -10px; left: 12px; right: 12px; }
+.lens.cur, .more.cur { background: none; }
+.lens.cur::after, .more.cur::after {
+  content: ''; position: absolute; top: 2px; bottom: 2px; left: 8px; right: 8px;
+  border-radius: 10px; background: var(--pt-cursor); pointer-events: none;
+}
+.lhead { display: flex; align-items: center; margin-bottom: 2px; }
+.lw, .lr { min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.lw { font-size: 1.136em; font-weight: 500; flex: 0 1 auto; }
+.lr { font-size: .909em; color: var(--pt-secondary); margin-left: 8px; flex: 0 2 auto; }
+[dir=rtl] .lr { margin-left: 0; margin-right: 8px; }
+.lchev { flex: none; display: flex; margin-left: auto; padding-left: 8px; color: var(--pt-secondary); }
+[dir=rtl] .lchev { margin-left: 0; margin-right: auto; padding-left: 0; padding-right: 8px; }
+.lchev .ic { width: 13px; height: 13px; }
+.empty { font-size: 1.06em; color: var(--pt-secondary); margin-top: .4em; }
+.more {
+  min-height: 40px; padding: 0 12px; display: flex; align-items: center; justify-content: center;
+  font-size: .985em; color: var(--pt-link); white-space: nowrap;
+}
+/* A word's own page: the imported block in full, then one row per sense.
+   Sizes are the native rows' sp, as px (the page's text zoom is the
+   system's font scale). A numbered row's hairline starts at its gloss. */
+.impf { padding: 10px 16px; }
+.sense { position: relative; display: flex; min-height: 56px; padding: 14px 16px; }
+.row + .sense.num::before { left: 42px; }
+[dir=rtl] .row + .sense.num::before { left: 0; right: 42px; }
+.impl > .sense + .sense::before {
+  content: ''; position: absolute; top: 0; left: 16px; right: 0; height: 1px;
+  background: var(--pt-divider);
+}
+[dir=rtl] .impl > .sense + .sense::before { left: 0; right: 16px; }
+.sn {
+  flex: none; min-width: 16px; margin: 2px 10px 0 0;
+  font-family: monospace; font-size: 12px; font-weight: 700; color: var(--pt-accent);
+}
+[dir=rtl] .sn { margin: 2px 0 0 10px; }
+.sb { flex: 1; min-width: 0; }
+.sp { font-size: 10px; font-weight: 500; line-height: 1.3; letter-spacing: .12em; color: var(--pt-secondary); }
+.sg { font-size: 18px; font-weight: 500; line-height: 1.25; }
+.sp + .sg { margin-top: 6px; }
+.sm { font-size: 12px; line-height: 1.3; font-style: italic; color: var(--pt-hint); margin-top: 4px; }
+.sg, .sm, .exs, .ext { white-space: pre-wrap; }
+/* An example: a rail and, pushed back by its muted type, the source line
+   over its translation. */
+.ex { display: flex; margin-top: 10px; }
+.ex + .ex { margin-top: 2px; }
+.ex::before { content: ''; flex: none; width: 2px; background: var(--pt-rail); }
+.exi { flex: 1; min-width: 0; margin-left: 12px; }
+[dir=rtl] .exi { margin-left: 0; margin-right: 12px; }
+.exs { font-size: 14px; font-weight: 500; line-height: 1.5; color: var(--pt-secondary); }
+.ext { font-size: 13px; line-height: 1.45; color: var(--pt-secondary); margin-top: 2px; }
+.ext.it { font-style: italic; }
+/* The Anki word sheet's card: a notch denser than the page, with a ✕ on
+   everything that can be taken off the card. The ✕ is a plain box at the
+   top of its line, inside its own row, so its hit box never reaches a
+   neighbour. */
+.impf.sheet { padding: 8px 16px; }
+.sense.sheet { min-height: 0; }
+.sheet .sg { font-size: 16px; }
+.sheet .exs { color: var(--pt-fg); }
+.sx {
+  flex: none; align-self: flex-start; margin: 0 0 0 8px; padding: 4px 10px;
+  border: 0; border-radius: 6px; background: none;
+  font: inherit; font-size: 14px; line-height: 1.3; color: var(--pt-secondary);
+}
+[dir=rtl] .sx { margin: 0 8px 0 0; }
+.ex > .sx { margin: 0 0 0 4px; }
+[dir=rtl] .ex > .sx { margin: 0 4px 0 0; }
+.sx:active, .sx.cur, .imp-x:active, .imp-x.cur { background: var(--pt-press); }
+/* The Anki sentence sheet's words. The row clips, so the eye's widened tap
+   area never reaches a neighbour. */
+.sw { padding: 12px 0; overflow: hidden; }
+.sw.tgt { background: var(--pt-wash); }
+.sw.stub { padding: 8px 0; background: var(--pt-band); }
+.swt { display: flex; align-items: center; padding: 0 12px 0 16px; }
+[dir=rtl] .swt { padding: 0 16px 0 12px; }
+.swl { flex: 1; min-width: 0; display: flex; align-items: center; }
+.sww { min-width: 0; font-size: 16px; font-weight: 700; line-height: 1.3; }
+.tgt .sww { color: var(--pt-accent); }
+.stub .sww { color: var(--pt-secondary); }
+.swr, .sws { flex: none; margin-left: 8px; color: var(--pt-hint); }
+.swr { font-size: 12px; }
+.sws { font-size: 11px; }
+[dir=rtl] .swr, [dir=rtl] .sws { margin-left: 0; margin-right: 8px; }
+/* The eye: a 20px glyph in a 40px column, level with the first line of a
+   word that wraps. Its tap area is a 48px square around the glyph (the
+   pseudo-element), which leaves the column, and so the title's width, as
+   they are. */
+.swe {
+  flex: none; align-self: flex-start; position: relative; width: 40px; height: 20px;
+  padding: 0; border: 0; border-radius: 6px; background: none; color: var(--pt-secondary);
+  display: flex; align-items: center; justify-content: center;
+}
+.stub .swe { align-self: center; }
+.swe .ic { width: 20px; height: 20px; }
+.swe::after { content: ''; position: absolute; top: -14px; bottom: -14px; left: -4px; right: -4px; }
+.swe.cur { background: var(--pt-press); }
+/* The definition keeps clear of the eye's column: text there would turn a
+   tap meant for the row into a hide. */
+.swd { margin-top: 3px; padding: 0 52px 0 16px; }
+[dir=rtl] .swd { padding: 0 16px 0 52px; }
+.swm { font-size: 13px; color: var(--pt-secondary); }
+/* A target's audio row, above the eye's tap area so what the square overlaps
+   of the row stays the row's. */
+.au {
+  position: relative; z-index: 1; display: flex; align-items: center;
+  min-height: 44px; padding: 4px 16px;
+}
+.au:active, .au.cur { background: var(--pt-press); }
+.auc {
+  flex: none; width: 44px; height: 44px; margin: 0 7px 0 -7px; padding: 0;
+  border: 0; background: none; color: var(--pt-outline);
+  display: flex; align-items: center; justify-content: center;
+}
+[dir=rtl] .auc { margin: 0 -7px 0 7px; }
+.auc.lit { color: var(--pt-accent); }
+.aur {
+  width: 30px; height: 30px; border-radius: 50%; border: 1px solid currentColor;
+  display: flex; align-items: center; justify-content: center;
+}
+.aur .ic, .aur .spin { width: 16px; height: 16px; }
+.aup {
+  flex: 0 1 auto; min-width: 0; height: 44px; margin: 0 12px 0 0; padding: 0;
+  border: 0; background: none; font: inherit; color: var(--pt-outline);
+  display: flex; align-items: center;
+}
+[dir=rtl] .aup { margin: 0 0 0 12px; }
+.au.on .aup { color: var(--pt-accent); }
+.aup > span {
+  min-width: 0; height: 30px; line-height: 28px; padding: 0 10px;
+  border: 1px solid currentColor; border-radius: 15px; font-size: 12px;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.auc.cur .aur, .aup.cur > span { background: var(--pt-press); }
+.aut {
+  flex: 1; min-width: 0; margin: 0 16px 0 0; font-size: 15px; font-weight: 500;
+  color: var(--pt-outline); white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+[dir=rtl] .aut { margin: 0 0 0 16px; }
+.au.on .aut { color: var(--pt-fg); }
+/* The switch, drawn as the app's own: a small thumb in an outlined track
+   when off, a large one in the accent track when on. */
+.tog {
+  flex: none; position: relative; width: 52px; height: 32px; border-radius: 16px;
+  border: 2px solid var(--pt-outline); background: var(--pt-divider);
+}
+.tog::after {
+  content: ''; position: absolute; top: 6px; left: 6px; width: 16px; height: 16px;
+  border-radius: 50%; background: var(--pt-secondary);
+}
+.au.on .tog { border-color: transparent; background: var(--pt-accent); }
+.au.on .tog::after { top: 2px; left: 22px; width: 24px; height: 24px; background: #DADADA; }
+[dir=rtl] .tog::after { left: auto; right: 6px; }
+[dir=rtl] .au.on .tog::after { left: auto; right: 22px; }
+"""
+
+    /**
+     * The document shell's own script: the layout report, the row set,
+     * append and replace entry points, the cursor and the click listener.
+     */
+    private const val DOCUMENT_JS = """
+  // Render generation: stamped by ptSet and echoed with every layout
+  // report, so the Kotlin side drops a report from a row set that has
+  // since been replaced. ptAppend and ptReplace carry the generation they
+  // were built for and do nothing when it is no longer the page's.
+  var gen = 0;
+  var cursor = null;
+
+  function rootEl() { return document.getElementById('root'); }
+
+  // A clamped preview shows its fade only when something is cut.
+  function markOverflow(r) {
+    var c = r.querySelectorAll('.clamp');
+    for (var i = 0; i < c.length; i++) {
+      var over = c[i].scrollHeight > c[i].clientHeight + 1;
+      if (over !== c[i].classList.contains('over')) c[i].classList.toggle('over');
     }
+  }
+
+  function report() {
+    var r = rootEl();
+    if (!r) return;
+    // Not laid out yet (zero-width viewport): content would wrap at every
+    // character and report an enormous bogus height. The resize listener
+    // reports the moment the real width arrives.
+    if (document.documentElement.clientWidth < 1) return;
+    markOverflow(r);
+    // The root's own rect, never the document's scroll height: that is
+    // max(content, viewport), and would echo an oversized view back forever.
+    var base = r.getBoundingClientRect();
+    var out = [];
+    var els = r.querySelectorAll('[data-row],[data-act]');
+    for (var i = 0; i < els.length; i++) {
+      var el = els[i];
+      var row = el.closest('[data-row]');
+      if (!row) continue;
+      var b = el.getBoundingClientRect();
+      if (b.width <= 0 || b.height <= 0) continue;
+      out.push(row.id, el.getAttribute('data-act') || '',
+        Math.round(b.left - base.left), Math.round(b.top - base.top),
+        Math.round(b.width), Math.round(b.height));
+    }
+    if (window.PTBridge && window.PTBridge.onLayout) {
+      window.PTBridge.onLayout(gen, Math.ceil(base.height), JSON.stringify(out));
+    }
+  }
+
+  // Now (getBoundingClientRect forces layout, and this works while the view
+  // is not yet drawn, when no animation frame ticks), then two frames on,
+  // when images with declared ratios have taken their boxes.
+  function settle() {
+    report();
+    requestAnimationFrame(function () { requestAnimationFrame(report); });
+  }
+
+  function applyCursor() {
+    var old = document.querySelectorAll('.cur');
+    for (var i = 0; i < old.length; i++) old[i].classList.remove('cur');
+    if (!cursor) return;
+    var row = document.getElementById(cursor[0]);
+    if (!row) return;
+    var el = row.getAttribute('data-act') === cursor[1]
+      ? row : row.querySelector('[data-act="' + cursor[1] + '"]');
+    if (el) el.classList.add('cur');
+  }
+
+  window.ptTheme = function (t) {
+    var s = document.documentElement.style;
+    for (var k in t.vars) s.setProperty(k, t.vars[k]);
+    document.documentElement.setAttribute('dir', t.dir);
+    document.body.style.fontSize = t.fontPx + 'px';
+  };
+
+  window.ptSet = function (html, g) {
+    gen = g;
+    rootEl().innerHTML = html;
+    applyCursor();
+    settle();
+  };
+
+  window.ptAppend = function (html, g) {
+    if (g !== gen) return;
+    rootEl().insertAdjacentHTML('beforeend', html);
+    settle();
+  };
+
+  window.ptReplace = function (id, html, g) {
+    if (g !== gen) return;
+    var el = document.getElementById(id);
+    if (!el) return;
+    el.outerHTML = html;
+    applyCursor();
+    settle();
+  };
+
+  window.ptCursor = function (rowId, act) {
+    cursor = rowId ? [rowId, act] : null;
+    applyCursor();
+  };
+
+  document.addEventListener('click', function (e) {
+    var t = e.target;
+    if (!t || !t.closest) return;
+    var row = t.closest('[data-row]');
+    var a = t.closest('a[href]');
+    if (a) {
+      if (!row || !row.hasAttribute('data-inert')) return;
+      e.preventDefault();
+    }
+    if (!row) return;
+    var el = t.closest('[data-act]');
+    if (!el) return;
+    if (window.PTBridge && window.PTBridge.onAction) {
+      window.PTBridge.onAction(row.id, el.getAttribute('data-act'));
+    }
+  });
+
+  // Direct, not via a frame: this is what fires when a hidden view first
+  // gets its real width.
+  window.addEventListener('resize', report);
+"""
 
     // ── Content ─────────────────────────────────────────────────────────
 
-    /** One chip in the styled document's meta row — the HTML counterpart
-     *  of [WordDefinitionsView]'s Common pill / ★ run / frequency chips /
-     *  deck badge (built Android-side, where strings and theme live). */
+    /** One chip of a document's meta row: the Common pill, the ★ run, a
+     *  frequency chip or the deck badge (built Android-side, where strings
+     *  and theme live). */
     class MetaChip(
         val text: String,
         val kind: Kind = Kind.NEUTRAL,
@@ -426,9 +795,10 @@ ruby > rt { font-size: .5em; }
     }
 
     /**
-     * The Anki word sheet's per-card removal of imported rows, the page's
-     * counterpart of the native ✕ each pack sense carries. Every other
-     * surface passes none and keeps its markup exactly as it was.
+     * The Anki word sheet's per-card removal of imported rows inside a block
+     * with structured content, the counterpart of the ✕ each pack sense
+     * carries ([DefRow.Sense.removable]). Every other surface passes none
+     * and keeps its markup exactly as it was.
      *
      * A row's identity is its flat index across ALL the entry's imported
      * senses in group order ([WordCardDefinition.removedImported]'s key),
@@ -442,13 +812,14 @@ ruby > rt { font-size: .5em; }
         /** False when the card is down to its last visible row, imported and
          *  pack alike: the rows still carry their index, but no ✕ is drawn. */
         val removable: Boolean,
-        /** The ✕'s accessible name, the native glyph's contentDescription
+        /** The ✕'s accessible name
          *  (`R.string.anki_word_remove_content_description`). */
         val removeLabel: String,
     )
 
     /**
-     * The per-lookup markup handed to `ptSwap`: imported groups first (in
+     * A word's definitions as markup, the body of a row of the page
+     * ([DefRowHtml]): imported groups first (in
      * their given order — [TermMerge] already ordered them), each in its
      * own `<section class="dict-group">`, then the pack's own senses with
      * the classic numbered layout. A structured sense's glossary is wrapped
@@ -464,14 +835,15 @@ ruby > rt { font-size: .5em; }
      * [structured] maps [com.playtranslate.model.ImportedSense.scRowid] →
      * glossary JSON; senses without an entry render their flat text.
      * [localizePos] is the pack-sense POS localizer (imported headers stay
-     * verbatim, same rule as [WordDefinitionsView]).
+     * verbatim).
      *
      * [importedCuration] (the Anki word sheet only) leaves its removed
      * senses out, a group with none left dropping its section, and wraps
      * each kept one in `.imp-sense` whose `data-imp` is the sense's ORIGINAL
      * flat index (see [ImportedCuration]), with the ✕ beside the body when
-     * removal is allowed. The shell's click listener reports that index
-     * through `PTBridge.onRemoveImported`. Null emits no wrapper at all.
+     * removal is allowed. The ✕ carries `data-act`
+     * ([DefAction.removeItem] of that index), which is how the page reports
+     * its tap. Null emits no wrapper at all.
      */
     fun contentHtml(
         data: WordDefinitionData,
@@ -531,8 +903,7 @@ ruby > rt { font-size: .5em; }
             val headerColor = group.accentColor?.let { " style=\"color:${cssHex(it)}\"" }.orEmpty()
             var previousHeader: String? = null
             for ((i, sense) in kept) {
-                // Same collapse rule as WordDefinitionsView: consecutive
-                // senses sharing a header emit it once. Run over the kept
+                // Consecutive senses sharing a header emit it once. Run over the kept
                 // senses and outside the curation wrapper, so removing a
                 // run's first row hands its header to the next.
                 val header = importedHeader(group.source, sense.pos)
@@ -568,7 +939,7 @@ ruby > rt { font-size: .5em; }
                 .append(htmlEscape(sense.definition).replace("\n", "<br>"))
             if (showMisc) {
                 renderMisc(sense.misc)?.let {
-                    sb.append("<div class=\"pos-h\">").append(htmlEscape(it)).append("</div>")
+                    sb.append("<div class=\"def-misc\">").append(htmlEscape(it)).append("</div>")
                 }
             }
             sb.append("</div></div>")
@@ -591,7 +962,10 @@ ruby > rt { font-size: .5em; }
         sb.append("<div class=\"imp-sense\" data-imp=\"").append(flatIndex)
             .append("\"><div class=\"imp-body\">").append(body).append("</div>")
         if (curation.removable) {
-            sb.append("<button type=\"button\" class=\"imp-x\" aria-label=\"")
+            // `data-act` is what the page reports the tap by
+            // ([DefAction.removeItem]): the sense's ORIGINAL flat index.
+            sb.append("<button type=\"button\" class=\"imp-x\" data-act=\"")
+                .append(DefAction.removeItem(flatIndex)).append("\" aria-label=\"")
                 .append(htmlEscape(curation.removeLabel)).append("\">✕</button>")
         }
         sb.append("</div>")

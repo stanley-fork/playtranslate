@@ -302,6 +302,15 @@
          word itself elsewhere (the lens pill / the sheet header). -->
     <string name="word_detail_no_definitions">No definitions found.</string>
 
+    <!-- Shown in place of a word's definitions when the device cannot draw
+         them: definitions are drawn by Android's built-in web component
+         ("Android System WebView", a system app, keep its name as Android
+         shows it in the device's own language), and it is missing, turned
+         off, or being updated. One short line; appears in the word list,
+         the magnifying lens, the word page and the Anki sheets. No
+         placeholders. -->
+    <string name="definitions_need_webview">Definitions need Android System WebView.</string>
+
     <!-- Section title above the example-sentences list. -->
     <string name="word_detail_more_examples">More examples</string>
 
@@ -872,15 +881,6 @@
     <!-- Skeleton/placeholder line on the drag-lens word view while the
          lookup is in flight. -->
     <string name="lens_loading">Looking up…</string>
-
-    <!-- Small muted caption in the magnifying lens, drawn above the
-         headword of an extra section below the tapped word. The section is
-         another dictionary entry the same tapped text could also be (a
-         different word with the same spelling, or another verb that
-         conjugates to the same form), shown so the user can pick the right
-         one. Keep it short: it sits alone on one line above the
-         headword. -->
-    <string name="lens_also_matches">Also matches</string>
 
     <!-- Tappable row at the bottom of the word lookup lens. It loads the extra sections for the looked-up word (the phrase it is part of, its member words, or other dictionary entries it could be) that were held back because their definitions need machine translation. %1$d = how many sections will load. -->
     <string name="load_more_count">Load more (<xliff:g id="count" example="2">%1$d</xliff:g>)</string>

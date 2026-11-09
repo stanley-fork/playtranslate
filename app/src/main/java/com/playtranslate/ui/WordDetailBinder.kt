@@ -72,7 +72,7 @@ import kotlinx.coroutines.withContext
 import java.util.Locale
 
 /**
- * The full word-detail page (headword + readings + badges, styled/native
+ * The full word-detail page (headword + readings + badges, the
  * definitions, Tatoeba examples, kanji/hanzi breakdown, member words, the
  * Anki pill with its one-tap long-press) as a host-agnostic binder —
  * extracted from [WordDetailBottomSheet] so the SAME page renders inside the
@@ -83,8 +83,8 @@ import java.util.Locale
  *
  * [scope] is the host's view/page lifetime: the fragment passes its
  * viewLifecycleOwner scope, the workspace page its own page scope — either
- * way [release] must run when the view leaves (WebView destroy + player
- * stop), and the scope must be cancelled by the host.
+ * way [release] must run when the view leaves (it lets the definitions
+ * pages go and stops the player), and the scope must be cancelled by the host.
  */
 class WordDetailBinder(
     private val ctx: Context,
@@ -153,8 +153,8 @@ class WordDetailBinder(
 
         /** Hold point before the lookup's completion bind: a host with an
          *  entrance transition (the workspace) suspends here until it has
-         *  settled, so the content build — and any styled-definitions
-         *  WebView it constructs — can't land its main-thread cost inside
+         *  settled, so the content build, and the definitions page it
+         *  loads, can't land its main-thread cost inside
          *  the entrance and drop its frames. Default: no hold. Callers
          *  re-check [isAlive] after resuming. */
         suspend fun awaitEnterSettled() {}
@@ -214,6 +214,11 @@ class WordDetailBinder(
         private const val COLLAPSE_DISTANCE_DP = 40
         /** Scale at the pinned end of the animation: 18sp / 38sp. */
         private const val TOOLBAR_SCALE = 0.47f
+
+        /** The imported block's body text in the Definitions card, in sp;
+         *  the sense rows carry their own sizes. */
+        private const val DEFINITIONS_BASE_PX = 16.5f
+        private const val IMPORTED_ROW_ID = "imported"
 
         /**
          * The sentence every Anki action on the page rides: [host], the
@@ -294,18 +299,26 @@ class WordDetailBinder(
      *  view is torn down so a tapped pronunciation doesn't outlive the page. */
     private var speakJob: Job? = null
 
-    /** The styled renderer instance, held so [release] can destroy() the
-     *  native WebView (a rebuild via [addStyledImportedBlock] destroys any
-     *  predecessor the same way). */
-    private var styledImportedView: YomitanDefinitionsView? = null
+    /** The Definitions card: one document (the imported dictionaries' block,
+     *  then a row per sense) and what a late example translation needs to
+     *  patch its sense's row. Released with the page, and by a rebuild. */
+    private var definitions: DefinitionsBlock? = null
 
-    /** Cells of the Words and Other matches sections that own a styled
-     *  renderer of their own ([WordResultCell.releaseStyled]): released
-     *  with the page, and by [loadSecondarySections] before it builds
-     *  those sections. */
-    private val memberStyledCells = mutableListOf<WordResultCell>()
+    private class DefinitionsBlock(
+        val document: DefinitionDocument,
+        var rows: List<DefRow>,
+        val language: String,
+        /** A sense's index across the lookup's entries (the order
+         *  [DefinitionResolver.translateExamples] answers in) to its row. */
+        val rowOfSense: Map<Int, Int>,
+    )
 
-    /** Host teardown: cancel audio, destroy the WebView. Idempotent; the
+    /** The Words and Other matches sections' lists, each one definitions
+     *  document: released with the page, and by [loadSecondarySections]
+     *  before it builds those sections. */
+    private val sectionLists = mutableListOf<WordRowList>()
+
+    /** Host teardown: cancel audio, let the pages go. Idempotent; the
      *  host must also cancel [scope]. */
     fun release() {
         speakJob?.cancel()
@@ -314,17 +327,42 @@ class WordDetailBinder(
         moreExamplesBody = null
         bigHeadwordView = null
         headerBadgeFlow = null
-        // Native WebView teardown — a dropped-but-undestroyed WebView keeps
-        // renderer resources and the context graph alive until GC.
-        styledImportedView?.destroy()
-        styledImportedView = null
-        releaseMemberStyledCells()
+        releaseDefinitions()
+        releaseSectionLists()
     }
 
-    /** Drop the word-cell sections' per-cell styled renderers. */
-    private fun releaseMemberStyledCells() {
-        memberStyledCells.forEach { it.releaseStyled() }
-        memberStyledCells.clear()
+    /** Lets the Definitions card's page go. */
+    private fun releaseDefinitions() {
+        definitions?.document?.release()
+        definitions = null
+    }
+
+    /**
+     * Example translations that arrived after the page was drawn, one list
+     * per sense: each goes onto its example, and the document redraws only
+     * the senses that gained one.
+     */
+    private fun applyExampleTranslations(translated: List<List<String>>) {
+        val block = definitions ?: return
+        val rows = block.rows.toMutableList()
+        translated.forEachIndexed { senseIdx, perSense ->
+            val at = block.rowOfSense[senseIdx] ?: return@forEachIndexed
+            val row = rows[at] as? DefRow.Sense ?: return@forEachIndexed
+            rows[at] = row.copy(
+                examples = row.examples.mapIndexed { i, ex ->
+                    val tr = perSense.getOrNull(i).orEmpty()
+                    if (tr.isBlank()) ex else ex.copy(translation = tr)
+                },
+            )
+        }
+        block.rows = rows
+        block.document.setRows(rows, block.language)
+    }
+
+    /** Let the word sections' pages go. */
+    private fun releaseSectionLists() {
+        sectionLists.forEach { it.release() }
+        sectionLists.clear()
     }
 
     /** Build the page into [root] (the inflated
@@ -496,14 +534,12 @@ class WordDetailBinder(
                         ?.let { e to it }
                 }
             }
-            // Hold the whole completion bind, not just the styled block,
-            // until the host's entrance settles: a partial (native-first)
-            // render with a styled upgrade behind it is the flat-then-styled
-            // flash family the popup had to engineer away. One reveal for
-            // the primary content and the Anki button; the Words and Other
-            // matches sections follow it ([loadSecondarySections]) behind a
-            // loading line, each built in one pass with its styled payloads
-            // fetched first.
+            // Hold the whole completion bind until the host's entrance
+            // settles: the Definitions card loads its page (the first one of
+            // a process blocks the main thread), and that must not land in
+            // the entrance. One reveal for the primary content and the Anki
+            // button; the Words and Other matches sections follow it
+            // ([loadSecondarySections]) behind a loading line.
             ui.awaitEnterSettled()
             if (!ui.isAlive) return@launch
             content.removeView(loadingView)
@@ -529,14 +565,13 @@ class WordDetailBinder(
             val initialTranslations: List<List<String>>? = if (targetLangCode == "en") {
                 entries.flatMap { it.senses }.map { s -> s.examples.map { it.translation } }
             } else null
-            val translationRegistry = mutableMapOf<Pair<Int, Int>, TextView>()
             // The word as found, under its key, for its other matches: the
             // same chain the header draws from it.
             val wordSpan = TokenSpan(surface ?: lookupForm, lookupForm, args.lookupReading, tokenTags)
             val display = pageHeadwordDisplay(primary, word, lookupForm)
             val secondaryHost = buildContent(
                 content, entries, engine, sourceLangId, defResult, initialTranslations,
-                translationRegistry, targetLangCode, enToTargetWrapper, display, inflectedForms, tables,
+                targetLangCode, enToTargetWrapper, display, inflectedForms, tables,
             )
             scrollView?.scrollTo(0, 0)
 
@@ -577,15 +612,7 @@ class WordDetailBinder(
                         withContext(Dispatchers.IO) { resolver.translateExamples(response!!) }
                     }.getOrNull() ?: return@launch
                     if (!ui.isAlive) return@launch
-                    translated.forEachIndexed { sIdx, perSense ->
-                        perSense.forEachIndexed { eIdx, tr ->
-                            if (tr.isBlank()) return@forEachIndexed
-                            translationRegistry[sIdx to eIdx]?.let { tv ->
-                                tv.text = tr
-                                tv.isVisible = true
-                            }
-                        }
-                    }
+                    applyExampleTranslations(translated)
                 }
             }
 
@@ -876,7 +903,6 @@ class WordDetailBinder(
         sourceLangId: SourceLangId,
         defResult: DefinitionResult?,
         initialTranslations: List<List<String>>?,
-        translationRegistry: MutableMap<Pair<Int, Int>, TextView>,
         targetLangCode: String,
         enToTargetTranslator: WordTranslator?,
         display: HeadwordDisplay,
@@ -955,58 +981,35 @@ class WordDetailBinder(
         addGroupHeader(content, ctx.getString(R.string.word_detail_group_definitions), definitionsSuffix)
         val definitionsCard = addGroupCard(content)
 
-        // Imported term-dictionary definitions lead, unnumbered and
-        // unclamped, one labelled block per dictionary in the user's
-        // section order. Final text — never machine-translated. When the
-        // styled path is live (retained structured glossaries + toggle on),
-        // the whole block renders through the WebView component with each
-        // dictionary's own CSS; the native rows are the fallback the
-        // renderer degrades back to if its process dies.
+        // The card is ONE definitions document. The imported term
+        // dictionaries' definitions lead, unnumbered and unclamped, one
+        // labelled block per dictionary in the user's section order (final
+        // text, never machine-translated); then a row per sense.
+        val rows = mutableListOf<DefRow>()
+        val rowOfSense = HashMap<Int, Int>()
         val importedGroups = primary.importedSenses
-        val styledData = fetchYomitanStyledData(
-            ctx.applicationContext,
-            Prefs(ctx).sourceLangId.yomitanConsumingLang(),
-            importedGroups,
+        if (importedGroups.any { it.senses.isNotEmpty() }) {
+            rows += DefRow.Imported(IMPORTED_ROW_ID, importedGroups)
+        }
+        val italic = targetSupportsItalics(ctx)
+        fun senseRow(
+            id: String,
+            number: Int?,
+            posLabels: List<String>,
+            glosses: List<String>,
+            misc: String?,
+            examples: List<com.playtranslate.model.Example>,
+            translations: List<String>?,
+        ) = DefRow.Sense(
+            id = id,
+            number = number,
+            pos = if (posLabels.isEmpty()) "" else ctx.localizePos(posLabels).uppercase(Locale.ROOT),
+            gloss = glosses.joinToString("; "),
+            misc = misc,
+            examples = examples.mapIndexed { i, ex ->
+                DefRow.Example(ex.text, translations?.getOrNull(i).orEmpty(), italic)
+            },
         )
-        val importedContainer = LinearLayout(ctx).apply {
-            orientation = LinearLayout.VERTICAL
-        }
-        definitionsCard.addView(
-            importedContainer,
-            LinearLayout.LayoutParams(
-                LinearLayout.LayoutParams.MATCH_PARENT,
-                LinearLayout.LayoutParams.WRAP_CONTENT,
-            ),
-        )
-        fun buildNativeImportedRows() {
-            importedGroups.forEachIndexed { groupIdx, group ->
-                group.senses.forEachIndexed { defIdx, sense ->
-                    if (groupIdx > 0 || defIdx > 0) {
-                        addInsetDivider(importedContainer, indentPx = dpRes(R.dimen.pt_row_h_padding))
-                    }
-                    addSenseRow(
-                        parent = importedContainer,
-                        posLabels = buildList {
-                            if (defIdx == 0) add(group.source)
-                            if (sense.pos.isNotBlank()) add(sense.pos)
-                        },
-                        imported = true,
-                        accentColor = group.accentColor,
-                        glossList = listOf(sense.definition),
-                        senseNumber = null,
-                        miscText = null,
-                        examples = emptyList(),
-                        exampleTranslations = null,
-                        senseIndex = -1,
-                        translationRegistry = null,
-                    )
-                }
-            }
-        }
-        if (!addStyledImportedBlock(importedContainer, importedGroups, styledData, ::buildNativeImportedRows)) {
-            buildNativeImportedRows()
-        }
-        val hasImportedRows = importedGroups.any { it.senses.isNotEmpty() }
 
         if (isTargetDriven) {
             // Each target sense carries its own POS (kaikki tags it per
@@ -1020,26 +1023,15 @@ class WordDetailBinder(
             // the primary entry's POS.
             val fallbackPos = unambiguousFallbackPos(entries)
             nativeTargetSenses.forEachIndexed { idx, target ->
-                val senseNumber = if (nativeTargetSenses.size > 1) idx + 1 else null
-                if (idx > 0 || hasImportedRows) {
-                    addInsetDivider(
-                        definitionsCard,
-                        indentPx = if (senseNumber != null) dp(42)
-                            else dpRes(R.dimen.pt_row_h_padding),
-                    )
-                }
-                val posLabels = target.pos.filter { it.isNotBlank() }.takeIf { it.isNotEmpty() }
-                    ?: fallbackPos
-                addSenseRow(
-                    parent = definitionsCard,
-                    posLabels = posLabels,
-                    glossList = target.glosses,
-                    senseNumber = senseNumber,
-                    miscText = ctx.renderMiscText(target.misc),
+                rows += senseRow(
+                    id = "t$idx",
+                    number = if (nativeTargetSenses.size > 1) idx + 1 else null,
+                    posLabels = target.pos.filter { it.isNotBlank() }.takeIf { it.isNotEmpty() }
+                        ?: fallbackPos,
+                    glosses = target.glosses,
+                    misc = ctx.renderMiscText(target.misc),
                     examples = target.examples,
-                    exampleTranslations = target.examples.map { it.translation },
-                    senseIndex = -1,
-                    translationRegistry = null,
+                    translations = target.examples.map { it.translation },
                 )
             }
         } else {
@@ -1047,31 +1039,35 @@ class WordDetailBinder(
             flatSenses.forEachIndexed { flatIdx, sense ->
                 if (sense.targetDefinitions.isEmpty()) return@forEachIndexed
                 val target = targetByOrd?.get(flatIdx)
-                val posLabels = (target?.pos ?: sense.partsOfSpeech).filter { it.isNotBlank() }
-                val glossList = target?.glosses
-                    ?: translatedDefs?.getOrNull(flatIdx)?.let { listOf(it) }
-                    ?: sense.targetDefinitions
-                val senseNumber = if (numSenses > 1) displayCount + 1 else null
-
-                if (displayCount > 0 || hasImportedRows) {
-                    // Numbered rows indent divider to 42dp (16dp row padding +
-                    // 16dp number column + 10dp gap) to align with the gloss
-                    // column; single-sense rows use the standard 16dp inset.
-                    addInsetDivider(definitionsCard, indentPx = if (senseNumber != null) dp(42) else dpRes(R.dimen.pt_row_h_padding))
-                }
-                addSenseRow(
-                    parent = definitionsCard,
-                    posLabels = posLabels,
-                    glossList = glossList,
-                    senseNumber = senseNumber,
-                    miscText = ctx.renderMiscText(sense.misc),
+                // The row a late example translation of this sense patches.
+                rowOfSense[flatIdx] = rows.size
+                rows += senseRow(
+                    id = "s$flatIdx",
+                    number = if (numSenses > 1) displayCount + 1 else null,
+                    posLabels = (target?.pos ?: sense.partsOfSpeech).filter { it.isNotBlank() },
+                    glosses = target?.glosses
+                        ?: translatedDefs?.getOrNull(flatIdx)?.let { listOf(it) }
+                        ?: sense.targetDefinitions,
+                    misc = ctx.renderMiscText(sense.misc),
                     examples = sense.examples,
-                    exampleTranslations = initialTranslations?.getOrNull(flatIdx),
-                    senseIndex = flatIdx,
-                    translationRegistry = translationRegistry,
+                    translations = initialTranslations?.getOrNull(flatIdx),
                 )
                 displayCount++
             }
+        }
+
+        releaseDefinitions()
+        if (rows.isNotEmpty()) {
+            val language = sourceLangId.yomitanConsumingLang()
+            val document = DefinitionDocument(
+                ctx, definitionsCard, scope,
+                theme = { cardDocTheme(ctx, DEFINITIONS_BASE_PX) },
+                // Nothing in the block is a tap target; its links open
+                // themselves.
+                onAction = { _, _ -> },
+            )
+            document.setRows(rows, language)
+            definitions = DefinitionsBlock(document, rows, language, rowOfSense)
         }
 
         // ── Conjugation / Declension / Forms (Wiktionary packs with inflection tables) ──
@@ -1209,8 +1205,8 @@ class WordDetailBinder(
     /** Loads the Words and Other matches sections into [host], the one
      *  [addSecondaryHost] appended, after [bind] has shown the page's
      *  primary content (and wired the Anki button, on a found page):
-     *  releases the previous cells' renderers
-     *  ([releaseMemberStyledCells]), appends Words then Other matches after
+     *  releases the previous sections' pages
+     *  ([releaseSectionLists]), appends Words then Other matches after
      *  the host's loading line, then removes the line, and the host as well
      *  when neither section rendered. [primary] is null on the not-found
      *  page, where the sections are all the page has to offer. */
@@ -1227,7 +1223,7 @@ class WordDetailBinder(
         // The host holds only buildContent's loading line until the
         // sections append after it.
         val loadingLine = host.getChildAt(0)
-        releaseMemberStyledCells()
+        releaseSectionLists()
 
         // ── Member words (multi-word expressions) ────────────────────────
         // For a multi-word expression ("a great deal", 気になる) the detail
@@ -1254,14 +1250,14 @@ class WordDetailBinder(
 
     /** Appends the "Words" section for a multi-word headword: each member
      *  word resolved through the shared row pipeline ([resolveWordRows]) and
-     *  rendered as a [WordResultCell] whose tap opens a nested detail via
+     *  rendered as a row whose tap opens a nested detail via
      *  [Ui.openWordDetail]. No-op for single-word headwords or when no
      *  member resolves. The engine split runs on the DISPLAYED headword
      *  form, the header's [display]: for JA `uk` entries the kana form
      *  (かもしれない), whose members correctly fail the engine's kanji gate
      *  where the kanji variant's (かも知れない → 知れ) would pass. Built by
-     *  [loadSecondarySections], which releases the previous cells'
-     *  renderers first. */
+     *  [loadSecondarySections], which releases the previous sections'
+     *  pages first. */
     private suspend fun addMemberWordsSection(
         content: LinearLayout,
         primary: DictionaryEntry?,
@@ -1320,55 +1316,35 @@ class WordDetailBinder(
         addWordCellsSection(content, ctx.getString(R.string.section_other_matches), rows, sourceLangId)
     }
 
-    /** One group of word cells under [title] (the Words and Other matches
-     *  sections): a [WordResultCell] per row with its speak action and Anki
-     *  button, whose tap opens a nested detail via [Ui.openWordDetail] with
-     *  the row's surface and the key it was resolved under. */
-    private suspend fun addWordCellsSection(
+    /** One group of words under [title] (the Words and Other matches
+     *  sections): a [WordRowList] in its own card, each row with its speak
+     *  action and Anki button, whose tap opens a nested detail via
+     *  [Ui.openWordDetail] with the row's surface and the key it was
+     *  resolved under. The list is one definitions document, inside the
+     *  page's native header and card like every other group. */
+    private fun addWordCellsSection(
         content: LinearLayout,
         title: String,
         rows: List<RowState>,
         sourceLangId: SourceLangId,
     ) {
-        val appCtx = ctx.applicationContext
-        // Styled payloads for the rows' imported groups, prefetched here
-        // like the page's own imported block — the cells own no coroutines.
-        // Null per row degrades that row to the flat tier, nothing else.
-        val styledByRow = rows.map {
-            fetchYomitanStyledData(appCtx, sourceLangId.yomitanConsumingLang(), it.importedGroups)
-        }
-        if (!ui.isAlive) return
-
         addGroupHeader(content, title)
         val card = addGroupCard(content)
-        rows.forEachIndexed { index, row ->
-            if (index > 0) addInsetDivider(card, indentPx = dpRes(R.dimen.pt_row_h_padding))
-            val cell = WordResultCell(ctx)
-            cell.bind(
-                data = WordDefinitionData(
-                    word = row.displayWord,
-                    reading = row.reading.ifEmpty { null },
-                    senses = row.senses,
-                    freqScore = row.freqScore,
-                    isCommon = row.isCommon,
-                    pitch = row.pitch,
-                    frequencies = row.frequencies,
-                    readingRows = row.readingRows,
-                    importedGroups = row.importedGroups,
-                    styled = styledByRow[index],
-                    inflectedForms = row.inflectedForms,
-                ),
-                scale = WordResultCell.DEFAULT_SCALE,
-                onCellTap = {
-                    ui.openWordDetail(
-                        row.displayWord, row.reading.ifEmpty { null }, row.surface,
-                        row.lookupForm, row.lookupReading,
-                    )
-                },
-                onSpeak = { speakHeadword(row.displayWord, sourceLangId) },
-                // These cells never stub or hide; the Anki button stays, as
-                // on the dictionary results, on the page's own sentence.
-                trailing = WordResultCell.TrailingAction.Anki {
+        val list = WordRowList(
+            ctx, card, scope,
+            object : WordRowList.Host {
+                override val isAlive: Boolean get() = ui.isAlive
+                override val sourceLang get() = sourceLangId
+                // These rows carry no deck pill (the page's own header does).
+                override val deckBadges: Boolean get() = false
+                override fun trailing(row: RowState): DefRow.Trailing = DefRow.Trailing.ANKI
+
+                override fun onOpen(row: RowState) = ui.openWordDetail(
+                    row.displayWord, row.reading.ifEmpty { null }, row.surface,
+                    row.lookupForm, row.lookupReading,
+                )
+
+                override fun onTrailing(row: RowState, shown: DefRow.Trailing) {
                     if (!AnkiManager(ctx).isAnkiDroidInstalled()) {
                         ui.showAnkiNotInstalled()
                     } else {
@@ -1379,19 +1355,18 @@ class WordDetailBinder(
                             ),
                         )
                     }
-                },
-                // This section is a static handful of cells under a block
-                // that renders styled; the flat tier's unspaced tag runs read
-                // as a bug next to it. One renderer per cell, the cells
-                // being two or three; the recycling search list stays flat.
-                styledRenderers = WordResultCell.StyledRendererSource.Own,
-            )
-            memberStyledCells += cell
-            card.addView(cell)
-        }
+                }
+
+                // The page's one speech job, shared with its header chips: a
+                // row's tap starts it and returns, so the row draws no spinner.
+                override suspend fun speak(row: RowState) = speakHeadword(row.displayWord, sourceLangId)
+            },
+            WordRowList.LARGE_SCALE,
+        )
+        sectionLists += list
+        list.setRows(rows, sourceLangId.yomitanConsumingLang())
     }
 
-    // ── Section builders ──────────────────────────────────────────────────
 
     /** The page's headword for [entry], the entry its key [lookupForm]
      *  resolved: the variant the display [word] names, so the header shows
@@ -1465,7 +1440,7 @@ class WordDetailBinder(
                 setTextColor(ctx.themeColor(R.attr.ptTextMuted))
                 setTextSize(
                     TypedValue.COMPLEX_UNIT_SP,
-                    InflectionChain.TEXT_SP * WordResultCell.DEFAULT_SCALE,
+                    InflectionChain.TEXT_SP * WordRowList.LARGE_SCALE,
                 )
                 layoutParams = LinearLayout.LayoutParams(
                     LinearLayout.LayoutParams.MATCH_PARENT,
@@ -1956,8 +1931,8 @@ class WordDetailBinder(
             isFocusable = true
             setOnClickListener {
                 // NEW_TASK: some hosts are overlay windows (the workspace),
-                // whose context is no Activity — same rule as the styled
-                // glossary's external links.
+                // whose context is no Activity — same rule as a
+                // definition's external links.
                 runCatching {
                     ctx.startActivity(
                         Intent(Intent.ACTION_VIEW, "https://tatoeba.org/".toUri())
@@ -2069,253 +2044,6 @@ class WordDetailBinder(
             ).also { it.topMargin = dp(3) }
         })
         return row
-    }
-
-    /**
-     * Styled imported-definitions block: one [YomitanDefinitionsView]
-     * rendering every group with its dictionary's scoped CSS, sized by the
-     * page's height report. Returns false when the styled path shouldn't /
-     * can't run (no payload, no WebView) — the caller builds the native
-     * rows instead. [rebuildNative] is the render-process-death fallback:
-     * the container empties and the same native rows take the block's
-     * place.
-     */
-    private fun addStyledImportedBlock(
-        container: LinearLayout,
-        importedGroups: List<com.playtranslate.model.ImportedSenseGroup>,
-        styledData: YomitanStyledData?,
-        rebuildNative: () -> Unit,
-    ): Boolean {
-        if (styledData == null || styledData.structured.isEmpty()) return false
-        styledImportedView?.destroy()
-        styledImportedView = null
-        val v = YomitanDefinitionsView(
-            ctx,
-            DefinitionsDocument.Tokens(
-                text = ctx.themeColor(R.attr.ptText),
-                textMuted = ctx.themeColor(R.attr.ptTextMuted),
-                textHint = ctx.themeColor(R.attr.ptTextHint),
-                accent = ctx.themeColor(R.attr.ptAccent),
-                panel = ctx.themeColor(R.attr.ptCard),
-                baseFontSizePx = 16.5f,
-            ),
-        )
-        if (!v.isUsable()) return false
-        val hPad = dpRes(R.dimen.pt_row_h_padding)
-        v.setPadding(hPad, dp(10), hPad, dp(10))
-        v.onContentHeight = { h ->
-            val lp = v.layoutParams ?: LinearLayout.LayoutParams(
-                LinearLayout.LayoutParams.MATCH_PARENT, 1,
-            )
-            lp.height = h + v.paddingTop + v.paddingBottom
-            v.layoutParams = lp
-        }
-        v.onRendererGone = {
-            styledImportedView = null // destroy() already ran internally
-            container.removeAllViews()
-            rebuildNative()
-        }
-        styledImportedView = v
-        // 1px until the page reports: the content tree is built before its
-        // first layout pass, so the swap can run against a zero-width
-        // viewport — the page skips that report and the resize listener
-        // re-reports when the real width lands.
-        container.addView(
-            v,
-            LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, 1),
-        )
-        // Groups only — the page's pack senses, breakdown, and examples
-        // stay native. senses = empty keeps contentHtml's pack section out.
-        val doc = DefinitionsDocument.contentHtml(
-            WordDefinitionData(
-                word = "",
-                reading = null,
-                senses = emptyList(),
-                freqScore = 0,
-                isCommon = false,
-                importedGroups = importedGroups,
-            ),
-            styledData.structured,
-            localizePos = { it.joinToString(" · ") },
-        )
-        v.setContent(doc, styledData.dictStyles, styledData.sourceLanguage)
-        return true
-    }
-
-    /**
-     * Render one definition row. [senseNumber] is drawn as a dedicated
-     * left column (accent-tinted mono) when non-null so the gloss wraps
-     * cleanly under its own column instead of inheriting the number's
-     * hanging indent.
-     */
-    private fun addSenseRow(
-        parent: LinearLayout,
-        posLabels: List<String>,
-        /** Imported Yomitan rows pass a verbatim dictionary-name header in
-         *  [posLabels] — never localized. Pack rows localize their POS. */
-        imported: Boolean = false,
-        /** Imported rows: per-dictionary accent override (ARGB) for the title
-         *  header; null = the default muted color. */
-        accentColor: Int? = null,
-        glossList: List<String>,
-        senseNumber: Int?,
-        miscText: String?,
-        examples: List<com.playtranslate.model.Example> = emptyList(),
-        exampleTranslations: List<String>? = null,
-        senseIndex: Int = -1,
-        translationRegistry: MutableMap<Pair<Int, Int>, TextView>? = null,
-    ) {
-        val row = LinearLayout(ctx).apply {
-            orientation = LinearLayout.HORIZONTAL
-            minimumHeight = dpRes(R.dimen.pt_row_min_height)
-            setPadding(
-                dpRes(R.dimen.pt_row_h_padding),
-                dpRes(R.dimen.pt_row_v_padding),
-                dpRes(R.dimen.pt_row_h_padding),
-                dpRes(R.dimen.pt_row_v_padding)
-            )
-            layoutParams = LinearLayout.LayoutParams(
-                LinearLayout.LayoutParams.MATCH_PARENT,
-                LinearLayout.LayoutParams.WRAP_CONTENT
-            )
-        }
-
-        if (senseNumber != null) {
-            row.addView(TextView(ctx).apply {
-                text = String.format(Locale.getDefault(), "%d", senseNumber)
-                textSize = 12f
-                typeface = Typeface.create(Typeface.MONOSPACE, Typeface.BOLD)
-                setTextColor(ctx.themeColor(R.attr.ptAccent))
-                minWidth = dp(16)
-                layoutParams = LinearLayout.LayoutParams(
-                    LinearLayout.LayoutParams.WRAP_CONTENT,
-                    LinearLayout.LayoutParams.WRAP_CONTENT
-                ).also {
-                    it.marginEnd = dp(10)
-                    // Nudge the number down one pixel so its baseline sits
-                    // under the POS eyebrow (or the gloss if POS is empty)
-                    // instead of above it.
-                    it.topMargin = dp(2)
-                }
-            })
-        }
-
-        val col = LinearLayout(ctx).apply {
-            orientation = LinearLayout.VERTICAL
-            layoutParams = LinearLayout.LayoutParams(
-                0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f
-            )
-        }
-
-        if (posLabels.isNotEmpty()) {
-            col.addView(TextView(ctx).apply {
-                text = (if (imported) posLabels.joinToString(" · ") else ctx.localizePos(posLabels))
-                    .uppercase(Locale.ROOT)
-                textSize = 10f
-                letterSpacing = 0.12f
-                typeface = Typeface.create("sans-serif-medium", Typeface.NORMAL)
-                setTextColor(accentColor ?: ctx.themeColor(R.attr.ptTextMuted))
-                isAllCaps = true
-                layoutParams = LinearLayout.LayoutParams(
-                    LinearLayout.LayoutParams.MATCH_PARENT,
-                    LinearLayout.LayoutParams.WRAP_CONTENT
-                )
-            })
-        }
-
-        col.addView(TextView(ctx).apply {
-            text = glossList.joinToString("; ")
-            textSize = 18f
-            typeface = Typeface.create("sans-serif-medium", Typeface.NORMAL)
-            setTextColor(ctx.themeColor(R.attr.ptText))
-            layoutParams = LinearLayout.LayoutParams(
-                LinearLayout.LayoutParams.MATCH_PARENT,
-                LinearLayout.LayoutParams.WRAP_CONTENT
-            ).also { if (posLabels.isNotEmpty()) it.topMargin = dp(6) }
-        })
-
-        if (miscText != null) {
-            col.addView(TextView(ctx).apply {
-                text = miscText
-                textSize = 12f
-                setTextColor(ctx.themeColor(R.attr.ptTextHint))
-                setTypeface(null, Typeface.ITALIC)
-                layoutParams = LinearLayout.LayoutParams(
-                    LinearLayout.LayoutParams.MATCH_PARENT,
-                    LinearLayout.LayoutParams.WRAP_CONTENT
-                ).also { it.topMargin = dp(4) }
-            })
-        }
-
-        examples.forEachIndexed { i, ex ->
-            val initialTranslation = exampleTranslations?.getOrNull(i) ?: ""
-            val (block, translationTv) = buildExampleBlock(ctx, ex.text, initialTranslation)
-            // Extra 2dp on top of the block's internal 8dp = the spec's
-            // 12dp-from-misc / 10dp-between-examples gap.
-            val topGap = if (i == 0) dp(10) else dp(2)
-            (block.layoutParams as LinearLayout.LayoutParams).topMargin = topGap
-            col.addView(block)
-            if (senseIndex >= 0 && translationRegistry != null) {
-                translationRegistry[senseIndex to i] = translationTv
-            }
-        }
-
-        row.addView(col)
-        parent.addView(row)
-    }
-
-    /**
-     * Example block: left-rail (2dp accent @ 35% α) + a column with the
-     * source line on top and the (async) translation beneath. Both lines
-     * are muted — the rail carries the "quoted example" semantic; muted
-     * type pushes the example back so the sense gloss stays foreground.
-     * The translation is italicized only when the target language uses a
-     * Latin script, since CJK / Cyrillic / Indic glyphs either lack
-     * italic forms or render them as visually distinct characters.
-     */
-    private fun buildExampleBlock(ctx: Context, text: String, initialTranslation: String): Pair<View, TextView> {
-        val accentRing = withAlpha(ctx.themeColor(R.attr.ptAccent), 0.35f)
-        val block = LinearLayout(ctx).apply {
-            orientation = LinearLayout.HORIZONTAL
-            layoutParams = LinearLayout.LayoutParams(
-                LinearLayout.LayoutParams.MATCH_PARENT,
-                LinearLayout.LayoutParams.WRAP_CONTENT
-            ).also { it.topMargin = dp(8) }
-        }
-        block.addView(View(ctx).apply {
-            setBackgroundColor(accentRing)
-            layoutParams = LinearLayout.LayoutParams(dp(2), LinearLayout.LayoutParams.MATCH_PARENT)
-        })
-        val inner = LinearLayout(ctx).apply {
-            orientation = LinearLayout.VERTICAL
-            layoutParams = LinearLayout.LayoutParams(
-                LinearLayout.LayoutParams.MATCH_PARENT,
-                LinearLayout.LayoutParams.WRAP_CONTENT
-            ).also { it.marginStart = dp(12) }
-        }
-        inner.addView(TextView(ctx).apply {
-            this.text = text
-            textSize = 14f
-            typeface = Typeface.create("sans-serif-medium", Typeface.NORMAL)
-            setTextColor(ctx.themeColor(R.attr.ptTextMuted))
-            setLineSpacing(0f, 1.5f)
-        })
-        val italic = targetSupportsItalics(ctx)
-        val translationTv = TextView(ctx).apply {
-            this.text = initialTranslation
-            visibility = if (initialTranslation.isNotBlank()) View.VISIBLE else View.GONE
-            textSize = 13f
-            setTextColor(ctx.themeColor(R.attr.ptTextMuted))
-            if (italic) setTypeface(null, Typeface.ITALIC)
-            setLineSpacing(0f, 1.45f)
-            layoutParams = LinearLayout.LayoutParams(
-                LinearLayout.LayoutParams.MATCH_PARENT,
-                LinearLayout.LayoutParams.WRAP_CONTENT
-            ).also { it.topMargin = dp(2) }
-        }
-        inner.addView(translationTv)
-        block.addView(inner)
-        return block to translationTv
     }
 
     /** True when the target gloss language renders italics legibly — i.e.,

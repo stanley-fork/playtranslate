@@ -16,7 +16,32 @@ import kotlin.math.sign
  *  the view's own hold semantics — its long-press (the Anki one-tap add)
  *  fires at the long-press timeout exactly as a touch hold does, an earlier
  *  release clicks. Everything else activates on A press-down. */
-data class NavAction(val view: View, val holdActivates: Boolean = false)
+data class NavAction(
+    val view: View,
+    val holdActivates: Boolean = false,
+    /** Set for a target that is no view of its own, one of many INSIDE
+     *  [view] (a row or a button of a definitions document): its rect and
+     *  its activation come from here. Null for an ordinary view. */
+    val target: NavTarget? = null,
+)
+
+/** Whether this and [other] name the same target: the same view, and the
+ *  same target inside it when there is one. Actions are collected afresh on
+ *  every keypress, so a cursor is compared, never kept by reference. */
+fun NavAction.sameTarget(other: NavAction): Boolean = view === other.view && target == other.target
+
+/** A press-down activation: the inner target's own, or a click on the view. */
+fun NavAction.activate() {
+    target?.activate() ?: view.performClick()
+}
+
+/** A controller target drawn inside a view that holds many of them. Two are
+ *  the same target when they are equal. */
+interface NavTarget {
+    /** The target's live rect on screen; false when it is not showing. */
+    fun rectOnScreen(out: Rect): Boolean
+    fun activate()
+}
 
 /** The sheet's side of the controller-navigation seam. [CaptureResultOverlay]
  *  implements it; a separate interface because the nav controller can't be an

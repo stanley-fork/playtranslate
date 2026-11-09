@@ -8,14 +8,11 @@ import android.view.KeyEvent
 import android.view.View
 import android.view.ViewGroup
 import android.widget.ScrollView
-import android.widget.TextView
 import com.playtranslate.R
 import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
-import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
-import org.junit.Assert.assertSame
 import org.junit.Assert.assertTrue
 import org.junit.Before
 import org.junit.Test
@@ -28,17 +25,20 @@ import org.robolectric.shadows.ShadowSystemClock
 import java.time.Duration
 
 /**
- * Pins the magnifier lens's "Load more (n)" row ([LensLoadMore]): it reads
- * the count, a tap reaches [MagnifierLens.onLoadMoreTap] once per gesture and
- * never while loading, [MagnifierLens.setLoadMoreLoading] flips its text in
- * place, it is the split body's last controller target, a rebind without it
- * removes it (moving a controller cursor that sat on it to the first
- * section, or to the revealed one), and its ripple stays off the background
- * the nav tint owns. Also where a rebind leaves the body's viewport
+ * Pins the magnifier lens's body as rows of one document: every section is
+ * a row with its own headword (the tapped unit's included, so the pill is
+ * hidden while rows show), and the "Load more (n)" row ([LensLoadMore])
+ * reads the count, reaches [MagnifierLens.onLoadMoreTap] once per gesture
+ * and never while loading, is redrawn by [MagnifierLens.setLoadMoreLoading],
+ * is the body's last controller target, and is removed by a rebind without
+ * it (moving a controller cursor that sat on it to the target in its slot,
+ * or to the revealed row). Also where a rebind leaves the body's viewport
  * ([LensScroll]): Keep keeps the offset, Reveal lands on the secondary's
- * column through the card's grow, Top is at the top even over a Keep bind
- * that has not laid out yet. These run real layout passes: the body is
- * taller than the grown card and scrolls.
+ * row through the card's grow, Top is at the top even over a Keep bind.
+ *
+ * No engine lays a page out here, so the test stands in for it
+ * ([MagnifierLens.layoutRowsForTest]); the scroll and the card's fit run on
+ * real layout passes.
  */
 @RunWith(RobolectricTestRunner::class)
 class MagnifierLensLoadMoreTest {
@@ -66,6 +66,7 @@ class MagnifierLensLoadMoreTest {
 
     @Before
     fun setUp() {
+        DefinitionShells.reset()
         controller = Robolectric.buildActivity(Host::class.java).setup()
         val activity = controller.get()
         lens = MagnifierLens(activity, activity.windowManager, Display.DEFAULT_DISPLAY)
@@ -81,6 +82,7 @@ class MagnifierLensLoadMoreTest {
     fun tearDown() {
         lens.dismiss()
         controller.pause().stop().destroy()
+        DefinitionShells.reset()
     }
 
     /** Moves the clock past the 300 ms debounce the row shares with the open
@@ -88,104 +90,119 @@ class MagnifierLensLoadMoreTest {
      *  of a lens that has never been tapped. */
     private fun pastDebounce() = ShadowSystemClock.advanceBy(Duration.ofMillis(400))
 
-    private fun row(): TextView = requireNotNull(lens.loadMoreRowForTest()) { "no row bound" }
-
-    private fun press(target: View, keyCode: Int) {
-        target.dispatchKeyEvent(KeyEvent(KeyEvent.ACTION_DOWN, keyCode))
-        target.dispatchKeyEvent(KeyEvent(KeyEvent.ACTION_UP, keyCode))
+    /** The page's layout report for what is bound, every row [ROW] tall. */
+    private fun laidOut(): List<String> {
+        lens.layoutRowsForTest(ROW)
+        return lens.navRowsForTest()
     }
 
-    @Test fun `row shows the count and a click fires once`() {
+    private fun press(keyCode: Int) {
+        val window = requireNotNull(lens.rootViewForTest())
+        window.dispatchKeyEvent(KeyEvent(KeyEvent.ACTION_DOWN, keyCode))
+        window.dispatchKeyEvent(KeyEvent(KeyEvent.ACTION_UP, keyCode))
+    }
+
+    private fun words(): List<String> = lens.shownRowsForTest().filterIsInstance<DefRow.Word>().map { it.data.word }
+
+    @Test fun `every section is a row with its own word, the tapped unit's first, and the pill steps aside`() {
+        assertTrue("the magnifier and the loading lens name the word in the pill", run {
+            lens.setLoading("弾ける", "はじける")
+            lens.pillShownForTest()
+        })
+        lens.setSplitDefinitions(primary, listOf(sec1, sec2), false)
+        assertEquals(listOf("弾ける", "弾く", "弾く"), words())
+        assertTrue(lens.shownRowsForTest().all { it is DefRow.Word && it.variant == DefRow.Variant.LENS })
+        assertFalse("a row names the word now", lens.pillShownForTest())
+
+        // The longer unit on top: the secondaries first, the tapped unit last.
+        lens.setSplitDefinitions(primary, listOf(sec1), true)
+        assertEquals(listOf("弾く", "弾ける"), words())
+
+        // A lone word is the same row, alone.
+        lens.setDefinitions(primary.data, null)
+        assertEquals(listOf("弾ける"), words())
+        assertFalse(lens.pillShownForTest())
+
+        // Back to the magnifier: no rows, and the pill returns.
+        lens.setDefinitions(null, null)
+        assertTrue(words().isEmpty())
+        assertTrue(lens.pillShownForTest())
+    }
+
+    @Test fun `row shows the count and a tap fires once`() {
         lens.setSplitDefinitions(primary, emptyList(), false, LensLoadMore(3))
-        val row = row()
-        assertEquals("Load more (3)", row.text.toString())
+        assertEquals("Load more (3)", lens.loadMoreTextForTest())
+        assertEquals(DefRow.More::class, lens.shownRowsForTest().last()::class)
+        val row = laidOut().last()
 
         pastDebounce()
-        row.performClick()
-        row.performClick()   // a second delivery of the same gesture, inside the debounce
+        lens.tapRowForTest(row)
+        lens.tapRowForTest(row)   // a second delivery of the same gesture, inside the debounce
         assertEquals(1, loadMoreTaps)
     }
 
-    @Test fun `row ignores clicks while loading`() {
+    @Test fun `row ignores taps while loading`() {
         lens.setSplitDefinitions(primary, emptyList(), false, LensLoadMore(2))
-        val row = row()
+        val row = laidOut().last()
         pastDebounce()
-        row.performClick()
+        lens.tapRowForTest(row)
         assertEquals(1, loadMoreTaps)
 
         lens.setLoadMoreLoading(true)
-        assertSame("flipped in place, no rebind", row, lens.loadMoreRowForTest())
-        assertEquals("Looking up…", row.text.toString())
+        assertEquals("Looking up…", lens.loadMoreTextForTest())
+        assertEquals("the same row, still the last target", row, laidOut().last())
         pastDebounce()
-        row.performClick()
+        lens.tapRowForTest(row)
         assertEquals("a loading row is inert", 1, loadMoreTaps)
 
         lens.setLoadMoreLoading(false)
-        assertEquals("Load more (2)", row.text.toString())
+        assertEquals("Load more (2)", lens.loadMoreTextForTest())
         pastDebounce()
-        row.performClick()
+        lens.tapRowForTest(row)
         assertEquals(2, loadMoreTaps)
     }
 
     @Test fun `row is the last nav target`() {
         lens.setSplitDefinitions(primary, emptyList(), false, LensLoadMore(2))
-        val row = row()
-        val nav = lens.navSectionsForTest()
-        assertEquals(2, nav.size)
-        assertSame(row, nav.last())
-        // The zero-secondary shape: the primary's column, a divider, the row.
-        val body = row.parent as ViewGroup
-        assertEquals(3, body.childCount)
-        assertSame(nav.first(), body.getChildAt(0))
-        assertSame(row, body.getChildAt(2))
+        val nav = laidOut()
+        assertEquals("the tapped unit's row, then the row", 2, nav.size)
+        assertEquals(2, lens.shownRowsForTest().size)
 
         // A primary with nothing to open leaves the row as the only target.
         lens.setSplitDefinitions(
             section("弾ける", "はじける", opens = false), emptyList(), false, LensLoadMore(2),
         )
-        assertEquals(listOf<View>(row()), lens.navSectionsForTest())
+        assertEquals(listOf(nav.last()), laidOut())
     }
 
     @Test fun `rebind without the row removes it`() {
         lens.setSplitDefinitions(primary, emptyList(), false, LensLoadMore(2))
-        val oldRow = row()
+        val row = laidOut().last()
 
         lens.setSplitDefinitions(primary, listOf(sec1, sec2), false)
-        assertNull(lens.loadMoreRowForTest())
-        assertNull("detached", oldRow.parent)
-        val nav = lens.navSectionsForTest()
+        assertNull(lens.loadMoreTextForTest())
+        val nav = laidOut()
         assertEquals(3, nav.size)
-        assertFalse(oldRow in nav)
+        assertFalse(row in nav)
 
         // Without a row the loading flip is a no-op.
         lens.setLoadMoreLoading(true)
-        assertEquals("Load more (2)", oldRow.text.toString())
+        assertNull(lens.loadMoreTextForTest())
+        assertEquals(3, lens.shownRowsForTest().size)
     }
 
-    @Test fun `the row carries no background`() {
+    @Test fun `a controller cursor starts on the first row and on the row lands on the target in its slot when a rebind drops it`() {
         lens.setSplitDefinitions(primary, emptyList(), false, LensLoadMore(2))
-        val row = row()
-        // The nav tint writes and then nulls a target's background, so the
-        // ripple must live in the foreground.
-        assertNull(row.background)
-        assertNotNull(row.foreground)
-    }
-
-    @Test fun `a controller cursor on the row lands on the target in its slot when a rebind drops it`() {
-        lens.setSplitDefinitions(primary, emptyList(), false, LensLoadMore(2))
-        val row = row()
-        val window = row.rootView
-        lens.focusPillForController()
-        press(window, KeyEvent.KEYCODE_DPAD_DOWN)   // pill to the primary
-        press(window, KeyEvent.KEYCODE_DPAD_DOWN)   // primary to the row
-        assertNotNull("the cursor tints the row", row.background)
+        val first = laidOut()
+        lens.focusForController()
+        assertEquals("the pill is hidden: the cursor starts on the word's row", first[0], lens.cursorRowForTest())
+        press(KeyEvent.KEYCODE_DPAD_DOWN)   // the word's row to the "Load more" row
+        assertEquals(first[1], lens.cursorRowForTest())
 
         // No reveal: the section that took the row's slot, the first loaded.
         lens.setSplitDefinitions(primary, listOf(sec1, sec2), false)
-        val nav = lens.navSectionsForTest()
-        assertNull(nav[0].background)
-        assertNotNull("the cursor tints the section in the row's slot", nav[1].background)
-        assertNull(nav[2].background)
+        val nav = laidOut()
+        assertEquals(nav[1], lens.cursorRowForTest())
     }
 
     /** Twelve secondaries: a body taller than the grown card, so it scrolls. */
@@ -194,14 +211,21 @@ class MagnifierLensLoadMoreTest {
     /** Runs the rebind's layout pass and the grow animation to their end. */
     private fun settle() = shadowOf(Looper.getMainLooper()).idleFor(Duration.ofSeconds(1))
 
-    /** The body's scroll viewport, the ScrollView above a section's column. */
-    private fun viewportOf(column: View): ScrollView =
-        generateSequence(column.parent) { it.parent }.filterIsInstance<ScrollView>().first()
+    /** The body's scroll viewport. */
+    private fun viewport(): ScrollView {
+        fun find(v: View): ScrollView? = when (v) {
+            is ScrollView -> v
+            is ViewGroup -> (0 until v.childCount).firstNotNullOfOrNull { find(v.getChildAt(it)) }
+            else -> null
+        }
+        return requireNotNull(find(requireNotNull(lens.rootViewForTest())))
+    }
 
     /** Binds [tall] under the primary, lets it lay out, and scrolls the body
      *  to [y], checking the body really scrolled there. */
     private fun tallBodyScrolledTo(y: Int) {
         lens.setSplitDefinitions(primary, tall, false)
+        laidOut()
         settle()
         lens.scrollToForTest(y)
         assertEquals("precondition: the body scrolls", y, lens.scrollYForTest())
@@ -210,87 +234,83 @@ class MagnifierLensLoadMoreTest {
     @Test fun `a Keep rebind keeps the offset the body had`() {
         tallBodyScrolledTo(SCROLLED)
         lens.setSplitDefinitions(primary, tall, false, scroll = LensScroll.Keep)
+        laidOut()
         settle()
         assertEquals(SCROLLED, lens.scrollYForTest())
     }
 
-    @Test fun `a Reveal rebind lands on that secondary's column, through the grow`() {
+    @Test fun `a Reveal rebind lands on that secondary's row, through the grow`() {
         // The load's shape: the primary and the row, then the loaded
         // sections, taller than the card, which grows in the same rebind.
         lens.setSplitDefinitions(primary, emptyList(), false, LensLoadMore(tall.size))
+        // Two short rows: the card fits them without growing to its limit.
+        lens.layoutRowsForTest(20)
         settle()
-        val viewport = viewportOf(lens.navSectionsForTest()[0])
-        val heightBefore = viewport.height
+        val heightBefore = viewport().height
         lens.setSplitDefinitions(primary, tall, false, scroll = LensScroll.Reveal(1))
+        val nav = laidOut()
         settle()
-        assertTrue("precondition: the card grew", viewport.height > heightBefore)
-        // The primary on top: the primary's column, then the secondaries'.
-        val revealed = lens.navSectionsForTest()[2]
-        assertTrue(revealed.top > 0)
-        assertEquals(revealed.top, lens.scrollYForTest())
+        assertTrue("precondition: the card grew", viewport().height > heightBefore)
+        // The primary on top: the primary's row, then the secondaries'.
+        val top = requireNotNull(lens.rowTopForTest(nav[2]))
+        assertTrue(top > 0)
+        assertEquals(top, lens.scrollYForTest())
     }
 
-    @Test fun `a Top rebind is at the top, even over a Keep not yet laid out`() {
+    @Test fun `a Top rebind is at the top, even over a Keep`() {
         tallBodyScrolledTo(SCROLLED)
         lens.setSplitDefinitions(primary, tall, false, scroll = LensScroll.Keep)
         lens.setSplitDefinitions(primary, tall, false)
         assertEquals(0, lens.scrollYForTest())
+        laidOut()
         settle()
         assertEquals(0, lens.scrollYForTest())
     }
 
-    @Test fun `a controller cursor on the row lands on the revealed section`() {
+    @Test fun `a controller cursor on the row lands on the revealed row`() {
         lens.setSplitDefinitions(primary, emptyList(), false, LensLoadMore(2))
-        val row = row()
-        val window = row.rootView
-        lens.focusPillForController()
-        press(window, KeyEvent.KEYCODE_DPAD_DOWN)   // pill to the primary
-        press(window, KeyEvent.KEYCODE_DPAD_DOWN)   // primary to the row
-        assertNotNull("the cursor tints the row", row.background)
+        val first = laidOut()
+        lens.focusForController()
+        press(KeyEvent.KEYCODE_DPAD_DOWN)   // the word's row to the "Load more" row
+        assertEquals(first[1], lens.cursorRowForTest())
 
         lens.setSplitDefinitions(primary, listOf(sec1, sec2), false, scroll = LensScroll.Reveal(1))
-        val nav = lens.navSectionsForTest()
-        assertNull(nav[0].background)
-        assertNull(nav[1].background)
-        assertNotNull("the cursor tints the revealed section", nav[2].background)
+        val nav = laidOut()
+        assertEquals("the cursor is on the revealed row", nav[2], lens.cursorRowForTest())
     }
 
-    @Test fun `a controller cursor on a section keeps its place through a rebind`() {
-        // The deck back-fill rebuilds the same targets as new views.
+    @Test fun `a controller cursor on a row keeps its place through a rebind`() {
+        // The deck back-fill binds the same sections again.
         lens.setSplitDefinitions(primary, listOf(sec1, sec2), false)
-        val before = lens.navSectionsForTest()
-        val window = before[0].rootView
-        lens.focusPillForController()
-        press(window, KeyEvent.KEYCODE_DPAD_DOWN)   // pill to the primary
-        press(window, KeyEvent.KEYCODE_DPAD_DOWN)   // primary to the first section
-        assertNotNull("the cursor tints the section", before[1].background)
+        val before = laidOut()
+        lens.focusForController()
+        press(KeyEvent.KEYCODE_DPAD_DOWN)   // the word's row to the first secondary
+        assertEquals(before[1], lens.cursorRowForTest())
 
         lens.setSplitDefinitions(primary, listOf(sec1, sec2), false, scroll = LensScroll.Keep)
-        val nav = lens.navSectionsForTest()
-        assertFalse("rebuilt, not reused", before[1] === nav[1])
-        assertNull(nav[0].background)
-        assertNotNull("the cursor tints the same slot", nav[1].background)
-        assertNull(nav[2].background)
+        assertEquals("the same rows, so the same ids", before, laidOut())
+        assertEquals(before[1], lens.cursorRowForTest())
     }
 
-    @Test fun `a controller cursor on a section lands on the revealed section when the row is tapped by touch`() {
+    @Test fun `a controller cursor on a row lands on the revealed row when the load row is tapped by touch`() {
         lens.setSplitDefinitions(primary, listOf(sec1), false, LensLoadMore(1))
-        val window = lens.navSectionsForTest()[0].rootView
-        lens.focusPillForController()
-        press(window, KeyEvent.KEYCODE_DPAD_DOWN)   // pill to the primary
-        press(window, KeyEvent.KEYCODE_DPAD_DOWN)   // primary to the section
-        assertNotNull(lens.navSectionsForTest()[1].background)
+        val first = laidOut()
+        lens.focusForController()
+        press(KeyEvent.KEYCODE_DPAD_DOWN)   // the word's row to the secondary
+        assertEquals(first[1], lens.cursorRowForTest())
 
         // The row activated by touch, not by the cursor: the host rebinds
         // with the loaded section revealed.
         lens.setSplitDefinitions(primary, listOf(sec1, sec2), false, scroll = LensScroll.Reveal(1))
-        val nav = lens.navSectionsForTest()
-        assertNull(nav[0].background)
-        assertNull(nav[1].background)
-        assertNotNull("the cursor tints the revealed section", nav[2].background)
+        val nav = laidOut()
+        assertEquals("the cursor is on the revealed row", nav[2], lens.cursorRowForTest())
     }
 
     private companion object {
         const val SCROLLED = 37
+
+        /** A row's height in the test's layout reports: tall enough that a
+         *  handful of rows overflow the grown card. */
+        const val ROW = 300
     }
 }

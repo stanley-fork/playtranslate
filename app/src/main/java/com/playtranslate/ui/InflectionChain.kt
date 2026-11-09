@@ -13,9 +13,8 @@ import com.playtranslate.language.inflection.InflectionParadigms
  * -いる « negative « -た); for a Wiktionary-pack language it is the language's
  * paradigm label over the pack's tagged lines for the surface (hablamos ·
  * nosotros · presente / pretérito). The one formatter behind every surface
- * that shows the line: the results-page word cell ([WordResultCell]), the
- * lens's native body ([WordDefinitionsView]) and styled body
- * ([DefinitionsDocument]), and the word-detail header ([WordDetailBinder]).
+ * that shows the line: the word-list row and the lens's row ([DefRowHtml])
+ * and the word-detail header ([WordDetailBinder]).
  */
 object InflectionChain {
 

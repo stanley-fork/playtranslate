@@ -1,0 +1,702 @@
+package com.playtranslate.ui
+
+import android.content.Context
+import android.graphics.Rect
+import android.util.Log
+import android.util.TypedValue
+import android.view.KeyEvent
+import android.view.View
+import android.view.ViewGroup
+import android.view.ViewTreeObserver
+import android.widget.TextView
+import androidx.annotation.VisibleForTesting
+import com.playtranslate.R
+import com.playtranslate.themeColor
+import com.playtranslate.yomitan.YomitanDataStore
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CoroutineDispatcher
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
+import org.json.JSONArray
+import org.json.JSONObject
+import kotlin.math.max
+import kotlin.math.min
+import kotlin.math.roundToInt
+
+/**
+ * A row, or a tappable element of a row, of a laid-out document, as the
+ * page last reported it: [act] is the [DefAction] it fires, empty for a row
+ * that is no tap target itself. The rect is in CSS px from the document's
+ * top-left corner.
+ */
+internal data class DocTarget(
+    val rowId: String,
+    val act: String,
+    val left: Int,
+    val top: Int,
+    val width: Int,
+    val height: Int,
+)
+
+/** One tappable document target as a controller action ([NavAction.target]). */
+internal data class DocNavTarget(
+    val document: DefinitionDocument,
+    val rowId: String,
+    val act: String,
+) : NavTarget {
+    override fun rectOnScreen(out: Rect): Boolean = document.rectOnScreen(rowId, act, out)
+    override fun activate() = document.activate(rowId, act)
+}
+
+/**
+ * A surface's definitions as ONE page: the controller a host hands its rows
+ * to ([setRows]) and hears taps from ([onAction]). It owns the view (added
+ * to [slot]), the rows, what has been sent to the page, the controller
+ * cursor, and what happens when the page cannot draw.
+ *
+ * The rules:
+ *  - **The row list here is the truth.** The page is a rendering of it. A
+ *    change to a row changes the list first and the page only if that row
+ *    has been sent, so nothing is lost when rows are sent later or again.
+ *  - **Rows are fed, not dumped.** The first [CHUNK] rows go at once; more
+ *    follow while the document's end is within two screens of what is
+ *    visible ([endIsNear]), checked after every layout and on every scroll.
+ *    The page cannot tell what is on screen (its viewport is the whole
+ *    document under a host scroll), so the host side decides. Each chunk's
+ *    structured content is fetched and its markup built off the main
+ *    thread, under the language the rows were looked up in.
+ *  - **A rebind with the same rows patches.** [setRows] with the same ids
+ *    in the same order replaces only the rows whose value changed (a deck
+ *    badge, a hide, a spinner): no new row set, no jump.
+ *  - **The view is 1 px only before its first layout.** A later row set
+ *    keeps the height on screen until its own first layout, so a rebind
+ *    never collapses the surface. Never GONE: the page reports nothing
+ *    while its viewport has no width.
+ *  - **Renderer death is recovered once per content.** A new shell takes
+ *    the dead one's place and the rows are sent again. If that one dies
+ *    too before the host sets new rows, the notice shows instead: the
+ *    content itself may be what kills the renderer, and a loop of rebuilds
+ *    would never end. There is no latch beyond that, because there is no
+ *    other renderer to fall back to.
+ *  - **No usable WebView shows the notice** where the definitions would be.
+ *
+ * [scope] must be confined to the main thread, like everything else here.
+ * [theme] is read each time a shell is taken. A document holds its shell
+ * from the first [prepare] or [setRows] until [release].
+ */
+internal class DefinitionDocument(
+    private val ctx: Context,
+    private val slot: ViewGroup,
+    private val scope: CoroutineScope,
+    private val theme: () -> DefinitionsDocument.DocTheme,
+    private val onAction: (row: DefRow, action: String) -> Unit,
+    private val onLayout: () -> Unit = {},
+    /** Where a chunk's content is fetched and its markup built. */
+    private val buildOn: CoroutineDispatcher = Dispatchers.Default,
+) {
+    private val app = ctx.applicationContext
+    private val density = ctx.resources.displayMetrics.density
+    private val rtl = ctx.resources.configuration.layoutDirection == View.LAYOUT_DIRECTION_RTL
+
+    private var rows: List<DefRow> = emptyList()
+    private var language: String = ""
+
+    /** The page's row-set generation: every `ptSet` starts one. */
+    private var gen = 0
+
+    /** Bumps when the host sets rows that are not a patch of the last ones;
+     *  recovery is allowed once per value. */
+    private var content = 0
+    private var recoveredContent = -1
+
+    /** How many of [rows], from the top, the page holds. */
+    private var fed = 0
+    private var feedJob: Job? = null
+
+    /** Row id to the id of its element in the page, and back. Ids are made
+     *  here and never derived from the row's own, which can hold anything. */
+    private val domIds = HashMap<String, String>()
+    private val rowIds = HashMap<String, String>()
+    private var nextDom = 0
+
+    /** The structured glossaries of the fed rows, kept for patches. A new
+     *  map each time, so a build off the main thread reads a stable one. */
+    private var structured: Map<Long, String> = emptyMap()
+    private val appliedCss = HashSet<String>()
+
+    /** Per row id: the latest patch asked for, so an older build that lands
+     *  later is dropped. */
+    private val patchSeq = HashMap<String, Int>()
+
+    private var view: DefinitionDocumentView? = null
+    private var shell: DefinitionShell? = null
+    private var notice: TextView? = null
+    private var holding = false
+    private var height = 1
+
+    /** Every row and tappable element of the last layout, in page order. */
+    var targets: List<DocTarget> = emptyList()
+        private set
+
+    private var cursor: DocTarget? = null
+
+    @get:VisibleForTesting
+    val shownRows: List<DefRow> get() = rows
+
+    /** True when the notice stands where the definitions would be. */
+    @get:VisibleForTesting
+    val showsNotice: Boolean get() = notice?.parent != null
+
+    // ── Rows ─────────────────────────────────────────────────────────────
+
+    /** The user has asked for definitions this document will draw: start
+     *  loading a shell now, while the lookup runs. Idempotent. */
+    fun prepare() {
+        if (holding) return
+        holding = true
+        DefinitionShells.retain(ctx)
+    }
+
+    /**
+     * The rows to show, looked up in [language] (the dictionary store's
+     * language key, which also routes the page's media). Same ids in the
+     * same order as the last call: a patch of the rows that changed.
+     * Anything else: a new row set, fed from the top.
+     */
+    fun setRows(newRows: List<DefRow>, language: String) {
+        if (newRows.isEmpty() && shell == null) {
+            // Nothing to draw and nothing drawn: no shell is taken for it.
+            rows = newRows
+            this.language = language
+            return
+        }
+        prepare()
+        val patch = shell != null && language == this.language && newRows.size == rows.size &&
+            newRows.indices.all { newRows[it].id == rows[it].id }
+        if (patch) {
+            val old = rows
+            rows = newRows
+            syncFocusable()
+            // A row not yet sent needs nothing: it is built from the list
+            // when its chunk goes, and a chunk in flight checks on landing.
+            for (i in 0 until min(fed, newRows.size)) if (newRows[i] != old[i]) patch(i)
+            return
+        }
+        rows = newRows
+        this.language = language
+        content++
+        restart()
+    }
+
+    /** The view is a focus stop only while a row offers something to act
+     *  on: a block of plain definitions (a word page's senses) is passed
+     *  over, as the native rows it replaced were. */
+    private fun syncFocusable() {
+        view?.isFocusable = rows.any {
+            when (it) {
+                is DefRow.Word -> it.opens || it.speak != null || it.trailing != null
+                is DefRow.More -> true
+                is DefRow.Imported -> it.curation?.removable == true
+                is DefRow.Sense -> it.removable || it.examples.any { e -> e.removeIndex != null }
+                is DefRow.SheetWord -> true
+            }
+        }
+    }
+
+    /** Drops the shell and the view; the rows are forgotten too. A later
+     *  [setRows] starts over. For a surface that closes, or that hides its
+     *  definitions for long (a live view pins the render process's memory). */
+    fun release() {
+        feedJob?.cancel()
+        feedJob = null
+        gen++
+        rows = emptyList()
+        fed = 0
+        targets = emptyList()
+        cursor = null
+        shell?.destroy()
+        shell = null
+        view?.let {
+            it.removeOnAttachStateChangeListener(attach)
+            if (it.isAttachedToWindow) it.viewTreeObserver.removeOnScrollChangedListener(onScroll)
+            slot.removeView(it)
+        }
+        view = null
+        notice?.let { slot.removeView(it) }
+        notice = null
+        if (holding) {
+            holding = false
+            DefinitionShells.release()
+        }
+    }
+
+    private fun restart() {
+        feedJob?.cancel()
+        feedJob = null
+        gen++
+        fed = 0
+        domIds.clear()
+        rowIds.clear()
+        patchSeq.clear()
+        structured = emptyMap()
+        targets = emptyList()
+        if (!ensureShell()) return
+        syncFocusable()
+        if (rows.isEmpty()) {
+            // Nothing to show: an empty page at 1 px, the shell kept for
+            // the rows that follow a lookup.
+            shell?.exec("ptSet('',$gen)")
+            applyHeight(1)
+            return
+        }
+        feed()
+    }
+
+    private fun feed() {
+        if (feedJob?.isActive == true || fed >= rows.size) return
+        val g = gen
+        val from = fed
+        val chunk = rows.subList(from, min(from + CHUNK, rows.size)).toList()
+        val doms = chunk.map { row ->
+            domIds.getOrPut(row.id) { "k${nextDom++}".also { rowIds[it] = row.id } }
+        }
+        val lang = language
+        val known = structured
+        feedJob = scope.launch {
+            val built = try {
+                withContext(buildOn) { build(chunk, doms, lang, known) }
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                // Class only: no message (it may carry a path), no content.
+                Log.w(TAG, "chunk build failed: ${e.javaClass.simpleName}")
+                return@launch
+            }
+            if (g != gen) return@launch
+            deliver(from, chunk, doms, built, g)
+        }
+    }
+
+    private class Built(
+        val htmls: List<String>,
+        val structured: Map<Long, String>,
+        val css: Map<String, String>,
+    )
+
+    private suspend fun build(
+        chunk: List<DefRow>,
+        doms: List<String>,
+        lang: String,
+        known: Map<Long, String>,
+    ): Built {
+        val groups = chunk.flatMap {
+            when (it) {
+                is DefRow.Word -> it.data.importedGroups
+                is DefRow.Imported -> it.groups
+                is DefRow.SheetWord -> it.importedGroups
+                else -> emptyList()
+            }
+        }
+        val rowids = groups.flatMap { g -> g.senses.mapNotNull { it.scRowid } }
+        var fetched: Map<Long, String> = emptyMap()
+        var css: Map<String, String> = emptyMap()
+        if (rowids.isNotEmpty()) {
+            val caps = YomitanDataStore.stylingFor(app, lang)
+            if (caps.stylingActive) {
+                fetched = YomitanDataStore.structuredGlossaries(app, lang, rowids)
+                val dictIds = groups.mapTo(HashSet()) { it.dictId }
+                css = caps.stylesByDict.filterKeys { it in dictIds }
+            }
+        }
+        val all = if (fetched.isEmpty()) known else known + fetched
+        val htmls = chunk.indices.map { DefRowHtml.html(ctx, chunk[it], doms[it], all, lang) }
+        return Built(htmls, all, css)
+    }
+
+    private fun deliver(from: Int, chunk: List<DefRow>, doms: List<String>, built: Built, g: Int) {
+        val s = shell ?: return
+        structured = built.structured
+        for ((dictId, css) in built.css) {
+            if (appliedCss.add(dictId)) s.exec("ptApplyDictCss(${quote(dictId)},${quote(css)})")
+        }
+        val sb = StringBuilder()
+        for (i in chunk.indices) {
+            // The list moved on while this chunk was being built: the page
+            // gets the row as it is now.
+            val now = rows.getOrNull(from + i)
+            sb.append(
+                if (now != null && now != chunk[i] && now.id == chunk[i].id) {
+                    DefRowHtml.html(ctx, now, doms[i], built.structured, language)
+                } else {
+                    built.htmls[i]
+                },
+            )
+        }
+        s.exec(if (from == 0) "ptSet(${quote(sb.toString())},$g)" else "ptAppend(${quote(sb.toString())},$g)")
+        fed = from + chunk.size
+    }
+
+    private fun patch(index: Int) {
+        val row = rows[index]
+        val dom = domIds[row.id] ?: return
+        val seq = (patchSeq[row.id] ?: 0) + 1
+        patchSeq[row.id] = seq
+        val g = gen
+        val lang = language
+        val known = structured
+        scope.launch {
+            val html = withContext(buildOn) { DefRowHtml.html(ctx, row, dom, known, lang) }
+            if (g != gen || patchSeq[row.id] != seq) return@launch
+            shell?.exec("ptReplace(${quote(dom)},${quote(html)},$g)")
+        }
+    }
+
+    // ── The view and its shell ───────────────────────────────────────────
+
+    /** A live shell showing in the view, themed; false with the notice up
+     *  when the device has no usable WebView. */
+    private fun ensureShell(): Boolean {
+        if (shell != null) return true
+        val s = DefinitionShells.obtain(ctx) ?: run {
+            showNotice()
+            return false
+        }
+        hideNotice()
+        val v = view ?: DefinitionDocumentView(ctx).also {
+            view = it
+            it.keys = keys
+            it.addOnAttachStateChangeListener(attach)
+            slot.addView(it, ViewGroup.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 1))
+            if (it.isAttachedToWindow) it.viewTreeObserver.addOnScrollChangedListener(onScroll)
+        }
+        shell = s
+        s.listener = listener
+        s.mediaLanguage = language
+        appliedCss.clear()
+        v.show(s)
+        s.exec(DefinitionsDocument.themeJs(theme(), rtl))
+        return true
+    }
+
+    private fun applyHeight(px: Int) {
+        height = max(1, px)
+        val v = view ?: return
+        val lp = v.layoutParams ?: return
+        if (lp.height != height) {
+            lp.height = height
+            v.layoutParams = lp
+        }
+    }
+
+    private fun showNotice() {
+        view?.let { slot.removeView(it) }
+        view = null
+        if (notice?.parent != null) return
+        val t = theme().tokens
+        val pad = (16 * density).roundToInt()
+        notice = TextView(ctx).apply {
+            text = ctx.getString(R.string.definitions_need_webview)
+            setTextColor(t.textMuted)
+            setTextSize(TypedValue.COMPLEX_UNIT_SP, 14f)
+            setPadding(pad, (12 * density).roundToInt(), pad, (12 * density).roundToInt())
+        }.also {
+            slot.addView(it, ViewGroup.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT))
+        }
+    }
+
+    private fun hideNotice() {
+        notice?.let { slot.removeView(it) }
+        notice = null
+    }
+
+    private val listener = object : DefinitionShell.Listener {
+        override fun onLayout(gen: Int, heightCssPx: Int, targetsJson: String) {
+            if (gen != this@DefinitionDocument.gen) return
+            applyHeight((heightCssPx * density).roundToInt())
+            targets = parseTargets(targetsJson)
+            cursor = cursor?.let { c -> targets.firstOrNull { it.rowId == c.rowId && it.act == c.act } }
+            this@DefinitionDocument.onLayout()
+            feedIfNear()
+        }
+
+        override fun onAction(domId: String, act: String) {
+            val rowId = rowIds[domId] ?: return
+            val row = rows.firstOrNull { it.id == rowId } ?: return
+            this@DefinitionDocument.onAction(row, act)
+        }
+
+        override fun onRendererGone() {
+            shell = null
+            if (recoveredContent == content) {
+                Log.w(TAG, "renderer died twice on one content; showing the notice")
+                showNotice()
+                return
+            }
+            recoveredContent = content
+            restart()
+        }
+    }
+
+    private fun parseTargets(json: String): List<DocTarget> = try {
+        val a = JSONArray(json)
+        val out = ArrayList<DocTarget>(a.length() / 6)
+        var i = 0
+        while (i + 5 < a.length()) {
+            rowIds[a.getString(i)]?.let { rowId ->
+                out += DocTarget(rowId, a.getString(i + 1), a.getInt(i + 2), a.getInt(i + 3), a.getInt(i + 4), a.getInt(i + 5))
+            }
+            i += 6
+        }
+        out
+    } catch (e: Exception) {
+        Log.w(TAG, "targets unreadable: ${e.javaClass.simpleName}")
+        emptyList()
+    }
+
+    // ── Feeding on scroll ────────────────────────────────────────────────
+
+    private val onScroll = ViewTreeObserver.OnScrollChangedListener { feedIfNear() }
+
+    private val attach = object : View.OnAttachStateChangeListener {
+        override fun onViewAttachedToWindow(v: View) {
+            v.viewTreeObserver.addOnScrollChangedListener(onScroll)
+        }
+
+        override fun onViewDetachedFromWindow(v: View) {
+            v.viewTreeObserver.removeOnScrollChangedListener(onScroll)
+        }
+    }
+
+    private fun feedIfNear() {
+        if (fed < rows.size && fed > 0 && endIsNear()) feed()
+    }
+
+    /** Whether what the page holds ends within two screens of the visible
+     *  part of the view (a view not on screen at all counts from its top). */
+    private fun endIsNear(): Boolean {
+        val v = view ?: return false
+        val visible = Rect()
+        val visibleBottom = if (v.isShown && v.getLocalVisibleRect(visible)) visible.bottom else 0
+        return height - visibleBottom < 2 * ctx.resources.displayMetrics.heightPixels
+    }
+
+    // ── Targets for a controller ─────────────────────────────────────────
+
+    /** The tappable targets as actions for a virtual cursor. */
+    fun navActions(): List<NavAction> {
+        val v = view ?: return emptyList()
+        return targets.filter { it.act.isNotEmpty() }
+            .map { NavAction(v, target = DocNavTarget(this, it.rowId, it.act)) }
+    }
+
+    /** The top of row [rowId] in the view's own px, null when the page does
+     *  not hold it. For a host that anchors its scroll on a row. */
+    fun rowTopPx(rowId: String): Int? =
+        targets.firstOrNull { it.rowId == rowId }?.let { (it.top * density).roundToInt() }
+
+    /** The id of the row at [y] (the view's own px), or of the first row
+     *  below it; null for none. */
+    fun rowAt(y: Int): String? {
+        val rowTops = targets.distinctBy { it.rowId }
+        return (rowTops.lastOrNull { (it.top * density).roundToInt() <= y } ?: rowTops.firstOrNull())?.rowId
+    }
+
+    /** The document's view, for a host that measures against it. */
+    val hostView: View? get() = view
+
+    /** The view's height as the page last reported it, in px; 1 before
+     *  the first layout and for an empty document. */
+    val heightPx: Int get() = height
+
+    internal fun rectOnScreen(rowId: String, act: String, out: Rect): Boolean {
+        val v = view ?: return false
+        val t = targets.firstOrNull { it.rowId == rowId && it.act == act } ?: return false
+        if (!v.isShown) return false
+        val loc = IntArray(2)
+        v.getLocationOnScreen(loc)
+        localRect(t, out)
+        out.offset(loc[0], loc[1])
+        return true
+    }
+
+    private fun localRect(t: DocTarget, out: Rect) {
+        out.set(
+            (t.left * density).roundToInt(),
+            (t.top * density).roundToInt(),
+            ((t.left + t.width) * density).roundToInt(),
+            ((t.top + t.height) * density).roundToInt(),
+        )
+    }
+
+    internal fun activate(rowId: String, act: String) {
+        val row = rows.firstOrNull { it.id == rowId } ?: return
+        onAction(row, act)
+    }
+
+    /**
+     * Plays the page for a JVM test, where no engine lays anything out: a
+     * layout report in which every row the page has been sent is
+     * [rowHeightCssPx] tall, stacked from the top, a tap target for its own
+     * action when it has one. Goes through what a real report does: the
+     * height, the targets, the host's callback, the next chunk.
+     */
+    @VisibleForTesting
+    fun layoutForTest(rowHeightCssPx: Int) {
+        val out = ArrayList<DocTarget>()
+        var top = 0
+        for (row in rows) {
+            if (row.id !in domIds) break
+            val act = when (row) {
+                is DefRow.Word -> if (row.opens) DefAction.OPEN else ""
+                is DefRow.More -> DefAction.MORE
+                is DefRow.Imported, is DefRow.Sense -> ""
+                is DefRow.SheetWord -> if (row.hidden) "" else DefAction.TARGET
+            }
+            out += DocTarget(row.id, act, 0, top, 300, rowHeightCssPx)
+            top += rowHeightCssPx
+        }
+        applyHeight((top * density).roundToInt())
+        targets = out
+        onLayout()
+        feedIfNear()
+    }
+
+    /** Draws the controller's highlight on a target, or clears it (null). */
+    fun setCursor(target: DocTarget?) {
+        cursor = target
+        val dom = target?.let { domIds[it.rowId] }
+        shell?.exec(if (dom == null) "ptCursor(null,'')" else "ptCursor(${quote(dom)},${quote(target.act)})")
+    }
+
+    // ── Focus and D-pad on an Activity page ──────────────────────────────
+
+    private val keys = object : DefinitionDocumentView.Keys {
+        override fun onKeyDown(keyCode: Int, event: KeyEvent): Boolean {
+            val dir = when (keyCode) {
+                KeyEvent.KEYCODE_DPAD_UP -> DocNav.Dir.UP
+                KeyEvent.KEYCODE_DPAD_DOWN -> DocNav.Dir.DOWN
+                KeyEvent.KEYCODE_DPAD_LEFT -> DocNav.Dir.LEFT
+                KeyEvent.KEYCODE_DPAD_RIGHT -> DocNav.Dir.RIGHT
+                KeyEvent.KEYCODE_DPAD_CENTER, KeyEvent.KEYCODE_ENTER,
+                KeyEvent.KEYCODE_NUMPAD_ENTER, KeyEvent.KEYCODE_BUTTON_A,
+                -> {
+                    val c = cursor ?: return false
+                    if (event.repeatCount == 0) activate(c.rowId, c.act)
+                    return true
+                }
+                else -> return false
+            }
+            val next = DocNav.next(targets, cursor, dir, rtl)
+            if (next == null) {
+                // The last row the page holds is not the last row there is:
+                // send the next ones and keep focus here for them.
+                if (dir == DocNav.Dir.DOWN && fed < rows.size) {
+                    feed()
+                    return true
+                }
+                return false
+            }
+            moveCursorTo(next)
+            return true
+        }
+
+        override fun onFocus(gained: Boolean, direction: Int) {
+            if (!gained) {
+                setCursor(null)
+                return
+            }
+            val from = if (direction == View.FOCUS_UP || direction == View.FOCUS_BACKWARD) DocNav.Dir.UP else DocNav.Dir.DOWN
+            DocNav.next(targets, null, from, rtl)?.let { moveCursorTo(it) }
+        }
+
+        override fun cursorRect(out: Rect): Boolean {
+            val c = cursor ?: return false
+            localRect(c, out)
+            return true
+        }
+
+        override fun navActions(): List<NavAction> = this@DefinitionDocument.navActions()
+    }
+
+    private fun moveCursorTo(target: DocTarget) {
+        setCursor(target)
+        val v = view ?: return
+        val r = Rect()
+        localRect(target, r)
+        v.requestRectangleOnScreen(r, false)
+    }
+
+    /** JSON string literal, additionally escaping the two codepoints legal
+     *  in JSON but not in script source (U+2028/U+2029: they occur in
+     *  CJK-adjacent dictionary text). */
+    private fun quote(s: String): String =
+        JSONObject.quote(s).replace("\u2028", "\\u2028").replace("\u2029", "\\u2029")
+
+    private companion object {
+        const val TAG = "DefinitionDocument"
+
+        /** Rows per send: about two screens of list rows, and the size the
+         *  measurements put at one short wait on a slow phone. */
+        const val CHUNK = 8
+    }
+}
+
+/**
+ * Moving a cursor over a document's targets with a D-pad. Pure.
+ *
+ * The page reports targets in document order, a row before its buttons,
+ * which is also their order along the line: the row, then each button toward
+ * the line's end. Up and down move between rows, keeping the kind of target
+ * the cursor is on when the next row has one (a column of eyes walks as a
+ * column); left and right step along the row, toward the line's end being
+ * right on a left-to-right page and left on a right-to-left one. Null means
+ * there is nowhere further that way.
+ */
+internal object DocNav {
+    enum class Dir { UP, DOWN, LEFT, RIGHT }
+
+    fun next(targets: List<DocTarget>, cur: DocTarget?, dir: Dir, rtl: Boolean): DocTarget? {
+        val rows = LinkedHashMap<String, MutableList<DocTarget>>()
+        for (t in targets) if (t.act.isNotEmpty()) rows.getOrPut(t.rowId) { mutableListOf() }.add(t)
+        if (rows.isEmpty()) return null
+        val order = rows.keys.toList()
+        val at = cur?.let { c -> rows[c.rowId]?.firstOrNull { it.act == c.act } }
+        if (at == null) {
+            // A fresh cursor: the first row coming down, the last going up.
+            val row = if (dir == Dir.UP) order.last() else order.first()
+            return rows.getValue(row).first()
+        }
+        return when (dir) {
+            Dir.UP, Dir.DOWN -> {
+                val i = order.indexOf(at.rowId) + if (dir == Dir.DOWN) 1 else -1
+                val row = rows[order.getOrNull(i) ?: return null] ?: return null
+                row.firstOrNull { it.act == at.act } ?: row.first()
+            }
+            Dir.LEFT, Dir.RIGHT -> {
+                val line = rows.getValue(at.rowId)
+                val towardEnd = (dir == Dir.RIGHT) != rtl
+                line.getOrNull(line.indexOf(at) + if (towardEnd) 1 else -1)
+            }
+        }
+    }
+}
+
+/** The theme of a document that sits in one of the app's cards, its text
+ *  sized from [baseFontSizePx]. */
+internal fun cardDocTheme(ctx: Context, baseFontSizePx: Float) = DefinitionsDocument.DocTheme(
+    DefinitionsDocument.Tokens(
+        text = ctx.themeColor(R.attr.ptText),
+        textMuted = ctx.themeColor(R.attr.ptTextMuted),
+        textHint = ctx.themeColor(R.attr.ptTextHint),
+        accent = ctx.themeColor(R.attr.ptAccent),
+        panel = ctx.themeColor(R.attr.ptCard),
+        baseFontSizePx = baseFontSizePx,
+    ),
+    divider = ctx.themeColor(R.attr.ptDivider),
+    band = hiddenWordBandColor(ctx),
+    outline = ctx.themeColor(R.attr.ptOutline),
+    wash = ctx.themeColor(R.attr.ptAccentTint),
+)

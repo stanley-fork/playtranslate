@@ -6,8 +6,6 @@ import android.os.Bundle
 import android.os.Looper
 import android.view.LayoutInflater
 import android.view.View
-import android.view.ViewGroup
-import android.widget.TextView
 import androidx.test.core.app.ApplicationProvider
 import com.playtranslate.Prefs
 import com.playtranslate.R
@@ -37,7 +35,7 @@ import org.robolectric.android.controller.ActivityController
  * now shared with the workspace's Sentence page: a fresh list drawn against
  * a LOADED set orders visible words first and hidden words last, each in
  * lookup order, with the hidden ones as stubs; a store change after the
- * render re-stubs the cell in place (a toggle never moves a row); a list
+ * render re-stubs the row in place (a toggle never moves a row); a list
  * drawn BEFORE the language's set loaded is provisional, and the load's
  * bump re-renders it ordered exactly once; a row tap reaches the host with
  * the row; and Loading / Idle clear the rows.
@@ -59,8 +57,6 @@ class WordRowsBinderTest {
     }
 
     private val app: Context = ApplicationProvider.getApplicationContext()
-    private val hideCd by lazy { app.getString(R.string.hidden_word_hide_content_description) }
-    private val showCd by lazy { app.getString(R.string.hidden_word_show_content_description) }
 
     private lateinit var controller: ActivityController<Host>
     private lateinit var activity: Host
@@ -86,15 +82,15 @@ class WordRowsBinderTest {
     fun setUp(): Unit = runBlocking {
         HiddenWordsStore.resetForTest(app)
         clearPrefs()
+        // A new install starts with the card collapsed; these tests are about a shown card.
+        Prefs(app).hideWordsSection = false
         controller = Robolectric.buildActivity(Host::class.java).setup()
         activity = controller.get()
         root = LayoutInflater.from(activity).inflate(R.layout.fragment_translation_result, null)
         binder = newBinder()
     }
 
-    /** A binder over the inflated root; the styled tests re-point [binder]
-     *  at one with their own cap. */
-    private fun newBinder(styledRowCap: Int = STYLED_WORD_ROW_CAP) = WordRowsBinder(
+    private fun newBinder() = WordRowsBinder(
         root, activity, Prefs(activity),
         object : WordRowsBinder.Host {
             override val isAlive: Boolean get() = true
@@ -102,7 +98,6 @@ class WordRowsBinderTest {
             override val ttsAlertTarget: TtsAlertTarget get() = TtsAlertTarget.InActivity(activity)
             override fun onWordTapped(row: RowState) { tapped += row.displayWord }
         },
-        styledRowCap = styledRowCap,
     ).also { it.onRowsWanted = { rowsWanted++ } }
 
     @After
@@ -115,35 +110,21 @@ class WordRowsBinderTest {
 
     private fun settled() = WordLookupsState.Settled(rows, emptyList(), emptyMap())
 
-    private fun cells(): List<WordResultCell> =
-        (0 until binder.container.childCount).map { binder.container.getChildAt(it) }
-            .filterIsInstance<WordResultCell>()
+    /** The rows the card has published to its document, in drawn order. */
+    private fun shown(): List<DefRow.Word> = binder.shownRows
 
-    private fun order(): List<String> = cells().map { cell ->
-        cell.descendants().filterIsInstance<TextView>().first().text.toString()
-    }
+    private fun order(): List<String> = shown().map { it.data.word }
 
-    /** The eye lives on the cell's trailing action slot (a FrameLayout
-     *  carrying the content description). */
-    private fun isStub(cell: WordResultCell): Boolean =
-        cell.descendants()
-            .first { it.contentDescription == hideCd || it.contentDescription == showCd }
-            .contentDescription == showCd
-
-    private fun View.descendants(): Sequence<View> = sequence {
-        yield(this@descendants)
-        if (this@descendants is ViewGroup) {
-            for (i in 0 until childCount) yieldAll(getChildAt(i).descendants())
-        }
-    }
+    /** A hidden word's row: the stub, whose eye shows it again. */
+    private fun isStub(row: DefRow.Word): Boolean = row.trailing == DefRow.Trailing.SHOW
 
     @Test
     fun `a fresh list against a loaded set draws hidden words last as stubs`(): Unit = runBlocking {
         HiddenWordsStore.setHidden(app, SourceLangId.JA, "猫", "ねこ", hidden = true)
         binder.render(settled())
         assertEquals(listOf("食べる", "魚", "猫"), order())
-        assertTrue(isStub(cells()[2]))
-        assertFalse(isStub(cells()[0]))
+        assertTrue(isStub(shown()[2]))
+        assertFalse(isStub(shown()[0]))
         assertFalse(root.findViewById<View>(R.id.tvNoWords).isShown && binder.isEmpty)
     }
 
@@ -155,10 +136,10 @@ class WordRowsBinderTest {
         HiddenWordsStore.setHidden(app, SourceLangId.JA, "食べる", "たべる", hidden = true)
         binder.applyHiddenState()
         assertEquals("a toggle never moves a row", listOf("猫", "食べる", "魚"), order())
-        assertTrue(isStub(cells()[1]))
+        assertTrue(isStub(shown()[1]))
         HiddenWordsStore.setHidden(app, SourceLangId.JA, "食べる", "たべる", hidden = false)
         binder.applyHiddenState()
-        assertFalse(isStub(cells()[1]))
+        assertFalse(isStub(shown()[1]))
     }
 
     @Test
@@ -171,87 +152,85 @@ class WordRowsBinderTest {
         HiddenWordsStore.loaded(app, SourceLangId.JA)
         binder.applyHiddenState()
         assertEquals(listOf("食べる", "魚", "猫"), order())
-        assertTrue(isStub(cells()[2]))
+        assertTrue(isStub(shown()[2]))
         // A later toggle re-stubs in place: the ordering ran exactly once.
         HiddenWordsStore.setHidden(app, SourceLangId.JA, "魚", "さかな", hidden = true)
         binder.applyHiddenState()
         assertEquals(listOf("食べる", "魚", "猫"), order())
     }
 
-    private fun structuredRow(word: String, reading: String, meaning: String, rowid: Long) =
-        row(word, reading, meaning).copy(
-            importedGroups = listOf(
-                ImportedSenseGroup("Jitendex", listOf(ImportedSense(meaning, scRowid = rowid)), dictId = "jt"),
-            ),
-        )
-
-    private fun renderersUnder(word: String): List<YomitanDefinitionsView> = cells()
-        .first { it.descendants().filterIsInstance<TextView>().first().text.toString() == word }
-        .descendants().filterIsInstance<YomitanDefinitionsView>().toList()
-
-    private fun allRenderers(): List<YomitanDefinitionsView> =
-        cells().flatMap { it.descendants().filterIsInstance<YomitanDefinitionsView>().toList() }
-
     @Test
-    fun `styled renderers are capped in list order, pooled across rebuilds, and destroyed by release`() {
-        val payload = YomitanStyledData(
-            mapOf(1L to "{}", 2L to "{}", 3L to "{}"), mapOf("jt" to ".x{}"), "ja",
-        )
-        // Imported, but nothing structured retained: the flat tier, never a WebView.
-        val flat = row("魚", "さかな", "fish").copy(
-            importedGroups = listOf(ImportedSenseGroup("JMdict", listOf(ImportedSense("fish")), dictId = "jm")),
-        )
-        val settled = WordLookupsState.Settled(
-            listOf(
-                structuredRow("猫", "ねこ", "cat", 1L), flat,
-                structuredRow("犬", "いぬ", "dog", 2L), structuredRow("鳥", "とり", "bird", 3L),
-            ),
-            emptyList(), emptyMap(), styled = payload,
-        )
-        binder = newBinder(styledRowCap = 2)
-        binder.render(settled)
-        assertEquals(1, renderersUnder("猫").size)
-        assertEquals(0, renderersUnder("魚").size)
-        assertEquals(1, renderersUnder("犬").size)
-        // Third structured row, past the cap: flat.
-        assertEquals(0, renderersUnder("鳥").size)
-        val first = allRenderers()
-        assertEquals(2, first.size)
+    fun `the rows are one document, kept across rebuilds and gone for good on release`() {
+        binder.render(settled())
+        assertEquals(3, shown().size)
+        assertEquals("one view holds every row", 1, binder.container.childCount)
+        val view = binder.container.getChildAt(0)
+        assertTrue(view is DefinitionDocumentView)
 
-        // A rebuild (a capture in live mode) reuses the same two renderers:
-        // no re-mint, and none on screen in between.
+        // A rebuild (a capture in live mode) empties the page and fills it
+        // again in the same view: no new WebView per capture.
         binder.render(WordLookupsState.Loading)
-        assertTrue(allRenderers().isEmpty())
-        binder.render(settled)
-        assertEquals(first.toSet(), allRenderers().toSet())
+        assertTrue(shown().isEmpty())
+        binder.render(settled())
+        assertEquals(3, shown().size)
+        assertTrue(view === binder.container.getChildAt(0))
 
         // Teardown is terminal and idempotent: nothing on screen, and a
-        // render after it binds every row flat.
+        // render after it draws nothing.
         binder.release()
-        assertTrue(allRenderers().isEmpty())
+        assertEquals(0, binder.container.childCount)
         binder.release()
-        binder.render(settled)
-        assertEquals(4, cells().size)
-        assertTrue(allRenderers().isEmpty())
+        binder.render(settled())
+        assertEquals(0, binder.container.childCount)
+        assertTrue(shown().isEmpty())
     }
 
     @Test
-    fun `a cap of zero binds every row flat`() {
-        val payload = YomitanStyledData(mapOf(1L to "{}"), mapOf("jt" to ".x{}"), "ja")
-        binder = newBinder(styledRowCap = 0)
+    fun `a row carries its imported dictionaries, its eye and its speak button`() {
+        val imported = listOf(
+            ImportedSenseGroup("Jitendex", listOf(ImportedSense("cat", scRowid = 1L)), dictId = "jt"),
+        )
         binder.render(
             WordLookupsState.Settled(
-                listOf(structuredRow("猫", "ねこ", "cat", 1L)), emptyList(), emptyMap(), styled = payload,
+                listOf(row("猫", "ねこ", "cat").copy(importedGroups = imported)),
+                emptyList(), emptyMap(), definitionLang = "ja",
             ),
         )
-        assertEquals(1, cells().size)
-        assertTrue(allRenderers().isEmpty())
+        val row = shown().single()
+        assertEquals(imported, row.data.importedGroups)
+        assertEquals(DefRow.Trailing.HIDE, row.trailing)
+        assertEquals(DefRow.Speak.IDLE, row.speak)
+        assertTrue(row.opens)
+    }
+
+    @Test
+    fun `the eye writes the opposite of what its row was showing`(): Unit = runBlocking {
+        HiddenWordsStore.loaded(app, SourceLangId.JA)
+        binder.render(settled())
+        binder.tapForTest(1, DefAction.TRAILING)
+        awaitHidden("食べる", true)
+        binder.applyHiddenState()
+        assertTrue(isStub(shown()[1]))
+        // The stub's eye shows the word again.
+        binder.tapForTest(1, DefAction.TRAILING)
+        awaitHidden("食べる", false)
+    }
+
+    /** The eye's store write runs off the main thread; wait for it to land. */
+    private fun awaitHidden(word: String, hidden: Boolean) {
+        val deadline = System.currentTimeMillis() + 5_000
+        while (System.currentTimeMillis() < deadline) {
+            shadowOf(Looper.getMainLooper()).idle()
+            if ((word in HiddenWordsStore.snapshot(app, SourceLangId.JA)) == hidden) return
+            Thread.sleep(10)
+        }
+        throw AssertionError("$word never became hidden=$hidden")
     }
 
     @Test
     fun `row taps reach the host and Loading clears the rows`() {
         binder.render(settled())
-        cells()[1].performClick()
+        binder.tapForTest(1, DefAction.OPEN)
         assertEquals(listOf("食べる"), tapped)
         binder.render(WordLookupsState.Loading)
         assertTrue(binder.isEmpty)
@@ -271,7 +250,7 @@ class WordRowsBinderTest {
     private val hidePref: Boolean get() = Prefs(app).hideWordsSection
 
     @Test
-    fun `a hidden card never asks for rows, and a Settled landing while hidden still builds`() {
+    fun `a hidden card never asks for rows and holds no page, and a Settled landing while hidden is drawn on the reveal`() {
         Prefs(app).hideWordsSection = true
         binder.applyWordsVisibility()
         assertEquals(View.GONE, card.visibility)
@@ -279,15 +258,20 @@ class WordRowsBinderTest {
         assertEquals(0, rowsWanted)
         assertTrue("Analyzed draws like Loading", binder.isEmpty)
         assertEquals(View.VISIBLE, root.findViewById<View>(R.id.tvMainWordsLoading).visibility)
-        // Rows requested earlier, card hidden before they settled: built anyway.
+        // Rows requested earlier, card hidden before they settled: kept (the
+        // lookup was paid), but a hidden card takes no page for them.
         binder.render(settled())
-        assertEquals(3, cells().size)
+        assertFalse(binder.isEmpty)
+        assertTrue(shown().isEmpty())
+        assertEquals(0, binder.container.childCount)
         assertEquals(View.GONE, root.findViewById<View>(R.id.tvMainWordsLoading).visibility)
-        // Outside live mode the eye reveals and persists the reveal.
+        // Outside live mode the eye reveals and persists the reveal, and the
+        // kept rows are drawn.
         eye.performClick()
         assertEquals(View.VISIBLE, card.visibility)
         assertFalse(hidePref)
         assertEquals(1, rowsWanted)
+        assertEquals(3, shown().size)
     }
 
     @Test

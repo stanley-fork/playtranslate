@@ -71,7 +71,9 @@ class WorkspaceControllerNav(
     ctx: Context,
     private val host: WorkspaceNavHost,
 ) {
-    private var cursorView: View? = null
+    /** The cursor's target, compared by [NavAction.sameTarget] against each
+     *  keypress's fresh actions; a view, or a target inside a document. */
+    private var cursor: NavAction? = null
 
     /** Keycodes whose DOWN we consumed, so the matching UP is consumed too. */
     private val consumedDown = mutableSetOf<Int>()
@@ -119,10 +121,10 @@ class WorkspaceControllerNav(
             host.isModalUp -> Unit
             dir != null -> {
                 cancelHold()
-                if (cursorView == null) selectFirst() else moveCursor(dir)
+                if (cursor == null) selectFirst() else moveCursor(dir)
             }
             // First A selects; only a second activates.
-            ev.repeatCount == 0 -> if (cursorView == null) selectFirst() else onActivateDown(ev)
+            ev.repeatCount == 0 -> if (cursor == null) selectFirst() else onActivateDown(ev)
         }
         consumedDown.add(keyCode)
         return true
@@ -131,20 +133,20 @@ class WorkspaceControllerNav(
     fun handleGenericMotion(ev: MotionEvent): Boolean = stick.handleGenericMotion(ev)
 
     private fun onActivateDown(ev: KeyEvent) {
-        val cur = cursorView ?: run { selectFirst(); return }
+        val cur = cursor ?: run { selectFirst(); return }
         val action = (host.navActions() + host.headerNavActions())
-            .firstOrNull { it.view === cur }
-        if (action == null || !cur.isShown) {
+            .firstOrNull { it.sameTarget(cur) }
+        if (action == null || !action.view.isShown) {
             selectFirst()
             return
         }
         if (action.holdActivates) {
             if (keyPressView == null) {
-                keyPressView = cur
-                ConfirmKeyPress.down(cur, ev)
+                keyPressView = action.view
+                ConfirmKeyPress.down(action.view, ev)
             }
         } else {
-            cur.performClick()
+            action.activate()
         }
     }
 
@@ -179,26 +181,31 @@ class WorkspaceControllerNav(
         return true
     }
 
+    /** The action's live rect: its inner target's when it has one (a row of
+     *  a document), else its view's. */
+    private fun rectOnScreen(a: NavAction, out: Rect): Boolean =
+        a.target?.rectOnScreen(out) ?: viewRectOnScreen(a.view, out)
+
     /** Collected lazily per keypress — no registry to go stale. */
-    private fun candidatesOf(actions: List<NavAction>): List<Pair<View, Rect>> {
-        val out = ArrayList<Pair<View, Rect>>()
+    private fun candidatesOf(actions: List<NavAction>): List<Pair<NavAction, Rect>> {
+        val out = ArrayList<Pair<NavAction, Rect>>()
         for (a in actions) {
             val r = Rect()
-            if (viewRectOnScreen(a.view, r)) out.add(a.view to r)
+            if (rectOnScreen(a, r)) out.add(a to r)
         }
         return out
     }
 
-    private fun candidates(): List<Pair<View, Rect>> = candidatesOf(host.navActions())
+    private fun candidates(): List<Pair<NavAction, Rect>> = candidatesOf(host.navActions())
 
-    private fun setCursor(view: View, rectOnScreen: Rect) {
-        cursorView = view
+    private fun setCursor(action: NavAction, rectOnScreen: Rect) {
+        cursor = action
         lastItemRect.set(rectOnScreen)
         // Page content scrolls through the page's viewport; anything else
         // (fixed chrome, a popover's rows) at most within its own scrolling
         // parent — a ⋯ menu the host capped scrolls its rows.
-        if (host.viewInScrollViewport(view)) host.ensureVisible(rectOnScreen)
-        else view.revealInScrollingAncestor()
+        if (host.viewInScrollViewport(action.view)) host.ensureVisible(rectOnScreen)
+        else action.view.revealInScrollingAncestor()
         syncRing()
     }
 
@@ -211,7 +218,7 @@ class WorkspaceControllerNav(
         val viewport = Rect()
         if (host.scrollViewportOnScreen(viewport)) {
             val visible = cands.filter {
-                !host.viewInScrollViewport(it.first) || Rect.intersects(it.second, viewport)
+                !host.viewInScrollViewport(it.first.view) || Rect.intersects(it.second, viewport)
             }
             if (visible.isNotEmpty()) cands = visible
         }
@@ -221,7 +228,7 @@ class WorkspaceControllerNav(
     }
 
     private fun moveCursor(dir: SheetNavGeometry.Dir) {
-        val cur = cursorView ?: return
+        val cur = cursor ?: return
         val header = candidatesOf(host.headerNavActions())
         val page = candidates()
         // Screen-space rects interleave across the scroll boundary: content
@@ -231,8 +238,8 @@ class WorkspaceControllerNav(
         // the footer and hidden rows. Partition instead: items inside the
         // scroll viewport's subtree (where a move to a scrolled-out row
         // reveals it — the walk-to-reveal design) vs fixed page chrome.
-        val scrollContent = page.filter { host.viewInScrollViewport(it.first) }
-        val fixed = page.filter { !host.viewInScrollViewport(it.first) }
+        val scrollContent = page.filter { host.viewInScrollViewport(it.first.view) }
+        val fixed = page.filter { !host.viewInScrollViewport(it.first.view) }
         // What fixed chrome and the header may move INTO: only content
         // that is actually visible right now — never a scrolled-out
         // phantom, whose rect lies past the chrome itself.
@@ -243,7 +250,7 @@ class WorkspaceControllerNav(
             scrollContent
         }
 
-        fun moveAmong(cands: List<Pair<View, Rect>>, from: SheetNavGeometry.NavRect): Boolean {
+        fun moveAmong(cands: List<Pair<NavAction, Rect>>, from: SheetNavGeometry.NavRect): Boolean {
             val t = SheetNavGeometry.nextInDirection(
                 from, cands.map { it.second.toNavRect() }, dir,
             ) ?: return false
@@ -251,7 +258,7 @@ class WorkspaceControllerNav(
             return true
         }
 
-        val headerFrom = header.firstOrNull { it.first === cur }
+        val headerFrom = header.firstOrNull { it.first.sameTarget(cur) }
         if (headerFrom != null) {
             // In the header: within it first (left/right between the
             // toggle's segments), then outward back into the page.
@@ -262,14 +269,14 @@ class WorkspaceControllerNav(
             return
         }
 
-        val pageFrom = page.firstOrNull { it.first === cur }
+        val pageFrom = page.firstOrNull { it.first.sameTarget(cur) }
         if (pageFrom == null) {
             // The cursor's item vanished (layout change) — restart from the top.
             selectFirst()
             return
         }
         val from = pageFrom.second.toNavRect()
-        if (host.viewInScrollViewport(cur)) {
+        if (host.viewInScrollViewport(cur.view)) {
             // Inside the scroll content: stay among the content until it is
             // exhausted in this direction — the fixed footer must not steal
             // a DOWN while more rows lie below the fold.
@@ -280,7 +287,7 @@ class WorkspaceControllerNav(
             // back into the view.
             if (moveAmong(visibleContent + fixed, from)) return
         }
-        if (host.viewInScrollViewport(cur) && moveAmong(fixed, from)) return
+        if (host.viewInScrollViewport(cur.view) && moveAmong(fixed, from)) return
         // Terminal: only walking UP off the top may enter the header;
         // every other direction stays put (no wrap-around).
         if (dir == SheetNavGeometry.Dir.UP) moveAmong(header, from)
@@ -289,15 +296,15 @@ class WorkspaceControllerNav(
     /** Per-frame from the workspace's pre-draw hook: re-read the item's live
      *  rect (scroll, layout, entrance all move it), re-clip to the viewport. */
     fun syncRing() {
-        val cur = cursorView ?: run {
+        val cur = cursor ?: run {
             host.setRing(null, null)
             return
         }
-        if (!viewRectOnScreen(cur, tmpRect)) {
+        if (!rectOnScreen(cur, tmpRect)) {
             host.setRing(null, null)
             return
         }
-        val clip = if (host.viewInScrollViewport(cur) &&
+        val clip = if (host.viewInScrollViewport(cur.view) &&
             host.scrollViewportOnScreen(clipRect)
         ) clipRect else null
         lastItemRect.set(tmpRect)
@@ -307,7 +314,7 @@ class WorkspaceControllerNav(
     /** The cursor is stale (page push/pop): drop it. */
     fun clearCursor() {
         cancelHold()
-        cursorView = null
+        cursor = null
         host.setRing(null, null)
     }
 
@@ -317,12 +324,12 @@ class WorkspaceControllerNav(
      *  ring last was — among the PAGE's items (the header is never an
      *  automatic landing). */
     fun revalidateCursor(prefer: View? = null) {
-        val cur = cursorView ?: return
-        if (cur.isShown &&
-            (host.navActions() + host.headerNavActions()).any { it.view === cur }
+        val cur = cursor ?: return
+        if (cur.view.isShown &&
+            (host.navActions() + host.headerNavActions()).any { it.sameTarget(cur) }
         ) return
         val cands = candidates()
-        cands.firstOrNull { prefer != null && it.first === prefer }?.let {
+        cands.firstOrNull { prefer != null && it.first.view === prefer && it.first.target == null }?.let {
             setCursor(it.first, it.second)
             return
         }
@@ -349,7 +356,7 @@ class WorkspaceControllerNav(
     fun release() {
         cancelHold()
         stick.release()
-        cursorView = null
+        cursor = null
         host.setRing(null, null)
     }
 

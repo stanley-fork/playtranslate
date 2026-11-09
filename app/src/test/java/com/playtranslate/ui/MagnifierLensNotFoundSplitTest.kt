@@ -3,9 +3,6 @@ package com.playtranslate.ui
 import android.app.Activity
 import android.os.Bundle
 import android.view.Display
-import android.view.View
-import android.view.ViewGroup
-import android.widget.TextView
 import com.playtranslate.R
 import org.junit.After
 import org.junit.Assert.assertEquals
@@ -19,9 +16,9 @@ import org.robolectric.RobolectricTestRunner
 import org.robolectric.android.controller.ActivityController
 
 /**
- * The split body over a primary with no entry: the tapped unit's column
- * renders the "No definitions found." placeholder where its senses would
- * be, above the member sections, and only the sections that open are
+ * The lens over a primary with no entry: the tapped unit is still a row
+ * that names it, with the "No definitions found." placeholder where its
+ * senses would be, above the member rows, and only the rows that open are
  * controller targets. This is the lens a fused phrase no dictionary lists
  * gets once its members are offered anyway.
  */
@@ -40,6 +37,7 @@ class MagnifierLensNotFoundSplitTest {
 
     @Before
     fun setUp() {
+        DefinitionShells.reset()
         controller = Robolectric.buildActivity(Host::class.java).setup()
         val activity = controller.get()
         lens = MagnifierLens(activity, activity.windowManager, Display.DEFAULT_DISPLAY)
@@ -52,17 +50,13 @@ class MagnifierLensNotFoundSplitTest {
     fun tearDown() {
         lens.dismiss()
         controller.pause().stop().destroy()
-    }
-
-    private fun textViews(v: View): List<TextView> = when (v) {
-        is TextView -> listOf(v)
-        is ViewGroup -> (0 until v.childCount).flatMap { textViews(v.getChildAt(it)) }
-        else -> emptyList()
+        DefinitionShells.reset()
     }
 
     @Test
-    fun `a primary with no entry shows the placeholder above its member sections`() {
-        val placeholder = controller.get().getString(R.string.word_detail_no_definitions)
+    fun `a primary with no entry is a row with the placeholder, above its member rows`() {
+        val activity = controller.get()
+        val placeholder = activity.getString(R.string.word_detail_no_definitions)
         val primary = LensSection(
             WordDefinitionData("星と深淵を目指せ", "ほしとしんえんをめざせ", emptyList(), freqScore = 0, isCommon = false),
             label = null, opens = false,
@@ -76,17 +70,21 @@ class MagnifierLensNotFoundSplitTest {
         )
         lens.setSplitDefinitions(primary, listOf(member), secondariesOnTop = false)
 
-        // Only the member opens, so it is the one controller target; the
-        // primary's column is the split body's first child, above it.
-        val targets = lens.navSectionsForTest()
-        assertEquals(1, targets.size)
-        val memberColumn = targets.single()
-        val split = memberColumn.parent as ViewGroup
-        val primaryColumn = split.getChildAt(0)
-        assertTrue(primaryColumn !== memberColumn)
-        assertTrue(split.indexOfChild(primaryColumn) < split.indexOfChild(memberColumn))
-        assertTrue(textViews(primaryColumn).any { it.text.toString() == placeholder })
-        assertFalse(textViews(memberColumn).any { it.text.toString() == placeholder })
-        assertTrue(textViews(memberColumn).any { it.text.toString().contains("star") })
+        val rows = lens.shownRowsForTest().filterIsInstance<DefRow.Word>()
+        assertEquals(listOf("星と深淵を目指せ", "星"), rows.map { it.data.word })
+        assertEquals(placeholder, rows[0].emptyText)
+
+        // The markup the page draws: the placeholder under the word with no
+        // entry, and not under the member, which has a sense.
+        val unlisted = DefRowHtml.html(activity, rows[0], "k0", emptyMap(), "ja")
+        val listed = DefRowHtml.html(activity, rows[1], "k1", emptyMap(), "ja")
+        assertTrue(unlisted, unlisted.contains("星と深淵を目指せ") && unlisted.contains(placeholder))
+        assertFalse(unlisted, unlisted.contains("data-act="))
+        assertTrue(listed, listed.contains("star") && listed.contains("data-act=\"open\""))
+        assertFalse(listed, listed.contains(placeholder))
+
+        // Only the member opens, so it is the one controller target.
+        lens.layoutRowsForTest(100)
+        assertEquals(listOf(rows[1].id), lens.navRowsForTest())
     }
 }

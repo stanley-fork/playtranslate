@@ -1,54 +1,29 @@
 package com.playtranslate.ui
 
-import android.app.ActivityManager
 import android.content.Context
 import com.playtranslate.model.ImportedSenseGroup
 import com.playtranslate.yomitan.YomitanDataStore
 import kotlinx.coroutines.CancellationException
 
 /**
- * Prefetched payload for the styled definitions path, resolved in the same
- * suspend pipeline that resolved the word ([SourceWordLookup.resolve],
- * [DragLookupController]'s lookup) so the render surfaces stay fully
- * synchronous — a lens bind never launches its own coroutine.
+ * The structured glossaries and dictionary stylesheets behind a word's
+ * imported definitions, fetched for the ANKI CARD: the send pipelines and
+ * the word sheet resolve it in the same suspend pass that resolved the
+ * word, so their synchronous card builders can draw the dictionaries' own
+ * markup. (On screen a definitions document fetches its rows' content
+ * itself, a chunk at a time.)
  *
- * Null (from [fetchYomitanStyledData]) means the flat tier renders: the
- * styling toggle is off, no group carries a retained structured glossary,
- * or the fetch produced nothing. Surfaces gate on
- * [WordDefinitionData.styled] being non-null with a non-empty [structured].
+ * Null (from [fetchYomitanStyledData]) means the card carries flat text:
+ * the styling toggle is off, no group carries a retained structured
+ * glossary, or the fetch produced nothing.
  */
 class YomitanStyledData(
     /** [com.playtranslate.model.ImportedSense.scRowid] → glossary JSON. */
     val structured: Map<Long, String>,
     /** dict id → raw styles.css, for every dictionary in the content that
-     *  has one (page-side scoping applies each once). */
+     *  has one. */
     val dictStyles: Map<String, String>,
-    /** Routes the WebView's media requests ([YomitanDefinitionsView]). */
-    val sourceLanguage: String,
-) {
-    /**
-     * This payload cut down to one entry's [groups]. A list surface fetches
-     * ONE payload for every row it shows (the sentence sheet's shape: one
-     * query, not one per row) and hands each cell its own share through
-     * here. Null when no sense in [groups] has a glossary in [structured],
-     * so a row whose imported dictionaries are all flat never mints a
-     * renderer for nothing; otherwise [dictStyles] narrows to the groups'
-     * own dictionaries, the set a per-row fetch would have produced, and
-     * [structured] is shared as is (the document reads only its own rowids).
-     */
-    fun forGroups(groups: List<ImportedSenseGroup>): YomitanStyledData? {
-        val structuredHere = groups.any { g ->
-            g.senses.any { s -> s.scRowid?.let(structured::containsKey) == true }
-        }
-        if (!structuredHere) return null
-        val dictIds = groups.mapTo(mutableSetOf()) { it.dictId }
-        return YomitanStyledData(
-            structured = structured,
-            dictStyles = dictStyles.filterKeys { it in dictIds },
-            sourceLanguage = sourceLanguage,
-        )
-    }
-}
+)
 
 /**
  * Reconstructs [ImportedSenseGroup]s from flattened [SenseDisplay] rows —
@@ -92,9 +67,8 @@ internal fun importedGroupsFromSenses(
     return groups
 }
 
-/** The styled document's meta row, mirroring [WordDefinitionsView]'s
- *  Common pill / ★ run / frequency chips / deck badge so switching a panel
- *  to the WebView renderer never costs the meta row. */
+/** A definitions document's meta row: the Common pill, the ★ run, the
+ *  frequency chips and the deck badge, in that order. */
 internal fun styledMetaChips(
     ctx: Context,
     data: WordDefinitionData,
@@ -156,19 +130,17 @@ internal suspend fun fetchStyledForSenses(
         YomitanStyledData(
             structured = structured,
             dictStyles = caps.stylesByDict.filterKeys { it in dictIds },
-            sourceLanguage = sourceLanguage,
         )
     }
 }
 
 /**
  * Runs a styled-payload fetch with datastore failure contained to null.
- * The flat tier is every caller's standing fallback — a lens bind, the
- * detail page, and both Anki send pipelines degrade to flat text on null —
- * and the Anki pipelines are exception-free by contract (their one-tap
- * hosts run detached coroutines with no handler), so a SQLite or
- * registry failure here must cost the styling, never the card or the
- * popup. Cancellation propagates.
+ * Flat text is every caller's standing fallback: the Anki word sheet's
+ * card and both send pipelines carry it on null. The pipelines are
+ * exception-free by contract (their one-tap hosts run detached coroutines
+ * with no handler), so a SQLite or registry failure here must cost the
+ * styling, never the card. Cancellation propagates.
  */
 private suspend fun containedStyledFetch(
     sourceLanguage: String,
@@ -229,58 +201,7 @@ private suspend fun fetchUncontained(
     return YomitanStyledData(
         structured = structured,
         dictStyles = dictStyles,
-        sourceLanguage = sourceLanguage,
     )
 }
-
-/**
- * How many rows of the results page's Words card may hold a styled
- * renderer at once ([StyledRendererPool]); rows past it bind flat. The
- * list's length follows the capture (distinct lemmas, no cap of its own:
- * a dialogue box is roughly 8 to 15 rows, a backlog or a menu screen a
- * hundred or more), so this is what bounds the WebView count on the one
- * surface that renders on every capture. Sized 2026-09-16 for a budget
- * phone: a styled row is ~170 to 200dp, so eight is about two screenfuls;
- * at an estimated 5 to 10 MB per WebView that is 40 to 80 MB steady, some
- * 10 to 20 percent over the app's footprint in the Thor's recorded
- * low-memory kill wave; and eight shell loads (~150ms each on the Thor's
- * AOSP WebView, a few times that on a budget SoC, serialized on the one
- * renderer thread) are paid once per page through the pool, not per
- * capture. The per-WebView memory is an estimate; the dial is this
- * constant.
- */
-internal const val STYLED_WORD_ROW_CAP = 8
-
-/**
- * [STYLED_WORD_ROW_CAP], or 0 on a device Android flags as low-RAM: there
- * the WebView renderer runs inside the app process, so its memory counts
- * against this process directly and a renderer death is an app death.
- * The card stays flat on those devices (the lens, the detail page and the
- * sheets are unaffected). 0 also skips the payload fetch ([TranslationResultViewModel]).
- */
-internal fun styledWordRowCap(ctx: Context): Int {
-    val am = ctx.getSystemService(Context.ACTIVITY_SERVICE) as? ActivityManager
-    return if (am?.isLowRamDevice == true) 0 else STYLED_WORD_ROW_CAP
-}
-
-/**
- * The imported groups the results page's ONE payload fetch should cover:
- * those of the first [cap] rows that carry a structured sense at all, in
- * list order — the rows the card can render styled, since
- * [StyledRendererPool] hands its [cap] renderers to the first rows with a
- * payload. Rows with nothing structured never take a renderer, so they
- * don't count toward [cap]; fetching past it would inflate glossaries
- * for rows that bind flat regardless (a wall of text is a hundred rows).
- * The card orders hidden words last, which can move a covered row below
- * an uncovered one; the cap still holds, the card just styles fewer rows
- * on such a list. Pass the same cap the binder was built with.
- */
-internal fun styledCandidateGroups(rows: List<RowState>, cap: Int): List<ImportedSenseGroup> =
-    rows.asSequence()
-        .map { it.importedGroups }
-        .filter { groups -> groups.any { g -> g.senses.any { it.scRowid != null } } }
-        .take(cap)
-        .flatten()
-        .toList()
 
 private const val TAG = "YomitanStyled"

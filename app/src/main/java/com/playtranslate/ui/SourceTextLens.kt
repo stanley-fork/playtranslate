@@ -188,7 +188,7 @@ class SourceTextLens(
             bindBody(lens, LensScroll.Keep)
         }
         lens.makeInteractive()
-        if (fromController) lens.focusPillForController()
+        if (fromController) lens.focusForController()
     }
 
     /** Binds [lens]'s body from the fields, the one place that does: the
@@ -213,7 +213,7 @@ class SourceTextLens(
         if (secondaries.isNotEmpty() || loadMore != null) {
             lens.setSplitDefinitions(
                 LensSection(data, resolved.label, opens = canOpen),
-                secondaries.map { LensSection(it.data, it.label, opens = true, caption = it.caption) },
+                secondaries.map { LensSection(it.data, it.label, opens = true) },
                 secondariesOnTop = at.phrase != null,
                 loadMore,
                 scroll,

@@ -67,7 +67,7 @@ class LensSpeakChip(
 
 /**
  * Speak a single dictionary word and surface the standard TTS alerts on
- * [target]. Shared by [LensSpeakChip] (the lens) and [WordResultCell]'s speak
+ * [target]. Shared by [LensSpeakChip] (the lens) and the word-list rows' speak
  * action so the two paths can't diverge. The caller owns the loading
  * indicator and re-entrancy guard — this just performs the request and
  * presents any alert. [onNoEngine] runs after the "no engine" alert is shown

@@ -581,21 +581,10 @@ class DragLookupController(
      * popup is committed at release ([onDragEnd]).
      */
     fun onDragStart(existingScreenshotPath: String? = null) {
-        // Pre-pay the styled renderer's startup while the user is still
-        // dragging toward a word: the once-per-process provider init
-        // (warmUp) AND this window's shell-page load (prewarm) — a bind
-        // against a loaded shell is what lets the lens reveal styled
-        // directly instead of flashing flat-then-styled. Gated on styling
-        // actually being live.
-        scope.launch {
-            if (YomitanDataStore.stylingFor(
-                    context, Prefs(context).sourceLangId.yomitanConsumingLang(),
-                ).stylingActive
-            ) {
-                YomitanDefinitionsView.warmUp(context)
-                magnifier.prewarmStyledRenderer()
-            }
-        }
+        // A drag is a lookup under way: load the lens's definitions page
+        // while the user moves toward a word, so the first definition does
+        // not wait for it.
+        magnifier.prepareDefinitions()
         // Tear down everything left over from the previous drag. Previous
         // drag's lift-time lookupJob may still be in flight; cancel it so it
         // doesn't transition the lens after this drag has started. Hand the
@@ -1624,14 +1613,12 @@ class DragLookupController(
                 pitch = display.pitch,
                 frequencies = display.frequencies,
                 importedGroups = entry.importedSenses,
-                styled = fetchYomitanStyledData(
-                    context, prefs.sourceLangId.yomitanConsumingLang(), entry.importedSenses,
-                ),
+                definitionLang = prefs.sourceLangId.yomitanConsumingLang(),
             )
         } else {
             // No dictionary entry. Keep the lens up with an empty sense
-            // list — the lens's WordDefinitionsView renders its
-            // "No definitions found." placeholder. (The genuine "no token
+            // list: the lens's row draws its "No definitions found."
+            // placeholder. (The genuine "no token
             // under the finger" cases already returned null above.)
             PopupData(
                 word = lookupForm,
@@ -1685,8 +1672,7 @@ class DragLookupController(
         // The "already in Anki" deck badge is filled in AFTER the definitions
         // render (see onDragEnd), so the dictionary lookup is never delayed by
         // the Anki content-provider query.
-        val caption = context.getString(R.string.lens_also_matches)
-        val slots = keys.all.map { if (it.needsMt) null else popupFor(it, resolver, prefs.targetLang, caption) }
+        val slots = keys.all.map { if (it.needsMt) null else popupFor(it, resolver, prefs.targetLang) }
         return LookupResolution(word = popupData, phrase = null).withSections(keys.all, slots, pending = keys.pending)
     }
 
@@ -1727,12 +1713,11 @@ class DragLookupController(
     /** [key]'s section, resolved on the response it carries: a phrase under
      *  its own key; a member under its span, its surface picking the
      *  displayed headword; an alternative under its key with the dragged
-     *  surface, its chain to that surface and [caption]. */
+     *  surface and its chain to that surface. */
     private suspend fun popupFor(
         key: SecondaryKey,
         resolver: DefinitionResolver,
         targetLang: String,
-        caption: String,
     ): PopupData? {
         val span = key.span
         return when (key.kind) {
@@ -1744,7 +1729,7 @@ class DragLookupController(
             )
             SecondaryKind.ALTERNATIVE -> relatedPopupData(
                 resolver, targetLang, span.lookupForm, span.lookupForm, span.reading,
-                foundAs = span.surface, foundTags = span.inflections, caption = caption, response = key.response,
+                foundAs = span.surface, foundTags = span.inflections, response = key.response,
             )
         }
     }
@@ -1756,8 +1741,7 @@ class DragLookupController(
      *  null when [response] has no entry. [surface] picks the displayed
      *  headword. An alternative passes [foundAs], the dragged surface it is
      *  offered for, and [foundTags], its chain from [lookupForm] to that
-     *  surface: they become its surface and its conjugation line.
-     *  [caption] is the section's [LensSection.caption]. */
+     *  surface: they become its surface and its conjugation line. */
     private suspend fun relatedPopupData(
         resolver: DefinitionResolver,
         targetLang: String,
@@ -1766,7 +1750,6 @@ class DragLookupController(
         readingHint: String?,
         foundAs: String? = null,
         foundTags: List<InflectionTag> = emptyList(),
-        caption: String? = null,
         response: DictionaryResponse,
     ): PopupData? {
         val result = withContext(Dispatchers.IO) { resolver.resolve(response, lookupForm, readingHint) }
@@ -1800,10 +1783,7 @@ class DragLookupController(
             pitch = display.pitch,
             frequencies = display.frequencies,
             importedGroups = entry.importedSenses,
-            styled = fetchYomitanStyledData(
-                context, Prefs(context).sourceLangId.yomitanConsumingLang(), entry.importedSenses,
-            ),
-            caption = caption,
+            definitionLang = Prefs(context).sourceLangId.yomitanConsumingLang(),
         )
     }
 
@@ -1866,7 +1846,7 @@ class DragLookupController(
             magnifier.setSplitDefinitions(
                 LensSection(wordData, wordLabel, opens = true),
                 secondaries.map {
-                    LensSection(it.toLensData(), it.machineTranslatedLabel(), opens = true, caption = it.caption)
+                    LensSection(it.toLensData(), it.machineTranslatedLabel(), opens = true)
                 },
                 secondariesOnTop = res.phrase != null,
                 loadMore = loadMore,
@@ -1907,8 +1887,7 @@ class DragLookupController(
                 val prefs = Prefs(context)
                 val engine = SourceLanguageEngines.get(context, prefs.sourceLangId)
                 val resolver = newResolver(engine, prefs)
-                val caption = context.getString(R.string.lens_also_matches)
-                val loaded = res.pending.map { popupFor(it, resolver, prefs.targetLang, caption) }
+                val loaded = res.pending.map { popupFor(it, resolver, prefs.targetLang) }
                 val slots = placeLoaded(
                     res.keys, Sections(res.phrase, res.members, res.alternatives), res.pending, loaded,
                 )
@@ -1964,7 +1943,7 @@ class DragLookupController(
             pitch = pitch,
             frequencies = frequencies,
             importedGroups = importedGroups,
-            styled = styled,
+            definitionLang = definitionLang,
             inflectedForms = inflectedForms,
         )
 
@@ -2002,13 +1981,11 @@ class DragLookupController(
         val pitch: List<Int> = emptyList(),
         /** Per-dictionary frequency chips from the displayed headword. */
         val frequencies: List<FrequencyTag> = emptyList(),
-        /** Structured imported groups + prefetched styled payload — see
-         *  [WordDefinitionData.importedGroups]/[WordDefinitionData.styled]. */
+        /** The imported groups and the language they were looked up
+         *  under: see [WordDefinitionData.importedGroups] and
+         *  [WordDefinitionData.definitionLang]. */
         val importedGroups: List<com.playtranslate.model.ImportedSenseGroup> = emptyList(),
-        val styled: YomitanStyledData? = null,
-        /** The section's [LensSection.caption]: "Also matches" on an
-         *  alternative, null otherwise. */
-        val caption: String? = null,
+        val definitionLang: String = "",
     )
 
     private fun findLineAt(x: Int, y: Int, lines: List<OcrManager.OcrLine>): OcrManager.OcrLine? {

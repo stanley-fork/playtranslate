@@ -183,9 +183,12 @@ class SentenceAnkiSnapshotLifecycleTest {
                 ),
             )
             settle(ctx)
-            // Sentence audio stays on; the target word's audio goes off.
-            audioSwitches(fragment).last().performClick()
-            assertEquals(listOf(true, false), audioSwitches(fragment).map { it.isChecked })
+            // Sentence audio stays on; the target word's audio goes off (its
+            // switch is drawn by the word rows' page, so the tap is the
+            // page's report and its state is read from the row).
+            fragment.content!!.tapWordRowForTest("猫", DefAction.AUDIO)
+            assertEquals(listOf(true), audioSwitches(fragment).map { it.isChecked })
+            assertEquals(false, wordAudioOn(fragment, "猫"))
 
             val state = Bundle()
             controller.pause().saveInstanceState(state).stop().destroy()
@@ -194,7 +197,8 @@ class SentenceAnkiSnapshotLifecycleTest {
             val restoredFragment = restored.get().supportFragmentManager
                 .findFragmentByTag(TAG) as ContentHostFragment
 
-            assertEquals(listOf(true, false), audioSwitches(restoredFragment).map { it.isChecked })
+            assertEquals(listOf(true), audioSwitches(restoredFragment).map { it.isChecked })
+            assertEquals(false, wordAudioOn(restoredFragment, "猫"))
             assertTrue(restoredFragment.content!!.sentenceAudioEnabled)
             assertTrue(prefs.ankiSentenceAudioEnabled)
             assertFalse(prefs.ankiWordAudioEnabled)
@@ -232,8 +236,12 @@ class SentenceAnkiSnapshotLifecycleTest {
         return fragment
     }
 
-    /** The card's audio switches in order: the sentence's (Original group),
-     *  then each target word's. */
+    /** Whether [word]'s audio row, in the word rows the card last drew, has
+     *  its switch on; null when the row has no audio row. */
+    private fun wordAudioOn(fragment: ContentHostFragment, word: String): Boolean? =
+        fragment.content!!.shownWordRows.first { it.word == word }.audio?.on
+
+    /** The card's native audio switches: the sentence's (Original group). */
     private fun audioSwitches(fragment: ContentHostFragment): List<CompoundButton> {
         fun walk(v: View): List<View> =
             listOf(v) + ((v as? ViewGroup)?.let { g -> (0 until g.childCount).flatMap { walk(g.getChildAt(it)) } } ?: emptyList())
