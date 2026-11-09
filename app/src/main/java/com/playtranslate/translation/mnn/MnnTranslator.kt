@@ -62,6 +62,12 @@ class MnnTranslator private constructor(private val context: Context) {
      */
     val currentlyLoadedModelPath: String? get() = loadedModelPath
 
+    /** The two strings one generation is made of: the system block, which
+     *  stays in the KV cache between calls ([prefillSystemIfChanged]), and
+     *  the user turn that opens the model's reply. Both carry their model's
+     *  full envelope. */
+    private class Prompt(val systemBlock: String, val userBlock: String)
+
     /**
      * Translate [text] from [source] to [target] using the MNN model at
      * [modelPath] (a *directory* — MNN's `Llm::createLLM` takes the model dir's
@@ -77,95 +83,131 @@ class MnnTranslator private constructor(private val context: Context) {
         modelPath: String,
         promptStyle: PromptStyle,
         availMemFloorBytes: Long = DEFAULT_AVAIL_MEM_FLOOR_BYTES,
-    ): String {
-        return mutex.withLock {
-            translateLocked(text, source, target, modelPath, promptStyle, availMemFloorBytes)
+    ): String = mutex.withLock {
+        val prompt = when (promptStyle) {
+            // *Critical*: feed the full <|im_start|>system…<|im_end|>
+            // envelope, NOT just the prose. The engine runs with
+            // `use_template:false` (see mnn_chat.cpp prepare()), so we
+            // hand-build the chat envelope ourselves. Without these
+            // role markers the model treats the system prompt as
+            // generic context and continues it like a completion —
+            // echoing the input + generating "Translation:" boilerplate
+            // up to max_new_tokens.
+            PromptStyle.StandardChat -> Prompt(
+                QwenChatTemplate.systemBlock(source, target),
+                QwenChatTemplate.userBlock(text, source, target),
+            )
+            // Qwen 3.5: same ChatML system block as StandardChat (Qwen
+            // template), but the user turn opens the assistant role with the
+            // non-thinking marker so the hybrid-reasoning model skips the
+            // <think> pass. The system-boundary linear-state snapshot
+            // (mnn_chat.cpp) keeps KV-reuse correct for Qwen 3.5's mixed
+            // attention; no Kotlin change needed here beyond the no-think
+            // user block.
+            PromptStyle.Qwen35Chat -> Prompt(
+                QwenChatTemplate.systemBlock(source, target),
+                QwenChatTemplate.userBlockNoThink(text, source, target),
+            )
+            // Gemma 4 uses <|turn>{role}…<turn|> markers per
+            // llmexport.py:108-113. Same JNI path as StandardChat
+            // (true system role), different envelope strings. `<bos>`
+            // is inside [GemmaE2BChatTemplate.systemBlock] — it lands
+            // exactly once because the system block is cached and only
+            // re-prefilled when the block text changes.
+            PromptStyle.Gemma4Chat -> Prompt(
+                GemmaE2BChatTemplate.systemBlock(source, target),
+                GemmaE2BChatTemplate.userBlock(text, source, target),
+            )
+            // Hunyuan-MT 1.5 has no system role per the model card;
+            // the "system block" we set here is the invariant
+            // instruction prefix (`<bos><｜hy_User｜>Translate the
+            // following text into …\n\n`). The per-sentence body
+            // and `<｜hy_Assistant｜>` open marker come from
+            // [HyMtChatTemplate.userBlock]. The model sees one user
+            // turn at inference — the cache split is invisible
+            // because `use_template:false` in mnn_chat.cpp
+            // concatenates the two strings verbatim. Matches the
+            // spike's `benchmark_reuse()` exactly (sysLen=23
+            // tokens cached; see mnn-spike/HYMT_SPIKE_REPORT.md).
+            // HyMt's block varies only by target, so the block-text
+            // guard also skips the re-prefill a source-only pair
+            // change used to force.
+            PromptStyle.HyMtChat -> Prompt(
+                HyMtChatTemplate.systemBlock(source, target),
+                HyMtChatTemplate.userBlock(text, source, target),
+            )
         }
+        generateLocked(
+            prompt, TRANSLATION_MAX_NEW_TOKENS, modelPath, promptStyle, availMemFloorBytes,
+            inputChars = text.length,
+        )
     }
 
     /**
-     * The mutex-protected body of [translate]. Returns the decoded translation.
+     * Answer a free-form prompt ([system] and [user] prose, wrapped here in
+     * the model's envelope) with the MNN model at [modelPath]: the Ask
+     * section's on-device path
+     * ([com.playtranslate.translation.PromptCompleter]). Same engine, same
+     * mutex as [translate], so a translation asked for while an answer
+     * generates waits for it, and the native call cannot be interrupted:
+     * a cancelled caller gets its cancellation when the generation ends.
+     * The system block differs from a translation's, so alternating the
+     * two re-reads it each time ([prefillSystemIfChanged] keys on the text).
+     *
+     * Only the general chat models take one. Hunyuan-MT is fine-tuned for
+     * translation alone and its backends are not prompt completers.
      */
-    private suspend fun translateLocked(
-        text: String,
-        source: String,
-        target: String,
+    suspend fun complete(
+        system: String,
+        user: String,
+        modelPath: String,
+        promptStyle: PromptStyle,
+        availMemFloorBytes: Long = DEFAULT_AVAIL_MEM_FLOOR_BYTES,
+    ): String = mutex.withLock {
+        val prompt = when (promptStyle) {
+            PromptStyle.StandardChat -> Prompt(
+                QwenChatTemplate.systemEnvelope(system), QwenChatTemplate.userEnvelope(user),
+            )
+            // Thinking stays off for an answer too: the reasoning pass
+            // would spend the output limit before the answer began.
+            PromptStyle.Qwen35Chat -> Prompt(
+                QwenChatTemplate.systemEnvelope(system), QwenChatTemplate.userEnvelopeNoThink(user),
+            )
+            PromptStyle.Gemma4Chat -> Prompt(
+                GemmaE2BChatTemplate.systemEnvelope(system), GemmaE2BChatTemplate.userEnvelope(user),
+            )
+            PromptStyle.HyMtChat ->
+                throw IllegalArgumentException("Hunyuan-MT is a translation model; it takes no free-form prompt")
+        }
+        generateLocked(
+            prompt, ANSWER_MAX_NEW_TOKENS, modelPath, promptStyle, availMemFloorBytes,
+            inputChars = user.length,
+        )
+    }
+
+    /**
+     * The mutex-protected generation both entry points share: load the
+     * model if needed, set or reuse the system block, run [prompt]'s user
+     * turn to at most [maxNewTokens], and return the decoded text.
+     */
+    private suspend fun generateLocked(
+        prompt: Prompt,
+        maxNewTokens: Int,
         modelPath: String,
         promptStyle: PromptStyle,
         availMemFloorBytes: Long,
+        inputChars: Int,
     ): String {
         val didReload = ensureLoaded(modelPath, availMemFloorBytes)
         val sb = StringBuilder()
         val inferStartNs = System.nanoTime()
-        when (promptStyle) {
-            PromptStyle.StandardChat -> {
-                // *Critical*: feed the full <|im_start|>system…<|im_end|>
-                // envelope, NOT just the prose. The engine runs with
-                // `use_template:false` (see mnn_chat.cpp prepare()), so we
-                // hand-build the chat envelope ourselves. Without these
-                // role markers the model treats the system prompt as
-                // generic context and continues it like a completion —
-                // echoing the input + generating "Translation:" boilerplate
-                // up to max_new_tokens.
-                prefillSystemIfChanged(didReload, QwenChatTemplate.systemBlock(source, target))
-                engine.sendUserPrompt(
-                    QwenChatTemplate.userBlock(text, source, target),
-                    predictLength = 256,
-                ).collect { token -> sb.append(token) }
-            }
-            PromptStyle.Qwen35Chat -> {
-                // Qwen 3.5: same ChatML system block as StandardChat (Qwen
-                // template), but the user turn opens the assistant role with the
-                // non-thinking marker so the hybrid-reasoning model skips the
-                // <think> pass. The system-boundary linear-state snapshot
-                // (mnn_chat.cpp) keeps KV-reuse correct for Qwen 3.5's mixed
-                // attention; no Kotlin change needed here beyond the no-think
-                // user block.
-                prefillSystemIfChanged(didReload, QwenChatTemplate.systemBlock(source, target))
-                engine.sendUserPrompt(
-                    QwenChatTemplate.userBlockNoThink(text, source, target),
-                    predictLength = 256,
-                ).collect { token -> sb.append(token) }
-            }
-            PromptStyle.Gemma4Chat -> {
-                // Gemma 4 uses <|turn>{role}…<turn|> markers per
-                // llmexport.py:108-113. Same JNI path as StandardChat
-                // (true system role), different envelope strings. `<bos>`
-                // is inside [GemmaE2BChatTemplate.systemBlock] — it lands
-                // exactly once because the system block is cached and only
-                // re-prefilled when the block text changes.
-                prefillSystemIfChanged(didReload, GemmaE2BChatTemplate.systemBlock(source, target))
-                engine.sendUserPrompt(
-                    GemmaE2BChatTemplate.userBlock(text, source, target),
-                    predictLength = 256,
-                ).collect { token -> sb.append(token) }
-            }
-            PromptStyle.HyMtChat -> {
-                // Hunyuan-MT 1.5 has no system role per the model card;
-                // the "system block" we set here is the invariant
-                // instruction prefix (`<bos><｜hy_User｜>Translate the
-                // following text into …\n\n`). The per-sentence body
-                // and `<｜hy_Assistant｜>` open marker come from
-                // [HyMtChatTemplate.userBlock]. The model sees one user
-                // turn at inference — the cache split is invisible
-                // because `use_template:false` in mnn_chat.cpp
-                // concatenates the two strings verbatim. Matches the
-                // spike's `benchmark_reuse()` exactly (sysLen=23
-                // tokens cached; see mnn-spike/HYMT_SPIKE_REPORT.md).
-                // HyMt's block varies only by target, so the block-text
-                // guard also skips the re-prefill a source-only pair
-                // change used to force.
-                prefillSystemIfChanged(didReload, HyMtChatTemplate.systemBlock(source, target))
-                engine.sendUserPrompt(
-                    HyMtChatTemplate.userBlock(text, source, target),
-                    predictLength = 256,
-                ).collect { token -> sb.append(token) }
-            }
-        }
+        prefillSystemIfChanged(didReload, prompt.systemBlock)
+        engine.sendUserPrompt(prompt.userBlock, predictLength = maxNewTokens)
+            .collect { token -> sb.append(token) }
         Log.i(
             TAG,
             "MNN-TIMING inference: firstAfterLoad=$didReload style=$promptStyle " +
-                "elapsed=${(System.nanoTime() - inferStartNs) / 1_000_000}ms chars=${text.length}",
+                "elapsed=${(System.nanoTime() - inferStartNs) / 1_000_000}ms chars=$inputChars",
         )
         // Defensive cleanup: a clean run terminates at the model's EOS marker
         // via Llm::is_stop and the decoded text won't include the marker, but
@@ -185,7 +227,7 @@ class MnnTranslator private constructor(private val context: Context) {
      * or when the produced [systemBlock] differs from the resident one
      * (language pair changed, or the user edited the prompt template).
      * Otherwise reuse the cached system KV and just erase the user/assistant
-     * history. Mutex-held by [translateLocked], same discipline as the rest
+     * history. Mutex-held by [generateLocked], same discipline as the rest
      * of the engine state.
      */
     private suspend fun prefillSystemIfChanged(didReload: Boolean, systemBlock: String) {
@@ -375,6 +417,17 @@ class MnnTranslator private constructor(private val context: Context) {
 
     companion object {
         private const val TAG = "MnnTranslator"
+
+        /** The most a translation generates: a sentence or a few, and a
+         *  runaway generation ends here. */
+        private const val TRANSLATION_MAX_NEW_TOKENS = 256
+
+        /** The most an answer to a free-form prompt generates. An
+         *  explanation runs longer than a translation, and every token is
+         *  time the engine is held (a translation waits behind it), so
+         *  this is a first value to be tuned on a device, not a measured
+         *  one. */
+        private const val ANSWER_MAX_NEW_TOKENS = 768
 
         /** Conservative default for callers that don't supply their own floor.
          *  Production backends override via [OnDeviceLlmBackend.availMemFloorBytes]. */

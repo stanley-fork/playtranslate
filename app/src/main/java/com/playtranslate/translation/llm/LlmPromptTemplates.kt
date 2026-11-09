@@ -108,6 +108,11 @@ object LlmPromptTemplates {
     const val TOKEN_COUNT = "{N}"
     const val TOKEN_STRINGS = "{strings}"
 
+    /** The user's own question, in the Ask section's prompts
+     *  ([com.playtranslate.ask.AskPrompts]); no translation template gives
+     *  it a value, so there it passes through as written. */
+    const val TOKEN_QUESTION = "{question}"
+
     /** Recent source→translation pairs, or "" when the feature is off, nothing
      *  qualifies, or the consumer is on-device. The provider's non-empty value
      *  is a self-contained block ENDING IN "\n\n", so the default template
@@ -189,7 +194,7 @@ object LlmPromptTemplates {
         listOf(
             TOKEN_SOURCE_CODE, TOKEN_TARGET_CODE, TOKEN_STRINGS,
             TOKEN_SOURCE, TOKEN_TARGET, TOKEN_TEXT, TOKEN_COUNT,
-            TOKEN_CONTEXT,
+            TOKEN_CONTEXT, TOKEN_QUESTION,
         ).joinToString("|") { Regex.escape(it) }
     )
 
@@ -251,6 +256,21 @@ object LlmPromptTemplates {
                 TOKEN_CONTEXT to contextBlock(source, target, includeContext),
             ),
         )
+
+    /**
+     * Fill a caller's OWN [template]: the language tokens for [source] and
+     * [target], plus the caller's [values]. For prompts that are not
+     * translation prompts (the Ask section's), which share this object's
+     * token vocabulary and its substitution's guarantees (a literal,
+     * single pass: nothing a value contains is read as a token) and none of
+     * its editable templates.
+     */
+    fun fill(
+        template: String,
+        source: String,
+        target: String,
+        values: Map<String, String> = emptyMap(),
+    ): String = substitute(template, languageValues(source, target) + values)
 
     /**
      * The `{context}` value for a consumer: the provider's block when the

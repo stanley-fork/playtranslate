@@ -1036,6 +1036,21 @@ class Prefs internal constructor(
         get() = sp.getBoolean(KEY_HIDE_WORDS_SECTION, true)
         set(v) = sp.edit { putBoolean(KEY_HIDE_WORDS_SECTION, v) }
 
+    /** Whether the results' Ask section is collapsed to its header. Shown
+     *  by default, for every install. */
+    var hideAskSection: Boolean
+        get() = sp.getBoolean(KEY_HIDE_ASK_SECTION, false)
+        set(v) = sp.edit { putBoolean(KEY_HIDE_ASK_SECTION, v) }
+
+    /** The ids of the Ask section's ready-made questions, most recently
+     *  asked first ([com.playtranslate.ask.AskPresets], which owns the
+     *  order and is the only reader and writer). Ids only, comma-joined: a
+     *  preset never asked is simply absent. */
+    var askPresetRecency: List<String>
+        get() = sp.getString(KEY_ASK_PRESET_RECENCY, null).orEmpty()
+            .split(",").filter { it.isNotEmpty() }
+        set(v) = sp.edit { putString(KEY_ASK_PRESET_RECENCY, v.joinToString(",")) }
+
     var showFuriganaInline: Boolean
         get() = sp.getBoolean(KEY_SHOW_FURIGANA_INLINE, false)
         set(v) = sp.edit { putBoolean(KEY_SHOW_FURIGANA_INLINE, v) }
@@ -2141,6 +2156,8 @@ class Prefs internal constructor(
         private const val KEY_HIDE_TRANSLATION_SECTION       = "hide_translation_section"
         private const val KEY_HIDE_ORIGINAL_SECTION          = "hide_original_section"
         private const val KEY_HIDE_WORDS_SECTION             = "hide_words_section"
+        private const val KEY_HIDE_ASK_SECTION               = "hide_ask_section"
+        private const val KEY_ASK_PRESET_RECENCY             = "ask_preset_recency"
         private const val KEY_SHOW_FURIGANA_INLINE          = "show_furigana_inline"
         private const val KEY_RESULTS_FONT_MIN_SP           = "results_font_min_sp"
         private const val KEY_RESULTS_FONT_MAX_SP           = "results_font_max_sp"

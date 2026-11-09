@@ -195,6 +195,59 @@ class StructuralFailureException(
 ) : java.io.IOException(message, cause), ClassifiedFailure
 
 /**
+ * Backends that can answer a free-form prompt: a system message and a user
+ * message in, the model's reply out, untouched. What the Ask section runs
+ * on. It is a capability of chat LLMs alone: a machine-translation service
+ * does not implement it, and neither does a model fine-tuned for
+ * translation only.
+ *
+ * A [complete] call differs from a translation in what its failure may do
+ * to the service's standing with the translation waterfall. What the
+ * provider ANSWERED counts exactly as it would for a translation (a rate
+ * limit, a billing refusal, a server error are facts about the account and
+ * the service). A failure of the transport does not (no connection, a
+ * timeout): an answer is long and user-started, and its trouble getting
+ * through says nothing a translation's own attempt will not find out.
+ *
+ * **Cancellation.** A cancelled call stops where the backend can stop it
+ * (an HTTP call is cancelled; an on-device generation runs to its end) and
+ * throws [kotlinx.coroutines.CancellationException], never a failure, and
+ * records nothing.
+ */
+interface PromptCompleter {
+    /** Switched on and set up enough to try: a key where one is needed, or
+     *  the model on disk and a device that can run it. Not a promise of an
+     *  answer (a service in a cooldown still says true): it is what "the
+     *  user has an LLM" means. */
+    fun canComplete(): Boolean
+
+    /** The model's reply to [user] under [system]. Throws as a translation
+     *  call does ([ClassifiedFailure] where the failure is understood). */
+    suspend fun complete(system: String, user: String): String
+
+    companion object {
+        /** How long an online completer waits for an answer. A reply that
+         *  is not streamed sends nothing until it is whole, so this is the
+         *  whole generation, reasoning included: far longer than a
+         *  translation's wait, which is why answers do not ride the
+         *  translation calls' timeouts. */
+        const val ANSWER_TIMEOUT_SECONDS = 120L
+    }
+}
+
+/**
+ * Thrown by [TranslationBackendRegistry.complete] when no [PromptCompleter]
+ * answered. [backend] is the first one that was tried and [cause] what it
+ * threw, which is the failure worth telling the user about (their
+ * first-choice service); both are null when nothing was tried (every
+ * completer in a cooldown, or none set up).
+ */
+class CompletionFailedException(
+    val backend: TranslationBackend?,
+    cause: Throwable?,
+) : Exception("No backend answered the prompt", cause)
+
+/**
  * Backends that can return the list of models the configured API key
  * is allowed to call. Used by the LLM model-picker activity to render
  * a list of selectable options without baking a hardcoded list per

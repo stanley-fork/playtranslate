@@ -879,6 +879,12 @@
          of word rows (e.g. 6). -->
     <string name="section_words_count">Words · <xliff:g id="count" example="6">%1$d</xliff:g></string>
 
+    <!-- A ready-made question in the results' Ask section, where the user
+         asks an AI model about the sentence. Shown on a chip, and as the
+         title over its answer: it asks for the sentence's grammar explained
+         point by point. -->
+    <string name="ask_preset_grammar_breakdown">Grammar breakdown</string>
+
     <!-- Skeleton/placeholder line under the Words header while
          tokenization is in flight. -->
     <string name="words_loading">Looking up words…</string>

@@ -270,6 +270,67 @@ object TranslationBackendRegistry {
         }
     }
 
+    /** What [complete] returns: the answer, and who gave it. */
+    class Completion(val text: String, val backend: TranslationBackend)
+
+    /** Whether the user has an LLM that can be put a free-form prompt: any
+     *  registered [PromptCompleter] that is switched on and set up
+     *  ([PromptCompleter.canComplete]). The Ask section asks this before it
+     *  takes a question. */
+    fun hasCompleter(): Boolean =
+        orderedBackends().any { (it as? PromptCompleter)?.canComplete() == true }
+
+    /**
+     * Put a free-form prompt to the user's LLMs: one pass over the
+     * [PromptCompleter]s in the same order a translation tries its
+     * backends (the online services in the user's order, then the
+     * on-device models), skipping one in a cooldown, falling through on a
+     * failure, returning the first answer. A blank reply is a failure.
+     *
+     * A win clears the service's cooldown state as a translated text does
+     * ([Cooldownable.recordSuccess]): it answered. What a failure does to
+     * that state is the backend's own business
+     * ([PromptCompleter.complete]). Nothing here is reported to
+     * [onlineAttemptListener]: that feeds the translation error pill, and a
+     * question that got no answer says so where it was asked.
+     *
+     * Throws [CompletionFailedException] when nobody answered, carrying the
+     * first backend that was tried and what it threw (neither, when every
+     * completer was in a cooldown or none exists). Cancellation re-throws.
+     */
+    suspend fun complete(system: String, user: String): Completion {
+        var firstTried: TranslationBackend? = null
+        var firstFailure: Exception? = null
+        for (backend in orderedBackends()) {
+            val completer = backend as? PromptCompleter ?: continue
+            if (!completer.canComplete()) continue
+            val now = System.currentTimeMillis()
+            val coolDown = (backend as? Cooldownable)?.unavailableUntil()
+            if (coolDown != null && coolDown > now) {
+                Log.d(TAG, "Completer ${backend.id} skipped (cooldown ${coolDown - now}ms remaining)")
+                continue
+            }
+            val attemptStartedAt = System.currentTimeMillis()
+            try {
+                val text = completer.complete(system, user)
+                if (text.isBlank()) {
+                    throw StructuralFailureException("Empty answer", BackendFailure.BAD_RESPONSE)
+                }
+                (backend as? Cooldownable)?.recordSuccess(attemptStartedAt)
+                return Completion(text, backend)
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                Log.w(TAG, "Completer ${backend.id} failed (${e.javaClass.simpleName}), falling back")
+                if (firstTried == null) {
+                    firstTried = backend
+                    firstFailure = e
+                }
+            }
+        }
+        throw CompletionFailedException(firstTried, firstFailure)
+    }
+
     /** The report for an online backend's call that threw [e]: the server
      *  was reached when it answered the failure ([serverAnswered]). */
     private fun failedAttempt(backend: TranslationBackend, e: Exception, sentAt: Long): OnlineAttempt {
