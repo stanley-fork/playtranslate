@@ -5,6 +5,7 @@ import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.playtranslate.OneShotOverlayData
 import com.playtranslate.Prefs
+import com.playtranslate.ask.AskSession
 import com.playtranslate.language.InflectedForm
 import com.playtranslate.language.TokenSpan
 import com.playtranslate.model.FrequencyTag
@@ -72,6 +73,13 @@ class TranslationResultViewModel(scope: CoroutineScope) : ViewModel(scope) {
         it.onRowsSettled = ::writeLastSentenceCache
     }
     val wordLookups: StateFlow<WordLookupsState> get() = lookups.state
+
+    /** The Ask section's question and answer about the sentence on show.
+     *  Here, beside the result it is about, so it outlives a rebuilt page
+     *  as the result does; the page says which sentence is on show from its
+     *  render funnel ([AskSession.bind]), which is what ends a question
+     *  when the sentence changes. */
+    val ask = AskSession(viewModelScope)
 
     // ── Dedup architecture (read this before changing displayResult) ────
     //

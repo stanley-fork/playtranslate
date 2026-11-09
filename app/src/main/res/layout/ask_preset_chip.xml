@@ -1,0 +1,19 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- One ready-made question in the Ask card: a chip whose tap asks it.
+     AskSectionBinder inflates one per preset into the card's FlowLayout and
+     sets its text, its click and the gap after it in code. One line at a
+     fixed height, so every chip is the same size and the flow wraps whole
+     chips; a name too long for the card ends in an ellipsis. -->
+<TextView xmlns:android="http://schemas.android.com/apk/res/android"
+    android:layout_width="wrap_content"
+    android:layout_height="26dp"
+    android:paddingHorizontal="10dp"
+    android:gravity="center"
+    android:maxLines="1"
+    android:ellipsize="end"
+    android:textSize="12sp"
+    android:fontFamily="sans-serif-medium"
+    android:textColor="?attr/ptTextMuted"
+    android:background="@drawable/bg_ask_chip"
+    android:clickable="true"
+    android:focusable="true" />

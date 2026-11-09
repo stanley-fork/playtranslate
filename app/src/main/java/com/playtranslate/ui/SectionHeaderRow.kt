@@ -63,6 +63,15 @@ class SectionHeaderRow @JvmOverloads constructor(
     /** Tapped ⋯ (the binder opens or closes the menu). */
     var onMoreClick: ((SectionHeaderRow) -> Unit)? = null
 
+    /** Whether actions that don't fit fold behind ⋯ (the default), or are
+     *  simply not shown ([HeaderFit]'s `overflow`). */
+    var overflowEnabled: Boolean = true
+        set(value) {
+            if (field == value) return
+            field = value
+            requestLayout()
+        }
+
     /** The label drawn receded, in the hint colour: the header of a section
      *  whose card is hidden, which is all that is left of it on screen. */
     var labelDimmed: Boolean = false
@@ -148,6 +157,7 @@ class SectionHeaderRow @JvmOverloads constructor(
         val plan = HeaderFit.plan(
             content, labelNatural, gapPx,
             foldable.map(::widthOf), pinned.map(::widthOf), moreButton.layoutParams.width,
+            overflow = overflowEnabled,
         )
         val inline = foldable.subList(0, plan.inlineCount)
         for (a in actions) setShown(viewOf.getValue(a), a.available && (a.pinned || a in inline))

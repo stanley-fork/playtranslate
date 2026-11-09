@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Material "send" (the paper plane): the Ask section's send button, at the
+     end of its question field. White and tinted in code by
+     AskSectionBinder (the accent while there is a question to send, the hint
+     colour otherwise), so no android:tint here: the over-game panel's plain
+     inflater would drop an XML tint. Also the icon argument of the Ask
+     header's question pills, which never show one. -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="24dp"
+    android:height="24dp"
+    android:viewportWidth="24"
+    android:viewportHeight="24">
+    <path
+        android:fillColor="#FFFFFFFF"
+        android:pathData="M2.01,21L23,12 2.01,3 2,10l15,2 -15,2z" />
+</vector>

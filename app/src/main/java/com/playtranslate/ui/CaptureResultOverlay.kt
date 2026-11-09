@@ -90,6 +90,8 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import kotlin.math.abs
 import kotlin.math.ceil
+import com.playtranslate.ask.AskSession
+import com.playtranslate.ask.AskState
 
 /**
  * The over-game capture result panel: a bottom-anchored sheet that grows to
@@ -165,10 +167,12 @@ class CaptureResultOverlay(
      *  frame. Fractions of the display, like the capture crop. */
     var captureRegion: RegionEntry? = null
 
-    /** Invoked when the word lens opens the in-app detail screen, carrying the
-     *  currently-bound result so the controller can stash it and re-show this sheet
-     *  when the user backs out of the detail screen. Null → the lens just dismisses. */
-    var onNavigateToDetail: ((TranslationResult) -> Unit)? = null
+    /** Invoked when a page opened from this sheet takes the screen (a word's
+     *  detail, the sentence's Anki editor), carrying the currently-bound
+     *  result and the Ask section's finished answer about it, if any, so the
+     *  controller can stash both and re-show this sheet with them when the
+     *  user backs out of the page. Null → the sheet just dismisses. */
+    var onNavigateToDetail: ((TranslationResult, AskState.Answered?) -> Unit)? = null
 
     // ── Host behavior overrides (in-app hosting, e.g. the camera tool) ────
     // Everything defaults to the over-game behavior; an in-app host swaps
@@ -621,6 +625,18 @@ class CaptureResultOverlay(
     private var wordRows: WordRowsBinder? = null
     private var lookupsRenderer: WordLookupsRenderer? = null
 
+    /** The Ask section's question and answer about the result on show
+     *  ([AskSession], bound to its sentence in [bindResult]), and its
+     *  binder. */
+    private val askSession = AskSession(scope)
+    private var askBinder: AskSectionBinder? = null
+
+    /** Where this sheet's alerts show: an overlay window of its own, or the
+     *  hosting activity ([ttsAlertTarget], set before [show]). */
+    private val alertTarget: TtsAlertTarget by lazy {
+        ttsAlertTarget ?: TtsAlertTarget.Overlay(ctx, overlayHost, wm, displayId)
+    }
+
     /** Completes when the sheet's entrance has ended. The Words card's page
      *  waits for it: the first WebView of a process blocks the main thread
      *  while it loads, which must not land inside the slide-in. */
@@ -923,7 +939,6 @@ class CaptureResultOverlay(
         )
         buildContent(paired = sideBySide)
 
-        val alertTarget = ttsAlertTarget ?: TtsAlertTarget.Overlay(ctx, overlayHost, wm, displayId)
         val b = TranslationSectionBinder(panel, ctx, prefs, scope, alertTarget, popovers)
         b.setupSectionButtons(
             onEdit = { startInPlaceEdit() },
@@ -932,6 +947,8 @@ class CaptureResultOverlay(
         )
         b.onSectionVisibilityChanged = {
             refitWhenLaidOut()
+            // An answer on show says whether it may give a hidden translation away.
+            askBinder?.syncSpoilerWarning()
             // Eye reveal on a deferred result: run the skipped translation now.
             maybeCompleteDeferred()
         }
@@ -939,8 +956,10 @@ class CaptureResultOverlay(
         b.onSourceTextHeightChanged = { if (!dismissed) autoSizeAndFit() }
         val cardAlpha = if (opaqueBackgroundBoost) CARD_FILL_ALPHA_NO_IMAGE else CARD_FILL_ALPHA
         b.setCardFillAlpha(cardAlpha)
-        sections.findViewById<MaterialCardView>(R.id.cardWords)
-            ?.setCardBackgroundColor(sectionCardFill(ctx, cardAlpha))
+        for (card in listOf(R.id.cardAsk, R.id.cardWords)) {
+            sections.findViewById<MaterialCardView>(card)
+                ?.setCardBackgroundColor(sectionCardFill(ctx, cardAlpha))
+        }
         b.onChooseOcr = {
             val r = lastResult
             val p = r?.ocrProvenance
@@ -1011,6 +1030,17 @@ class CaptureResultOverlay(
         lookupsRenderer = renderer
         wordLookups.onRowsSettled = { lastResult?.let(::writeSentenceCache) }
         scope.launch { wordLookups.state.collect { renderer.render(it) } }
+        // The Ask section: the page's own binder over this sheet's session.
+        val ask = AskSectionBinder(
+            panel, ctx, prefs, askSession,
+            object : AskSectionBinder.Host {
+                override fun onLlmNeeded() = showAskNeedsLlm()
+                override fun onFieldFocusChanged(focused: Boolean) = onAskFieldFocusChanged(focused)
+                override fun onHeightChanged() = refitWhenLaidOut()
+            },
+        )
+        askBinder = ask
+        scope.launch { askSession.state.collect { ask.render(it) } }
         // Bottom sheet: buffer the CONTENT above the navigation bar while it's
         // visible, the same way a top sheet buffers under the status bar — the
         // sheet fill keeps reaching the screen edge behind the bar, so nothing
@@ -1389,9 +1419,18 @@ class CaptureResultOverlay(
      *  [backdrop] re-supplies the clean capture for the frosted sheet fill — a
      *  re-show is a NEW overlay (the stash keeps no bitmap), so without it the
      *  sheet returns frost-less from every detail / workspace round trip. */
-    fun showWithResult(screenW: Int, screenH: Int, result: TranslationResult, backdrop: Bitmap? = null) {
+    fun showWithResult(
+        screenW: Int,
+        screenH: Int,
+        result: TranslationResult,
+        backdrop: Bitmap? = null,
+        /** The Ask section's answer about [result] from the sheet the page
+         *  took off the screen, to show again. */
+        askAnswer: AskState.Answered? = null,
+    ) {
         show(screenW, screenH, backdrop)
         bindResult(result)
+        askAnswer?.let { askSession.restore(askSentence(result.originalText, result.langContext), it) }
         if (sliverMode) {
             expandFromSliver()
             loadingPeekExpand = true
@@ -1617,7 +1656,7 @@ class CaptureResultOverlay(
      *  or a drag on the sliver zone. */
     private fun collapseToSliver() {
         if (dismissed || animatingOut || sliverMode) return
-        if (editContainer.visibility == View.VISIBLE) return
+        if (typingIn != TypingIn.NOTHING) return
         sliverMode = true
         // Parking hands the wheel back to the pref: whatever the user stated
         // before, they are stating the sliver now. (No-op on the automatic
@@ -1999,6 +2038,7 @@ class CaptureResultOverlay(
         // nothing left to show (the next result runs its own).
         dismissWordLens()
         wordLookups.reset()
+        askSession.bind(null)
         // No-text status affordances, each its own tappable span (so tapping one can't
         // trigger the other): the source-language name is accent-colored → source picker
         // (same as the source header); the gear → OCR picker, shown only when a pinned
@@ -2082,6 +2122,9 @@ class CaptureResultOverlay(
             dismissWordLens()
         }
         lastResult = result
+        // The Ask section's question is about this sentence: binding
+        // another one ends the question in hand, the same one keeps it.
+        askSession.bind(askSentence(result.originalText, result.langContext))
         nav?.clearCursor()   // fresh content: word indices + layout are stale
         statusText.visibility = View.GONE
         scroll.visibility = View.VISIBLE
@@ -2490,7 +2533,7 @@ class CaptureResultOverlay(
             SourceLensActions.LaunchKind.Detail -> {
                 val r = lastResult
                 val nav = onNavigateToDetail
-                if (r != null && nav != null) nav(r)
+                if (r != null && nav != null) nav(r, finishedAnswer())
                 else if (dismissOnActivityLaunch) dismissForPage()
             }
         }
@@ -2669,7 +2712,7 @@ class CaptureResultOverlay(
         )
         if (inWorkspace) {
             val nav = onNavigateToDetail
-            if (nav != null) nav(result) else if (dismissOnActivityLaunch) dismissForPage()
+            if (nav != null) nav(result, finishedAnswer()) else if (dismissOnActivityLaunch) dismissForPage()
         } else if (dismissOnActivityLaunch) {
             dismissForPage()
         }
@@ -2795,6 +2838,9 @@ class CaptureResultOverlay(
             pendingTranslation = null,
         )
         lastResult = edited
+        // The edited text is another sentence: a question about the old one
+        // ends here, not when the re-translation lands.
+        askSession.bind(askSentence(edited.originalText, edited.langContext))
         // The capture's per-group boxes translate the OLD source — the edit
         // orphans them, so drop the data AND any boxes already painted from it.
         overlayData = null
@@ -2848,16 +2894,71 @@ class CaptureResultOverlay(
         applyWindowFocusPolicy()
     }
 
+    /** Which of the sheet's two text fields holds the keyboard. */
+    private enum class TypingIn { NOTHING, SOURCE_EDIT, ASK_QUESTION }
+
+    /** Where the user is typing, derived from the two fields themselves:
+     *  the in-place source edit while its editor is up, the Ask section's
+     *  question while that field has focus. Everything that behaves
+     *  differently while a keyboard is up reads this one answer: the
+     *  window's focus policy, the controller's stand-down, the resize floor
+     *  and the park (a sliver would strand the keyboard), the swipe-away,
+     *  the outside-tap router and B. */
+    private val typingIn: TypingIn
+        get() = when {
+            editContainer.visibility == View.VISIBLE -> TypingIn.SOURCE_EDIT
+            askBinder?.fieldHasFocus == true -> TypingIn.ASK_QUESTION
+            else -> TypingIn.NOTHING
+        }
+
     /** Single owner of the sheet window's focus/IME flags. Focus is wanted
-     *  while the in-place edit is open (for the IME) OR while controller nav
-     *  is live (for keys + stick motion); the IME only ever for the edit —
+     *  while a field is being typed in (for the IME) OR while controller nav
+     *  is live (for keys + stick motion); the IME only ever for a field:
      *  this is what keeps [commitEdit] from dropping controller focus. */
     private fun applyWindowFocusPolicy() {
-        val editing = editContainer.visibility == View.VISIBLE
+        val typing = typingIn != TypingIn.NOTHING
         sheetHost.setFocusPolicy(
-            root, focusable = editing || nav != null || holdsKeysForDefinitions, wantsIme = editing,
+            root, focusable = typing || nav != null || holdsKeysForDefinitions, wantsIme = typing,
         )
     }
+
+    /** The Ask section's question field took or lost focus: give the window
+     *  the keyboard, or take it back. A field in this window cannot raise
+     *  the keyboard by itself: the window is not focusable until the policy
+     *  says so, and that lands asynchronously, so the show is posted behind
+     *  it (as [startInPlaceEdit] does). */
+    private fun onAskFieldFocusChanged(focused: Boolean) {
+        applyWindowFocusPolicy()
+        if (focused) {
+            nav?.clearCursor()   // the keys are the field's now
+            root.post {
+                val field = root.findFocus() ?: return@post
+                if (typingIn != TypingIn.ASK_QUESTION) return@post
+                ctx.getSystemService(InputMethodManager::class.java)
+                    ?.showSoftInput(field, InputMethodManager.SHOW_IMPLICIT)
+            }
+        } else {
+            root.requestFocus()   // view focus back where the controller reads keys
+        }
+    }
+
+    /** The user reached for an Ask question with no LLM set up: say so, on
+     *  this sheet's own alert surface, with the way to Translation services
+     *  (the app's page takes the screen, so an over-game sheet goes, like
+     *  its other pages; an in-activity host's stays behind it). */
+    private fun showAskNeedsLlm() {
+        showAlertOn(alertTarget) {
+            askNeedsLlm(ctx) {
+                launchOnForegroundDisplay(Intent(ctx.applicationContext, TranslationServicesActivity::class.java))
+                if (dismissOnActivityLaunch) dismissForPage()
+            }
+        }
+    }
+
+    /** The Ask section's finished answer about the result on show, for the
+     *  hand-off to a page ([onNavigateToDetail]); null with none, or with a
+     *  question still in flight. */
+    private fun finishedAnswer(): AskState.Answered? = askSession.state.value as? AskState.Answered
 
     /** The sheet is in Definitions, so its window holds key focus, Back
      *  closing a card and then the sheet without a controller and the D-pad
@@ -2877,7 +2978,9 @@ class CaptureResultOverlay(
     private fun onControllerBack() {
         when {
             popovers.isShowing -> popovers.dismiss()
-            editContainer.visibility == View.VISIBLE -> cancelEdit()
+            typingIn == TypingIn.SOURCE_EDIT -> cancelEdit()
+            // Out of the question field, the keyboard going with its focus.
+            typingIn == TypingIn.ASK_QUESTION -> askBinder?.clearFieldFocus()
             sourceLens?.isShowing == true -> dismissWordLens()
             // A Definitions card is the lens rung's twin over the game.
             layer.hasCard -> layer.closeCard()
@@ -2890,7 +2993,7 @@ class CaptureResultOverlay(
 
     /** The sheet's side of the controller-navigation seam ([nav] drives it). */
     private val navHost = object : CaptureSheetNavHost {
-        override val isEditing: Boolean get() = editContainer.visibility == View.VISIBLE
+        override val isEditing: Boolean get() = typingIn != TypingIn.NOTHING
         override val isPopoverOpen: Boolean get() = popovers.isShowing
         override fun popoverNavActions(): List<NavAction>? = popovers.navActions()
         override val inSliver: Boolean get() = sliverMode
@@ -3067,6 +3170,7 @@ class CaptureResultOverlay(
             if (paired) HEADER_TOP_DP + 1 else HEADER_TOP_DP - 1,
         )
         // The sections beneath are each a row of their own, like the top row.
+        setHeaderTop(sections.findViewById(R.id.askHeaderRow), HEADER_TOP_DP + 1)
         setHeaderTop(sections.findViewById(R.id.wordsHeaderRow), HEADER_TOP_DP + 1)
     }
 
@@ -3105,7 +3209,7 @@ class CaptureResultOverlay(
         // on the way down (endResize commits or parks). The in-place edit keeps
         // the classic floor — collapsing mid-edit would strand the IME over a
         // sliver.
-        val floor = if (editContainer.visibility == View.VISIBLE) {
+        val floor = if (typingIn != TypingIn.NOTHING) {
             CaptureResultGeometry.minPanelHeight(screenH)
         } else {
             sliverHeightPx()
@@ -3178,7 +3282,7 @@ class CaptureResultOverlay(
         // Same clamps as updateResize: [floor, 90%], capped at the content's
         // max-needed height; the in-place edit keeps the classic floor (the
         // nav loop is suspended while editing anyway — belt and braces).
-        val floor = if (editContainer.visibility == View.VISIBLE) {
+        val floor = if (typingIn != TypingIn.NOTHING) {
             CaptureResultGeometry.minPanelHeight(screenH)
         } else {
             sliverHeightPx()
@@ -3213,7 +3317,7 @@ class CaptureResultOverlay(
                 loadingPeekExpand = false
                 animateSliverHeight(sliverHeightPx())
             }
-        } else if (panelHeightPx < min && editContainer.visibility != View.VISIBLE) {
+        } else if (panelHeightPx < min && typingIn == TypingIn.NOTHING) {
             // Mirror endResize's park (never while editing — the IME would
             // strand over a sliver, the same guard the touch floor encodes).
             // Unlike the touch path, this commit can fire with the popover up
@@ -3244,7 +3348,7 @@ class CaptureResultOverlay(
      *  the camera/import hosts (dismissal there is the explicit X) and while
      *  the in-place edit is open, where it would strand the IME. */
     private fun canSwipeAway(): Boolean =
-        dismissOnGesture && editContainer.visibility != View.VISIBLE
+        dismissOnGesture && typingIn == TypingIn.NOTHING
 
     /** True when a released gesture threw the sheet away: it must be a real UP
      *  (a CANCEL is not a release), on a host that dismisses, and past
@@ -3380,7 +3484,7 @@ class CaptureResultOverlay(
          *  rest of the gesture streams to it via [routeOutsideFollowUp]. */
         private fun tryRouteOutsideDown(ev: MotionEvent): Boolean {
             val router = outsideLookupRouter ?: return false
-            if (editContainer.visibility == View.VISIBLE) return false
+            if (typingIn != TypingIn.NOTHING) return false
             if (router(ev)) {
                 routingOutside = true
                 return true

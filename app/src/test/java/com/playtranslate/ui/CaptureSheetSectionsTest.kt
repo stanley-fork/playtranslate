@@ -63,10 +63,10 @@ import java.time.Duration
  *    starts a dismiss drag; a host that does not dismiss on gestures keeps
  *    the sheet.
  *
- * Every sheet here has its Words section HIDDEN, which is a sheet whose
- * content is the two texts: a hidden section is a header row past the fold
- * and adds nothing to the panel's need. The Words section shown in the
- * sheet has its own class.
+ * Every sheet here has its Ask and Words sections HIDDEN, which is a sheet
+ * whose content is the two texts: a hidden section is a header row past the
+ * fold and adds nothing to the panel's need. Those sections shown in the
+ * sheet have their own class.
  *
  * The display is set to each sheet's own size before it is shown, as on a
  * device: Robolectric's default display is 320x470, and the bars it places
@@ -204,6 +204,7 @@ class CaptureSheetSectionsTest {
         for (section in Section.values()) setHiddenPref(section, section in hidden)
         // The two texts are the content under test (class doc).
         prefs.hideWordsSection = true
+        prefs.hideAskSection = true
         // "It opens how you left it": a sheet closed earlier in a test must
         // not seed this one's auto-size ceiling either.
         prefs.capturePanelPosture = CaptureResultGeometry.NO_POSTURE
@@ -234,7 +235,8 @@ class CaptureSheetSectionsTest {
     /** What is past the fold when the two texts fit the body exactly: the
      *  header rows of the sections hidden beneath them. That much a sheet of
      *  two texts always scrolls by, and no more. */
-    private fun rowsPastTheFold(o: CaptureResultOverlay): Int = o.v(R.id.wordsHeaderRow).height
+    private fun rowsPastTheFold(o: CaptureResultOverlay): Int =
+        o.v(R.id.askHeaderRow).height + o.v(R.id.wordsHeaderRow).height
 
     /** How far the content can scroll: the sections past the viewport. */
     private fun scrollRange(o: CaptureResultOverlay): Int {

@@ -39,6 +39,11 @@
          two ids exist apart from section_ask.xml. -->
     <item name="askHeaderRow" type="id" />
     <item name="cardAsk" type="id" />
+    <!-- The Ask header's eye and its (never shown) ⋯, built from
+         AskSectionBinder's HeaderActions like the other headers'. The
+         header's ready-made questions get generated ids: they are a list. -->
+    <item name="btnToggleAsk" type="id" />
+    <item name="btnMoreAsk" type="id" />
     <!-- An ActionOverflowMenu row's parts. -->
     <item name="overflowRowIcon" type="id" />
     <item name="overflowRowLabel" type="id" />

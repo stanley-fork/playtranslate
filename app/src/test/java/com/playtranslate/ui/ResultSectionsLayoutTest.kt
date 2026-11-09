@@ -31,7 +31,7 @@ import org.robolectric.annotation.GraphicsMode
  * column rule (600dp stacks, 601dp pairs), flips both ways on a re-measure,
  * and yields to a host's fixed arrangement (and follows the width again
  * when that is cleared); stacked, the sections run Translation, Original,
- * Words, each across the inner width with no gaps; paired, the header cells
+ * Ask, Words, each across the inner width with no gaps; paired, the header cells
  * and cards sit where [ResultSectionsGeometry.pairedRow] puts them for each
  * of the four hide combinations, under one header row as tall as the
  * taller header, the surviving card spanning both headers and no card row
@@ -94,6 +94,8 @@ class ResultSectionsLayoutTest {
     private val targetCard: View get() = v(R.id.cardTranslation)
     private val sourceHeader: View get() = v(R.id.sourceHeaderRow)
     private val sourceCard: View get() = v(R.id.cardOriginal)
+    private val askHeader: View get() = v(R.id.askHeaderRow)
+    private val askCard: View get() = v(R.id.cardAsk)
     private val wordsHeader: View get() = v(R.id.wordsHeaderRow)
     private val wordsCard: View get() = v(R.id.cardWords)
     private val clearRow: View get() = v(R.id.resultActionButtons)
@@ -124,6 +126,22 @@ class ResultSectionsLayoutTest {
     /** [view] across the full inner width. */
     private fun assertFullWidth(what: String, view: View, width: Int) =
         assertSpan(what, Span(0, inner(width)), view, width)
+
+    /**
+     * The two sections beneath the top block, from [top]: Ask (its header,
+     * then its card) and then Words, each beginning where the one above it
+     * ended and running the full inner width of [width]. What "beneath the
+     * top block" means in every arrangement and hide combination.
+     */
+    private fun assertBeneathTopBlock(at: String, top: Int, width: Int) {
+        assertTrue("the Ask card has a height ($at)", askCard.height > 0)
+        assertEquals("Ask starts under the top block ($at)", top, askHeader.top)
+        assertFullWidth("the Ask header, $at", askHeader, width)
+        assertEquals("the Ask card under its header ($at)", askHeader.bottom, askCard.top)
+        assertFullWidth("the Ask card, $at", askCard, width)
+        assertEquals("Words starts under Ask ($at)", askCard.bottom, wordsHeader.top)
+        assertFullWidth("the Words header, $at", wordsHeader, width)
+    }
 
     /** Gives the Words card something to show, so its own height is real. */
     private fun fillWords() {
@@ -249,7 +267,7 @@ class ResultSectionsLayoutTest {
     // ── Stacked ─────────────────────────────────────────────────────────
 
     @Test
-    fun `stacked, the sections run Translation, Original, Words top to bottom, each across the inner width with no gaps`() {
+    fun `stacked, the sections run Translation, Original, Ask, Words top to bottom, each across the inner width with no gaps`() {
         fillWords()
         setTexts("猫が魚を食べた。", "The cat ate the fish.")
         val width = dp(412)
@@ -258,6 +276,7 @@ class ResultSectionsLayoutTest {
         val order = listOf(
             "the Translation header" to targetHeader, "the Translation card" to targetCard,
             "the Original header" to sourceHeader, "the Original card" to sourceCard,
+            "the Ask header" to askHeader, "the Ask card" to askCard,
             "the Words header" to wordsHeader, "the Words card" to wordsCard,
         )
         var y = sections.paddingTop
@@ -282,7 +301,7 @@ class ResultSectionsLayoutTest {
         assertEquals(dp(408) to dp(786), targetHeader.left to targetHeader.right)
         assertEquals(sourceHeader.left to sourceHeader.right, sourceCard.left to sourceCard.right)
         assertEquals(targetHeader.left to targetHeader.right, targetCard.left to targetCard.right)
-        assertEquals("Words starts under the card row", bottom, wordsHeader.top)
+        assertBeneathTopBlock("under the card row", bottom, dp(800))
         // And at a second width, against the geometry alone.
         assertPairedTopBlock(dp(1000), originalHidden = false, translationHidden = false)
     }
@@ -294,7 +313,7 @@ class ResultSectionsLayoutTest {
         assertEquals(dp(14) to dp(629), sourceHeader.left to sourceHeader.right)
         assertEquals(dp(646) to dp(786), targetHeader.left to targetHeader.right)
         assertFullWidth("the surviving Original card", sourceCard, dp(800))
-        assertEquals("Words starts under the one card", bottom, wordsHeader.top)
+        assertBeneathTopBlock("under the one card", bottom, dp(800))
         assertPairedTopBlock(dp(1000), originalHidden = false, translationHidden = true)
     }
 
@@ -305,19 +324,18 @@ class ResultSectionsLayoutTest {
         assertEquals(dp(14) to dp(154), sourceHeader.left to sourceHeader.right)
         assertEquals(dp(171) to dp(786), targetHeader.left to targetHeader.right)
         assertFullWidth("the surviving Translation card", targetCard, dp(800))
-        assertEquals("Words starts under the one card", bottom, wordsHeader.top)
+        assertBeneathTopBlock("under the one card", bottom, dp(800))
         assertPairedTopBlock(dp(1000), originalHidden = true, translationHidden = false)
     }
 
     @Test
-    fun `paired with both hidden, the headers halve the row, there is no card row, and Words starts right under the headers`() {
+    fun `paired with both hidden, the headers halve the row, there is no card row, and the sections beneath start right under the headers`() {
         fillWords()
         val bottom = assertPairedTopBlock(dp(800), originalHidden = true, translationHidden = true)
         assertEquals(dp(14) to dp(391), sourceHeader.left to sourceHeader.right)
         assertEquals(dp(408) to dp(786), targetHeader.left to targetHeader.right)
         assertEquals("no card row", maxOf(sourceHeader.bottom, targetHeader.bottom), bottom)
-        assertEquals("Words directly under the header row", bottom, wordsHeader.top)
-        assertFullWidth("the Words header", wordsHeader, dp(800))
+        assertBeneathTopBlock("directly under the header row", bottom, dp(800))
     }
 
     @Test
@@ -416,25 +434,41 @@ class ResultSectionsLayoutTest {
         assertTrue("the Translation card alone is shorter", naturalHeight(targetCard) < tall)
     }
 
-    // ── Words and the Clear row ─────────────────────────────────────────
+    // ── Ask, Words and the Clear row ────────────────────────────────────
 
     @Test
-    fun `Words sits beneath the top block at the full inner width in both arrangements`() {
+    fun `Ask and Words sit beneath the top block at the full inner width in both arrangements`() {
         fillWords()
         layOut(dp(412))
         assertEquals(Arrangement.STACKED, sections.arrangement)
-        assertEquals(sourceCard.bottom, wordsHeader.top)
-        assertFullWidth("the Words header", wordsHeader, dp(412))
+        assertBeneathTopBlock("stacked", sourceCard.bottom, dp(412))
         assertEquals(wordsHeader.bottom, wordsCard.top)
         assertFullWidth("the Words card", wordsCard, dp(412))
 
         for ((originalHidden, translationHidden) in listOf(false to false, false to true, true to false, true to true)) {
             val blockBottom = assertPairedTopBlock(dp(800), originalHidden, translationHidden)
             val at = "paired, Original hidden $originalHidden, Translation hidden $translationHidden"
-            assertEquals(at, blockBottom, wordsHeader.top)
-            assertFullWidth("the Words header, $at", wordsHeader, dp(800))
+            assertBeneathTopBlock(at, blockBottom, dp(800))
             assertEquals(at, wordsHeader.bottom, wordsCard.top)
             assertFullWidth("the Words card, $at", wordsCard, dp(800))
+        }
+    }
+
+    @Test
+    fun `a hidden Ask card leaves its header row, with Words directly beneath it`() {
+        fillWords()
+        askCard.visibility = View.GONE
+        for (width in listOf(dp(412), dp(800))) {
+            layOut(width)
+            val blockBottom = if (sections.arrangement == Arrangement.PAIRED) {
+                maxOf(sourceCard.bottom, targetCard.bottom)
+            } else {
+                sourceCard.bottom
+            }
+            assertEquals("the header row stays at ${width}px", blockBottom, askHeader.top)
+            assertTrue(askHeader.height > 0)
+            assertFullWidth("the Ask header", askHeader, width)
+            assertEquals("Words right under it at ${width}px", askHeader.bottom, wordsHeader.top)
         }
     }
 
@@ -450,7 +484,8 @@ class ResultSectionsLayoutTest {
             } else {
                 sourceCard.bottom
             }
-            assertEquals("the header row stays at ${width}px", blockBottom, wordsHeader.top)
+            assertEquals("the header row stays at ${width}px", askCard.bottom, wordsHeader.top)
+            assertEquals("Ask is between it and the top block at ${width}px", blockBottom, askHeader.top)
             assertTrue(wordsHeader.height > 0)
             assertFullWidth("the Words header", wordsHeader, width)
             assertEquals("the Clear row right under it at ${width}px",
@@ -501,7 +536,7 @@ class ResultSectionsLayoutTest {
                 assertEquals(layout.paddingLeft to width - layout.paddingRight, header.left to header.right)
                 assertEquals(header.bottom, card.top)
                 assertEquals(layout.paddingLeft to width - layout.paddingRight, card.left to card.right)
-                assertEquals(card.bottom, v(R.id.wordsHeaderRow, layout).top)
+                assertEquals(card.bottom, v(R.id.askHeaderRow, layout).top)
             }
             layout.fixedArrangement = null
             layOut(dp(1200), layout = layout)
@@ -557,7 +592,10 @@ class ResultSectionsLayoutTest {
             layOut(width)
             assertEquals("at ${width}px", wordsCard.bottom + dp(8), sections.measuredHeight)
             val natural = sections.measuredHeight
-            val tops = listOf(targetHeader, targetCard, sourceHeader, sourceCard, wordsHeader, wordsCard).map { it.top }
+            val all = listOf(
+                targetHeader, targetCard, sourceHeader, sourceCard, askHeader, askCard, wordsHeader, wordsCard,
+            )
+            val tops = all.map { it.top }
 
             val taller = natural + dp(500)
             layOut(width, MeasureSpec.makeMeasureSpec(taller, MeasureSpec.EXACTLY))
@@ -565,7 +603,7 @@ class ResultSectionsLayoutTest {
             assertEquals(
                 "the children stay where they were, top-aligned, at ${width}px",
                 tops,
-                listOf(targetHeader, targetCard, sourceHeader, sourceCard, wordsHeader, wordsCard).map { it.top },
+                all.map { it.top },
             )
         }
         // The last shown child is a header row when every card below the

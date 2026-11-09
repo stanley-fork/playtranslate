@@ -196,6 +196,10 @@ class OverlayUiController(
          *  outlines the same region. */
         val region: RegionEntry,
         val stashedAtMs: Long,
+        /** The Ask section's finished answer about [result], if it had one:
+         *  it comes back with the result. A question still in flight is not
+         *  kept (its request ended with the sheet). */
+        val askAnswer: com.playtranslate.ask.AskState.Answered? = null,
     )
 
     /** The floating workspace while showing (single-screen). Single instance —
@@ -3117,7 +3121,9 @@ class OverlayUiController(
             capture.geometry = launchGeometry
             val overlay = com.playtranslate.ui.CaptureResultOverlay(displayCtx, wm, displayId, overlayHost)
             overlay.onDismiss = { reason -> onCaptureSheetDismissed(overlay, reason) }
-            overlay.onNavigateToDetail = { result -> stashCaptureOverlayForReshow(displayId, result, region) }
+            overlay.onNavigateToDetail = { result, answer ->
+                stashCaptureOverlayForReshow(displayId, result, region, answer)
+            }
             // Over-game sheet: B/dpad/stick drive it while a controller is attached.
             overlay.controllerNavEnabled = true
             overlay.captureRegion = region
@@ -3273,6 +3279,7 @@ class OverlayUiController(
         displayId: Int,
         result: com.playtranslate.model.TranslationResult,
         region: RegionEntry,
+        askAnswer: com.playtranslate.ask.AskState.Answered? = null,
     ) {
         // A page takes the screen: the restart is forgone, and the sheet
         // that comes back on Back owes nothing.
@@ -3280,7 +3287,9 @@ class OverlayUiController(
         endSheetCapture(capture)
         capture?.let { payDebt(it, CaptureDebt.NO_RESTART) }
         // After the capture's end, which drops any earlier one.
-        pendingReshow = PendingReshow(displayId, result, region, android.os.SystemClock.elapsedRealtime())
+        pendingReshow = PendingReshow(
+            displayId, result, region, android.os.SystemClock.elapsedRealtime(), askAnswer,
+        )
     }
 
     /** Called by [com.playtranslate.ui.TranslationResultActivity] when the user backs
@@ -3292,7 +3301,7 @@ class OverlayUiController(
         pendingReshow = null
         if (pending.displayId != displayId) return
         if (android.os.SystemClock.elapsedRealtime() - pending.stashedAtMs > reshowStalenessMs) return
-        reshowCaptureOverlay(displayId, pending.result, pending.region)
+        reshowCaptureOverlay(displayId, pending.result, pending.region, pending.askAnswer)
     }
 
     /** Re-create the over-game panel and bind a stashed result (no re-capture). */
@@ -3300,6 +3309,7 @@ class OverlayUiController(
         displayId: Int,
         result: com.playtranslate.model.TranslationResult,
         region: RegionEntry,
+        askAnswer: com.playtranslate.ask.AskState.Answered?,
     ) {
         endSheetCapture(sheetCapture)
         val dm = context.getSystemService(Context.DISPLAY_SERVICE) as DisplayManager
@@ -3313,7 +3323,9 @@ class OverlayUiController(
         capture.geometry = DisplayGeometry(size.x, size.y, display.rotation)
         val overlay = com.playtranslate.ui.CaptureResultOverlay(displayCtx, wm, displayId, overlayHost)
         overlay.onDismiss = { reason -> onCaptureSheetDismissed(overlay, reason) }
-        overlay.onNavigateToDetail = { r -> stashCaptureOverlayForReshow(displayId, r, region) }
+        overlay.onNavigateToDetail = { r, answer ->
+            stashCaptureOverlayForReshow(displayId, r, region, answer)
+        }
         // Same controller-nav opt-in as the fresh-capture path, or the sheet
         // would come back keyless after a detail round-trip.
         overlay.controllerNavEnabled = true
@@ -3326,7 +3338,7 @@ class OverlayUiController(
         val backdrop = result.screenshotPath?.let {
             runCatching { android.graphics.BitmapFactory.decodeFile(it) }.getOrNull()
         }
-        overlay.showWithResult(size.x, size.y, result, backdrop)
+        overlay.showWithResult(size.x, size.y, result, backdrop, askAnswer)
         backdrop?.recycle()
     }
 

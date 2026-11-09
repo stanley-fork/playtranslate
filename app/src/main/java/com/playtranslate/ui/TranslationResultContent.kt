@@ -19,11 +19,13 @@ import com.playtranslate.model.OcrProvenance
 import com.playtranslate.model.TranslationResult
 import com.playtranslate.overlay.OverlayHost
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.launch
 
 /**
  * The results page's content — `fragment_translation_result.xml` driven by
  * a [TranslationResultViewModel] — as a host-agnostic renderer: the status
  * screen, the source + target sections ([TranslationSectionBinder]), the
+ * Ask section ([AskSectionBinder]) over the view-model's [AskSession], the
  * Words card ([WordRowsBinder]), the tap-a-word lens ([SourceTextLens]),
  * the in-window popovers ([popovers]: the text-size picker, the section
  * headers' ⋯ menus), and the render funnel that ties them to the VM's
@@ -149,6 +151,11 @@ class TranslationResultContent(
          *  consumer needs it now — see [requestDeferredCompletion]. */
         fun completeDeferredTranslation() {}
 
+        /** The user reached for an Ask question with no LLM set up: show
+         *  the alert that says so ([askNeedsLlm]) on this surface, its
+         *  button opening Translation services from here. */
+        fun onAskNeedsLlm()
+
         /** The overlay mode the capture's boxes are painted in on the game
          *  screen right now (two screens), or null with none painted. In
          *  Translations they need the deferred translation whatever the
@@ -181,6 +188,9 @@ class TranslationResultContent(
         TranslationSectionBinder(root, ctx, prefs, host.scope, host.ttsAlertTarget, popovers)
     val wordRows: WordRowsBinder
     val sourceLens: SourceTextLens
+
+    /** The Ask section, over the view-model's session. */
+    val ask: AskSectionBinder
     private val lookupsRenderer: WordLookupsRenderer
 
     /** Bumped on every [render]; see the class doc's reveal rule. */
@@ -276,10 +286,24 @@ class TranslationResultContent(
         }
         binder.onChooseLanguage = { isSource -> host.onChangeLanguage(isSource) }
         binder.setShowOnScreenAction { host.onShowOnScreenTapped() }
-        // This vertical page just reflows on an eye toggle (no re-layout
-        // work), but REVEALING the translation section on a deferred result
-        // must run the translation that was skipped while it was hidden.
-        binder.onSectionVisibilityChanged = { requestDeferredCompletion() }
+        ask = AskSectionBinder(
+            root, ctx, prefs, vm.ask,
+            object : AskSectionBinder.Host {
+                override fun onInteraction() = host.onInteraction()
+                override fun onLlmNeeded() = host.onAskNeedsLlm()
+            },
+        )
+        // The session is the view-model's and outlives this page: draw
+        // whatever it holds now, and every change after.
+        host.scope.launch { vm.ask.state.collect { if (host.isAlive) ask.render(it) } }
+        // The page just reflows on an eye toggle (no re-layout work), but
+        // REVEALING the translation section on a deferred result must run
+        // the translation that was skipped while it was hidden, and an
+        // answer on show says whether it may give a hidden translation away.
+        binder.onSectionVisibilityChanged = {
+            requestDeferredCompletion()
+            ask.syncSpoilerWarning()
+        }
         scrollView.setOnScrollChangeListener(scrollListener)
         // A rotation or a resized window re-arranges the sections (their
         // layout follows its width) without this page being rebuilt, and
@@ -337,6 +361,16 @@ class TranslationResultContent(
         }
         val generation = ++renderGeneration
         host.onRender(state)
+        // The Ask section's question is about the sentence on show. Saying
+        // which that is, here, on every render, is the whole of keeping an
+        // answer with its sentence: binding another one ends the question.
+        vm.ask.bind(
+            when (state) {
+                is ResultState.Translating -> askSentence(state.originalText, prefs.langContext())
+                is ResultState.Ready -> askSentence(state.result.originalText, state.result.langContext)
+                else -> null
+            },
+        )
         when (state) {
             is ResultState.Idle ->
                 showStatus(ctx.getString(R.string.status_idle), showHint = host.showsStartHint)

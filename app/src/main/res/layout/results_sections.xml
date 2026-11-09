@@ -14,6 +14,8 @@
 
     <include layout="@layout/section_source" />
 
+    <include layout="@layout/section_ask" />
+
     <include layout="@layout/section_words" />
 
 </merge>

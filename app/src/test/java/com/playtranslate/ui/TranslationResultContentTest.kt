@@ -8,12 +8,15 @@ import android.os.Looper
 import android.util.TypedValue
 import android.view.LayoutInflater
 import android.view.View
+import android.view.ViewGroup
 import android.view.WindowManager
 import android.widget.TextView
 import androidx.test.core.app.ApplicationProvider
 import com.playtranslate.OverlayMode
 import com.playtranslate.Prefs
 import com.playtranslate.R
+import com.playtranslate.ask.AskQuestion
+import com.playtranslate.ask.AskState
 import com.playtranslate.language.AnnotatedSpan
 import com.playtranslate.language.InflectionTag
 import com.playtranslate.language.SentenceAnnotation
@@ -24,6 +27,7 @@ import com.playtranslate.model.PendingTranslation
 import com.playtranslate.model.TextSegments
 import com.playtranslate.model.TranslationResult
 import com.playtranslate.overlay.OverlayHost
+import com.playtranslate.translation.TranslationBackendRegistry
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -32,6 +36,7 @@ import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotEquals
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertSame
 import org.junit.Assert.assertTrue
 import org.junit.Before
@@ -66,6 +71,12 @@ import org.robolectric.annotation.GraphicsMode
  * header row and card chrome; and a change of the page's width (a
  * rotation) posts a re-fit for the arrangement it brings, while a change
  * of its height alone (a keyboard) posts none.
+ * The Ask section is the view-model's session drawn: an answer stays with
+ * its sentence across renders (a text still translating is already that
+ * sentence) and ends when another sentence, or none, is on show; with no
+ * LLM a preset leads to the host's alert, as an interaction; and the
+ * Translation eye tells an answer on show whether it may give the
+ * translation away.
  */
 @RunWith(RobolectricTestRunner::class)
 class TranslationResultContentTest {
@@ -99,8 +110,12 @@ class TranslationResultContentTest {
         var startHint = false
         var edit = false
         var modeOnScreen: OverlayMode? = null
+        var askAlerts = 0
+        var interactions = 0
 
         override val captureModeOnScreen: OverlayMode? get() = modeOnScreen
+        override fun onAskNeedsLlm() { askAlerts++ }
+        override fun onInteraction() { interactions++ }
         override fun onRender(state: ResultState) { rendered += state }
         override fun onWordTapped(
             word: String,
@@ -336,6 +351,66 @@ class TranslationResultContentTest {
         content.renderWordLookups(analyzed)
         assertEquals("the spans don't depend on the card", expected, content.sourceLens.wordSpans)
         assertEquals("a hidden card asks for nothing", 2, wanted)
+    }
+
+    // ── Ask ─────────────────────────────────────────────────────────────
+
+    private fun sentence(text: String) = askSentence(text, Prefs(app).langContext())
+
+    private fun answered(text: String) = AskState.Answered(AskQuestion.Custom("Why が?"), text, "Gemini")
+
+    @Test
+    fun `an Ask answer stays with its sentence across renders and ends when another sentence, or none, is on show`() {
+        content.render(ResultState.Translating("猫が食べる。", TextSegments.ofText("猫が食べる。")))
+        idle()
+        assertEquals("a text still translating is already the sentence", sentence("猫が食べる。"), vm.ask.sentence)
+        vm.ask.restore(sentence("猫が食べる。"), answered("It marks the subject."))
+        idle()
+        assertEquals("the session's state is drawn", "It marks the subject.", text(R.id.tvAskBody))
+        assertEquals(View.VISIBLE, view(R.id.askAnswer).visibility)
+        assertEquals(View.GONE, view(R.id.askIdle).visibility)
+
+        content.render(ResultState.Ready(result("猫が食べる。", "The cat eats.")))
+        idle()
+        assertEquals("its translation landing keeps the answer", answered("It marks the subject."), vm.ask.state.value)
+
+        content.render(ResultState.Ready(result("犬が走る。", "The dog runs.")))
+        idle()
+        assertEquals("another sentence ends it", AskState.Idle, vm.ask.state.value)
+        assertEquals(sentence("犬が走る。"), vm.ask.sentence)
+        assertEquals("the questions are back", View.VISIBLE, view(R.id.askIdle).visibility)
+        assertEquals(View.GONE, view(R.id.askAnswer).visibility)
+
+        vm.ask.restore(sentence("犬が走る。"), answered("Runs."))
+        content.render(ResultState.Status("Capturing", showHint = false))
+        idle()
+        assertEquals("no result on show ends it", AskState.Idle, vm.ask.state.value)
+        assertNull(vm.ask.sentence)
+    }
+
+    @Test
+    fun `with no LLM an Ask preset leads to the host's alert, as an interaction, and asks nothing`() {
+        assertFalse("precondition: nothing here could answer", TranslationBackendRegistry.hasCompleter())
+        content.render(ResultState.Ready(result("猫が食べる。", "The cat eats.")))
+        idle()
+        (view(R.id.askPresetChips) as ViewGroup).getChildAt(0).performClick()
+        assertEquals(1, host.askAlerts)
+        assertEquals(1, host.interactions)
+        assertEquals(AskState.Idle, vm.ask.state.value)
+    }
+
+    @Test
+    fun `the Translation eye tells an answer on show whether it may give the translation away`() {
+        content.render(ResultState.Ready(result("猫が食べる。", "The cat eats.")))
+        idle()
+        vm.ask.restore(sentence("猫が食べる。"), answered("It marks the subject."))
+        idle()
+        assertEquals(View.GONE, view(R.id.tvAskWarning).visibility)
+        view(R.id.btnToggleTranslation).performClick()
+        assertTrue("precondition: the eye hid the translation", Prefs(app).hideTranslationSection)
+        assertEquals(View.VISIBLE, view(R.id.tvAskWarning).visibility)
+        view(R.id.btnToggleTranslation).performClick()
+        assertEquals(View.GONE, view(R.id.tvAskWarning).visibility)
     }
 
     /** One traversal of the page at the display's size. */

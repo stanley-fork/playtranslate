@@ -24,6 +24,12 @@ package com.playtranslate.ui
  * a single foldable no wider than ⋯ never gets one; a wider row never folds
  * more or cuts the label shorter; the rule has no direction (RTL mirrors the
  * row, not the plan).
+ *
+ * A row can do without ⋯ ([plan]'s `overflow` false): then the actions that
+ * don't fit are simply not shown (still a prefix, in order), no ⋯ takes a
+ * slot or a gap, and nothing gives its place up for one. For a header whose
+ * actions are a convenience with another way to them (the Ask header's
+ * ready-made questions, which the section itself lists once it is opened).
  */
 object HeaderFit {
 
@@ -47,6 +53,7 @@ object HeaderFit {
      *   order (unavailable actions take no part).
      * @param pinned widths of the available pinned actions.
      * @param moreWidth the ⋯ button's width.
+     * @param overflow whether folded actions get a ⋯ (class doc).
      */
     fun plan(
         contentWidth: Int?,
@@ -55,6 +62,7 @@ object HeaderFit {
         foldable: List<Int>,
         pinned: List<Int>,
         moreWidth: Int,
+        overflow: Boolean = true,
     ): Plan {
         val n = foldable.size
         if (contentWidth == null) return Plan(n, showMore = false, labelWidth = labelNatural)
@@ -65,14 +73,14 @@ object HeaderFit {
             var sum = 0
             var count = 0
             for (i in 0 until k) { sum += foldable[i]; count++ }
-            if (k < n) { sum += moreWidth; count++ }
+            if (k < n && overflow) { sum += moreWidth; count++ }
             for (w in pinned) { sum += w; count++ }
             return if (count == 0) 0 else sum + gap * count
         }
 
         for (k in n downTo 0) {
             if (labelNatural + actionsWidth(k) <= contentWidth) {
-                return Plan(k, showMore = k < n, labelWidth = labelNatural)
+                return Plan(k, showMore = overflow && k < n, labelWidth = labelNatural)
             }
         }
         // Nothing fits beside the whole name: take the narrowest action side
@@ -88,7 +96,7 @@ object HeaderFit {
         }
         return Plan(
             bestK,
-            showMore = bestK < n,
+            showMore = overflow && bestK < n,
             labelWidth = (contentWidth - bestW).coerceIn(0, labelNatural),
         )
     }

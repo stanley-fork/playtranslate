@@ -879,6 +879,71 @@
          of word rows (e.g. 6). -->
     <string name="section_words_count">Words · <xliff:g id="count" example="6">%1$d</xliff:g></string>
 
+    <!-- Header above the results' Ask section, where the user asks an AI
+         model about the sentence on show: ready-made questions to tap, and a
+         field for a question of their own. -->
+    <string name="section_ask">Ask</string>
+
+    <!-- Placeholder in the Ask section's text field while it is empty: the
+         user types a question of their own about the sentence there and
+         sends it to their AI model. -->
+    <string name="ask_question_hint">Ask your own question…</string>
+
+    <!-- contentDescription for the send button (a paper plane) at the end of
+         the Ask section's text field: it sends the typed question to the
+         user's AI model. -->
+    <string name="cd_ask_send">Send question</string>
+
+    <!-- contentDescription for the × button beside the question over an
+         answer in the Ask section: it discards the answer and brings back
+         the questions to choose from. -->
+    <string name="cd_ask_close">Close answer</string>
+
+    <!-- contentDescription for the eye toggle on the Ask section's header:
+         it collapses the section to its header, or opens it again. "Ask" is
+         the section's name. -->
+    <string name="cd_toggle_ask_visibility">Toggle Ask visibility</string>
+
+    <!-- Status line in the Ask section's answer area while the question is
+         with the AI model and nothing has come back yet. -->
+    <string name="ask_status_thinking">Thinking…</string>
+
+    <!-- The line under an answer in the Ask section, saying who answered.
+         %1$s = the display name of the AI service or on-device model that
+         answered (e.g. Gemini). -->
+    <string name="ask_answered_by">Answered by <xliff:g id="service_name" example="Gemini">%1$s</xliff:g></string>
+
+    <!-- Warning line above an answer in the Ask section while the user has
+         the Translation section hidden (they are reading without the
+         translation): an answer about the sentence can reveal what it
+         means. -->
+    <string name="ask_spoiler_warning">⚠ Answers may give away the hidden translation.</string>
+
+    <!-- First line of the Ask section's answer area when no AI model
+         answered the question. A second line may follow it with the reason
+         (the service's name and what went wrong), worded like the
+         translation error messages. -->
+    <string name="ask_failed">Couldn\'t get an answer.</string>
+
+    <!-- Text button under a failed answer in the Ask section: it asks the
+         same question again. -->
+    <string name="ask_retry">Try again</string>
+
+    <!-- Title of the alert shown when the user taps a question, or the text
+         field, in the Ask section while no AI model is set up to answer. -->
+    <string name="ask_no_llm_title">Ask needs an AI model</string>
+
+    <!-- Body of that alert (ask_no_llm_title). "Translation services" names
+         the settings page where online AI services and on-device models are
+         set up, and should read exactly like that page's name
+         (settings_cell_translation_services). -->
+    <string name="ask_no_llm_message">Ask sends your question about this sentence to an AI model. Add an online AI service, or turn on an on-device model, in Translation services.</string>
+
+    <!-- Button on that alert (ask_no_llm_title): it opens the Translation
+         services settings page, and should read exactly like that page's
+         name (settings_cell_translation_services). -->
+    <string name="ask_no_llm_open_services">Translation services</string>
+
     <!-- A ready-made question in the results' Ask section, where the user
          asks an AI model about the sentence. Shown on a chip, and as the
          title over its answer: it asks for the sentence's grammar explained
