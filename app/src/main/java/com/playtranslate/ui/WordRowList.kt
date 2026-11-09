@@ -151,6 +151,13 @@ internal class WordRowList<T>(
         ids = rowIdsOf(entries)
         this.footer = footer
         lang = definitionLang
+        if (newRows.isEmpty() && footer == null) {
+            // Nothing was found: the page goes, and with it this list's
+            // claim on one ([prepare]), which alone keeps a spare loaded.
+            // [clear] is the empty list of a lookup still running.
+            document.release()
+            return
+        }
         publish()
         loadDeckBadges()
     }

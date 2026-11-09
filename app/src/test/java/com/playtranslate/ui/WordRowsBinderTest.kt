@@ -21,6 +21,8 @@ import kotlinx.coroutines.runBlocking
 import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNotNull
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Before
 import org.junit.Test
@@ -38,7 +40,8 @@ import org.robolectric.android.controller.ActivityController
  * render re-stubs the row in place (a toggle never moves a row); a list
  * drawn BEFORE the language's set loaded is provisional, and the load's
  * bump re-renders it ordered exactly once; a row tap reaches the host with
- * the row; and Loading / Idle clear the rows.
+ * the row; Loading / Idle clear the rows and keep the page for the lookup
+ * that is running; and a lookup that finds no words lets the page go.
  *
  * And the card's own visibility: the effective hidden state is the pref OR
  * the live session's auto-hide; an Analyzed lookup asks for its rows only
@@ -183,6 +186,34 @@ class WordRowsBinderTest {
         binder.render(settled())
         assertEquals(0, binder.container.childCount)
         assertTrue(shown().isEmpty())
+    }
+
+    @Test
+    fun `a lookup that finds no words lets the page go, and the spare it had asked for`() {
+        val none = WordLookupsState.Settled(emptyList(), emptyList(), emptyMap())
+
+        // A lookup is running: the card asks for a page, which loads as the
+        // spare.
+        binder.prepareRows()
+        binder.render(WordLookupsState.Loading)
+        assertNotNull(DefinitionShells.spareForTest)
+        // It finds nothing: the card's claim on a page ends, and with the
+        // last claim the spare goes.
+        binder.render(none)
+        assertNull(DefinitionShells.spareForTest)
+        assertEquals(0, binder.container.childCount)
+
+        // A page that was drawing rows goes the same way...
+        binder.render(settled())
+        assertEquals(1, binder.container.childCount)
+        binder.render(WordLookupsState.Loading)
+        assertEquals("kept while the next lookup runs", 1, binder.container.childCount)
+        binder.render(none)
+        assertEquals(0, binder.container.childCount)
+        // ...and the next words draw again.
+        binder.render(settled())
+        assertEquals(3, shown().size)
+        assertEquals(1, binder.container.childCount)
     }
 
     @Test
