@@ -13,6 +13,7 @@ import com.playtranslate.language.SentenceAnnotation
 import com.playtranslate.language.SourceLangId
 import com.playtranslate.model.ImportedSense
 import com.playtranslate.model.ImportedSenseGroup
+import com.playtranslate.themeColor
 import com.playtranslate.vocab.HiddenWordsStore
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -21,6 +22,7 @@ import kotlinx.coroutines.runBlocking
 import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNotEquals
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
@@ -47,7 +49,9 @@ import org.robolectric.android.controller.ActivityController
  * the live session's auto-hide; an Analyzed lookup asks for its rows only
  * while the card is shown; live start auto-hides without writing the pref
  * and is edge-triggered; the eye writes the opposite of what the card is
- * showing and spends the auto-hide.
+ * showing and spends the auto-hide; and the header's label recedes to the
+ * hint colour while the card is hidden (by the eye or the auto-hide) and is
+ * muted while it shows.
  */
 @RunWith(RobolectricTestRunner::class)
 class WordRowsBinderTest {
@@ -279,6 +283,49 @@ class WordRowsBinderTest {
     private val card: View get() = root.findViewById(R.id.cardWords)
     private val eye: View get() = root.findViewById(R.id.btnToggleWords)
     private val hidePref: Boolean get() = Prefs(app).hideWordsSection
+    private val label: String get() = root.findViewById<android.widget.TextView>(R.id.labelWords).text.toString()
+
+    @Test
+    fun `the header counts the rows only while the card is showing them`() {
+        val plain = activity.getString(R.string.section_words)
+        assertEquals("nothing looked up yet", plain, label)
+        binder.render(WordLookupsState.Loading)
+        assertEquals("a lookup still running has no count", plain, label)
+        binder.render(settled())
+        assertEquals(activity.getString(R.string.section_words_count, 3), label)
+        // Hidden: the rows are kept for the reveal, but none are on screen.
+        eye.performClick()
+        assertEquals(View.GONE, card.visibility)
+        assertEquals(plain, label)
+        eye.performClick()
+        assertEquals(activity.getString(R.string.section_words_count, 3), label)
+        // A lookup that finds no words has nothing to count.
+        binder.render(WordLookupsState.Settled(emptyList(), emptyList(), emptyMap()))
+        assertEquals(plain, label)
+    }
+
+    @Test
+    fun `a hidden card's label recedes to the hint colour, and a shown one's is muted`() {
+        val muted = activity.themeColor(R.attr.ptTextMuted)
+        val hint = activity.themeColor(R.attr.ptTextHint)
+        assertNotEquals("the two colours differ in this theme", muted, hint)
+        val labelView = root.findViewById<android.widget.TextView>(R.id.labelWords)
+        binder.applyWordsVisibility()
+        assertEquals("shown", muted, labelView.currentTextColor)
+        eye.performClick()
+        assertEquals(View.GONE, card.visibility)
+        assertEquals("hidden by the eye", hint, labelView.currentTextColor)
+        eye.performClick()
+        assertEquals(View.VISIBLE, card.visibility)
+        assertEquals("shown again", muted, labelView.currentTextColor)
+        // The live session's auto-hide hides the card too, so the label
+        // recedes with it, and comes back when the session ends.
+        binder.setLiveMode(true)
+        assertEquals(View.GONE, card.visibility)
+        assertEquals("auto-hidden by live mode", hint, labelView.currentTextColor)
+        binder.setLiveMode(false)
+        assertEquals(muted, labelView.currentTextColor)
+    }
 
     @Test
     fun `a hidden card never asks for rows and holds no page, and a Settled landing while hidden is drawn on the reveal`() {

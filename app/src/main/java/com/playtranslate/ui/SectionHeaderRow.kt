@@ -63,6 +63,17 @@ class SectionHeaderRow @JvmOverloads constructor(
     /** Tapped ⋯ (the binder opens or closes the menu). */
     var onMoreClick: ((SectionHeaderRow) -> Unit)? = null
 
+    /** The label drawn receded, in the hint colour: the header of a section
+     *  whose card is hidden, which is all that is left of it on screen. */
+    var labelDimmed: Boolean = false
+        set(value) {
+            if (field == value) return
+            field = value
+            label.setTextColor(
+                context.themeColor(if (value) R.attr.ptTextHint else R.attr.ptTextMuted),
+            )
+        }
+
     private var actions: List<HeaderAction> = emptyList()
     private val viewOf = HashMap<HeaderAction, View>()
     private val actionOf = HashMap<View, HeaderAction>()

@@ -5,6 +5,7 @@ import android.content.Context
 import android.graphics.Point
 import android.os.Bundle
 import android.os.Looper
+import android.util.TypedValue
 import android.view.LayoutInflater
 import android.view.View
 import android.view.WindowManager
@@ -30,6 +31,7 @@ import kotlinx.coroutines.cancel
 import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNotEquals
 import org.junit.Assert.assertSame
 import org.junit.Assert.assertTrue
 import org.junit.Before
@@ -40,6 +42,7 @@ import org.robolectric.RobolectricTestRunner
 import org.robolectric.Shadows.shadowOf
 import org.robolectric.android.controller.ActivityController
 import org.robolectric.annotation.Config
+import org.robolectric.annotation.GraphicsMode
 
 /**
  * Pins [TranslationResultContent]'s shell contract — what the in-app
@@ -58,6 +61,11 @@ import org.robolectric.annotation.Config
  * it is; and on a narrow page both headers fold
  * behind ⋯, whose menu runs the same actions (Add to Anki reaches the
  * host, Text size opens the size picker anchored on the target's ⋯).
+ * The fit follows the sections' arrangement: stacked, each text is fitted
+ * to half the scroll viewport; paired, each to the viewport less its own
+ * header row and card chrome; and a change of the page's width (a
+ * rotation) posts a re-fit for the arrangement it brings, while a change
+ * of its height alone (a keyboard) posts none.
  */
 @RunWith(RobolectricTestRunner::class)
 class TranslationResultContentTest {
@@ -395,8 +403,172 @@ class TranslationResultContentTest {
         assertFalse(content.popovers.isShowing)
     }
 
+    // ── The fit, per arrangement ────────────────────────────────────────
+    // Native graphics for these, so the texts measure in a real font and a
+    // fit lands between the size bounds instead of at one of them.
+
+    /** The page pinned to [width] x [height] px and laid out there. Pinned,
+     *  so a traversal the looper runs later (each fit requests one) measures
+     *  the same size instead of the window's. */
+    private fun pinPage(width: Int, height: Int) {
+        root.layoutParams = android.widget.FrameLayout.LayoutParams(width, height)
+        root.measure(
+            View.MeasureSpec.makeMeasureSpec(width, View.MeasureSpec.EXACTLY),
+            View.MeasureSpec.makeMeasureSpec(height, View.MeasureSpec.EXACTLY),
+        )
+        root.layout(0, 0, width, height)
+    }
+
+    private val arrangement: ResultSectionsLayout.Arrangement
+        get() = root.findViewById<ResultSectionsLayout>(R.id.resultsScrollContent).arrangement
+
+    private val viewportHeight: Int get() = view(R.id.resultsContent).height
+
+    /** The texts' sizes right now, in px: (Original, Translation). */
+    private fun sizes(): Pair<Float, Float> =
+        root.findViewById<TextView>(R.id.tvOriginal).textSize to
+            root.findViewById<TextView>(R.id.tvTranslation).textSize
+
+    private fun px(sp: Float): Float =
+        TypedValue.applyDimension(TypedValue.COMPLEX_UNIT_SP, sp, activity.resources.displayMetrics)
+
+    /** A section's chrome around its text: the content holder's vertical
+     *  padding and the card frame's own. No note row shows in these results
+     *  (no backend label, no OCR provenance), which [renderLongResult]
+     *  asserts. */
+    private fun chrome(card: Int, holder: Int): Int =
+        view(holder).paddingTop + view(holder).paddingBottom + view(card).paddingTop + view(card).paddingBottom
+
+    private val sourceChrome: Int get() = chrome(R.id.cardOriginal, R.id.originalContent)
+    private val translationChrome: Int get() = chrome(R.id.cardTranslation, R.id.translationContent)
+
+    /** The sizes the binder's own fit gives each text for a target height,
+     *  in px: the oracle for WHICH height each arrangement fits to. */
+    private fun fittedTo(sourceTargetPx: Int, translationTargetPx: Int): Pair<Float, Float> =
+        px(content.binder.sourceSizeFor(sourceTargetPx)) to px(content.binder.targetSizeFor(translationTargetPx))
+
+    /** Stacked: each text fitted to half the scroll viewport. */
+    private fun stackedRule(): Pair<Float, Float> = fittedTo(viewportHeight / 2, viewportHeight / 2)
+
+    /** Paired: each text fitted to the viewport less its own header row and
+     *  card chrome. */
+    private fun pairedRule(): Pair<Float, Float> = fittedTo(
+        viewportHeight - view(R.id.sourceHeaderRow).height - sourceChrome,
+        viewportHeight - view(R.id.targetHeaderRow).height - translationChrome,
+    )
+
+    private fun assertSizes(message: String, expected: Pair<Float, Float>, actual: Pair<Float, Float>) {
+        assertEquals("$message: the Original", expected.first, actual.first, 0.01f)
+        assertEquals("$message: the Translation", expected.second, actual.second, 0.01f)
+    }
+
+    /** [rule] and [other] size each text apart, by more than the fit's
+     *  bisect step, so a fit to [other] cannot pass for [rule]. */
+    private fun assertApart(what: String, rule: Pair<Float, Float>, other: Pair<Float, Float>) {
+        assertNotEquals("$what, for the Original", rule.first, other.first, px(0.1f))
+        assertNotEquals("$what, for the Translation", rule.second, other.second, px(0.1f))
+    }
+
+    /** Both texts fitted strictly between the size bounds (16 to 24sp), so
+     *  the target height decides the size rather than a bound. */
+    private fun assertBetweenBounds(actual: Pair<Float, Float>) {
+        for ((what, size) in listOf("the Original" to actual.first, "the Translation" to actual.second)) {
+            assertTrue("$what's fit lands between the bounds ($size px)", size > px(16f) && size < px(24f))
+        }
+    }
+
+    private fun renderLongResult() {
+        content.render(ResultState.Ready(result(LONG_SOURCE, LONG_TRANSLATION)))
+        idle()
+        assertEquals(View.VISIBLE, view(R.id.resultsContent).visibility)
+        assertEquals("no note row in the chrome", View.GONE, view(R.id.tvTranslationNote).visibility)
+        assertEquals("no note row in the chrome", View.GONE, view(R.id.sourceNoteRow).visibility)
+    }
+
+    @Test
+    @Config(qualifiers = "w412dp-h360dp-mdpi")
+    @GraphicsMode(GraphicsMode.Mode.NATIVE)
+    fun `stacked, each text is fitted to half the scroll viewport`() {
+        renderLongResult()
+        pinPage(412, 360)
+        assertEquals(ResultSectionsLayout.Arrangement.STACKED, arrangement)
+        content.fitTextSizes()
+        assertApart("the paired rule would size them otherwise", stackedRule(), pairedRule())
+        assertSizes("stacked", stackedRule(), sizes())
+        assertBetweenBounds(sizes())
+    }
+
+    @Test
+    @Config(qualifiers = "w800dp-h360dp-mdpi")
+    @GraphicsMode(GraphicsMode.Mode.NATIVE)
+    fun `paired, each text is fitted to the viewport less its own header row and card chrome`() {
+        renderLongResult()
+        pinPage(800, 360)
+        assertEquals(ResultSectionsLayout.Arrangement.PAIRED, arrangement)
+        content.fitTextSizes()
+        val viewport = viewportHeight
+        val sourceHeader = view(R.id.sourceHeaderRow).height
+        val targetHeader = view(R.id.targetHeaderRow).height
+        // The near misses each give other sizes: half the viewport (the
+        // stacked rule), the viewport less the header alone (no chrome),
+        // less the chrome alone (no header), and the whole viewport.
+        assertApart("half the viewport", pairedRule(), stackedRule())
+        assertApart("no chrome", pairedRule(), fittedTo(viewport - sourceHeader, viewport - targetHeader))
+        assertApart("no header", pairedRule(), fittedTo(viewport - sourceChrome, viewport - translationChrome))
+        assertApart("the whole viewport", pairedRule(), fittedTo(viewport, viewport))
+        assertSizes("paired", pairedRule(), sizes())
+        assertBetweenBounds(sizes())
+    }
+
+    @Test
+    @Config(qualifiers = "w412dp-h360dp-mdpi")
+    @GraphicsMode(GraphicsMode.Mode.NATIVE)
+    fun `a width change posts a re-fit for the arrangement it brings, and a height-only change posts none`() {
+        renderLongResult()
+        pinPage(412, 360)
+        idle()
+        content.fitTextSizes()
+        assertEquals(ResultSectionsLayout.Arrangement.STACKED, arrangement)
+        val stacked = sizes()
+        assertSizes("the stacked page's fit", stackedRule(), stacked)
+
+        // Rotated to landscape: the sections pair at the new width.
+        pinPage(800, 360)
+        assertEquals(ResultSectionsLayout.Arrangement.PAIRED, arrangement)
+        assertEquals("posted, not run inside the layout pass", stacked, sizes())
+        idle()
+        assertEquals("still the pinned landscape page", 800, view(R.id.resultsContent).width)
+        assertEquals(ResultSectionsLayout.Arrangement.PAIRED, arrangement)
+        assertApart("the stacked fit would size them otherwise", pairedRule(), stacked)
+        assertSizes("re-fitted for the pair", pairedRule(), sizes())
+
+        // A keyboard: only the height changes, and the text is left alone,
+        // though a fit to the new height would size it differently.
+        val beforeKeyboard = sizes()
+        pinPage(800, 500)
+        assertApart("a fit at the new height would size them otherwise", pairedRule(), beforeKeyboard)
+        idle()
+        assertEquals("still the pinned page", 500, viewportHeight)
+        assertEquals("no re-fit for a height change", beforeKeyboard, sizes())
+    }
+
     private fun clearPrefs() {
         app.getSharedPreferences("playtranslate_prefs", Context.MODE_PRIVATE)
             .edit().clear().commit()
+    }
+
+    private companion object {
+        /** Each too long to fit at the largest size in either arrangement's
+         *  room, and short enough to fit at the smallest, at both widths. */
+        const val LONG_SOURCE =
+            "When the festival lanterns were lit along the river, the children ran from stall to " +
+                "stall with paper fans, while their grandparents sat on wooden benches by the water, " +
+                "telling the same stories they had told every summer for as long as anyone could remember. " +
+                "Later the music started in the square, and the dancing went on long after the lanterns burned low."
+        const val LONG_TRANSLATION =
+            "The old lighthouse keeper climbed the spiral stairs every evening, counting each of the " +
+                "two hundred steps aloud, because his father had told him that a keeper who loses count " +
+                "will one day lose the light. Tonight the wind was strong, but he lit the lamp on time. " +
+                "The ships far out at sea saw it and turned toward the harbor, and he sat by the window until morning."
     }
 }

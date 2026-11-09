@@ -1,0 +1,19 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- The results sections, as one list for every surface that shows them: the
+     in-app results page includes this inside its ResultSectionsLayout
+     (fragment_translation_result.xml) and the over-game capture sheet
+     inflates it into its own. Each section is a merge-rooted header + card
+     pair, so all of them land as direct children of the ResultSectionsLayout,
+     which finds them by id and arranges them (stacked, or Original and
+     Translation paired on top). The order here is the stacked order. -->
+<merge xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:tools="http://schemas.android.com/tools"
+    tools:parentTag="com.playtranslate.ui.ResultSectionsLayout">
+
+    <include layout="@layout/section_target" />
+
+    <include layout="@layout/section_source" />
+
+    <include layout="@layout/section_words" />
+
+</merge>

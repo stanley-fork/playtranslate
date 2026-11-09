@@ -874,6 +874,11 @@
     <!-- Header above the per-word tokenization list. -->
     <string name="section_words">Words</string>
 
+    <!-- The same header once the list's rows are on screen: the section
+         name followed by how many words the list holds. %1$d = the number
+         of word rows (e.g. 6). -->
+    <string name="section_words_count">Words · <xliff:g id="count" example="6">%1$d</xliff:g></string>
+
     <!-- Skeleton/placeholder line under the Words header while
          tokenization is in flight. -->
     <string name="words_loading">Looking up words…</string>

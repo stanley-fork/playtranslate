@@ -6,7 +6,6 @@ import androidx.lifecycle.viewModelScope
 import com.playtranslate.OneShotOverlayData
 import com.playtranslate.Prefs
 import com.playtranslate.language.InflectedForm
-import com.playtranslate.language.SourceLanguageEngines
 import com.playtranslate.language.TokenSpan
 import com.playtranslate.model.FrequencyTag
 import com.playtranslate.model.ImportedSenseGroup
@@ -16,16 +15,12 @@ import com.playtranslate.model.ReadingRow
 import com.playtranslate.model.TextSegment
 import com.playtranslate.model.TextSegments
 import com.playtranslate.model.TranslationResult
-import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
-import kotlinx.coroutines.launch
-import kotlinx.coroutines.withContext
 
 /**
  * Source of truth for the translation-result surface, scoped per
@@ -69,62 +64,14 @@ class TranslationResultViewModel(scope: CoroutineScope) : ViewModel(scope) {
      *  it already was and puts nothing back up on the game display. */
     var renderedOnScreenBoxes: OnScreenBoxes? = null
 
-    private val _wordLookups = MutableStateFlow<WordLookupsState>(WordLookupsState.Idle)
-    val wordLookups: StateFlow<WordLookupsState> = _wordLookups.asStateFlow()
-
-    /** The analysis tier's coroutine ([startWordLookups]). */
-    private var analysisJob: Job? = null
-
-    /** The row tier's coroutine ([requestWordRows]); active only while the
-     *  current analysis's rows resolve (a new text or leaving the results
-     *  cancels it). */
-    private var rowsJob: Job? = null
-
-    /** The text handed to the latest [startWordLookups]: the lookup on record
-     *  covers it (analysis in flight, Analyzed, rows in flight, Settled),
-     *  which is what lets [displayResult] skip a restart on a same-text
-     *  promotion. Null after [showStatus] / [showError], and after a
-     *  failure of either tier, so a same-text promotion re-runs a failed
-     *  lookup. */
-    private var lookupText: String? = null
-
-    /** The settled analysis of the latest [startWordLookups] text, kept for
-     *  the row tier (a rows failure clears [lookupText] but not this): the
-     *  rows resolve [Analysis.tokens]' row tokens through the SAME language
-     *  snapshot that tokenized them (see [WordLookupContext]). Set exactly
-     *  when [WordLookupsState.Analyzed] is emitted, cleared with the jobs. */
-    private var analysis: Analysis? = null
-
-    private class Analysis(
-        val text: String,
-        val context: WordLookupContext,
-        /** The source language of the same prefs snapshot as [context]; keys
-         *  the styled payload's dictionary query. */
-        val sourceLang: com.playtranslate.language.SourceLangId,
-        val tokens: PhraseAwareTokens,
-        val annotation: com.playtranslate.language.SentenceAnnotation,
-    )
-
-    /** The most recent settled word-lookup paired with the source text it ran
-     *  against. The [LastSentenceCache] words half needs BOTH this and a Ready
-     *  translation for the same text (the translation half needs only the
-     *  Ready result), and the two land in either order (the local dictionary
-     *  lookup often settles before a network translation). We hold the settled
-     *  lookup here so whichever lands second can write the full snapshot —
-     *  see [writeLastSentenceCache]. Null until the rows of the
-     *  current text settle, which happens only once they were requested
-     *  ([requestWordRows]): a text whose rows nobody asked for is never
-     *  cached here. */
-    private var settledLookup: SettledLookup? = null
-
-    private data class SettledLookup(
-        val text: String,
-        val data: LookupData,
-        /** The analysis the tokens were projected from — forwarded into the
-         *  cache write so an Anki send finds a matching annotation without
-         *  re-annotating. */
-        val annotation: com.playtranslate.language.SentenceAnnotation? = null,
-    )
+    /** The word lookup of the text on show, both tiers
+     *  ([WordLookupPipeline]), on [viewModelScope] so a rotation mid-lookup
+     *  keeps its progress. Its rows settling is one of the two moments the
+     *  sentence cache is written ([writeLastSentenceCache]). */
+    private val lookups = WordLookupPipeline(viewModelScope).also {
+        it.onRowsSettled = ::writeLastSentenceCache
+    }
+    val wordLookups: StateFlow<WordLookupsState> get() = lookups.state
 
     // ── Dedup architecture (read this before changing displayResult) ────
     //
@@ -205,18 +152,14 @@ class TranslationResultViewModel(scope: CoroutineScope) : ViewModel(scope) {
         // mode, cached drag result), still re-runs lookups.
         val sameTextPlaceholder =
             (_result.value as? ResultState.Translating)?.originalText == result.originalText
-        // Only skip if that placeholder lookup actually covers this text:
-        // lookupText is the text of the lookup on record, whichever tier it
-        // has reached (analysis in flight, Analyzed with the rows never
-        // requested, rows in flight, Settled). settledLookup can't answer
-        // this: the rows are lazy, so it stays null for a text whose card is
-        // hidden, and keying on it would re-run the analysis on every
-        // promotion and cancel a rows job mid-flight. A FAILED lookup of
-        // either tier clears lookupText, so it falls through and re-runs —
-        // otherwise a transient failure would leave the word list (and, for
-        // an analysis failure, the tap spans) empty and the cache unwritten
-        // for an otherwise-successful translation.
-        val placeholderLookupCoversText = lookupText == result.originalText
+        // Only skip if that placeholder lookup actually covers this text,
+        // whichever tier it has reached (analysis in flight, Analyzed with
+        // the rows never requested, rows in flight, Settled). A FAILED
+        // lookup of either tier is off the record, so it falls through and
+        // re-runs — otherwise a transient failure would leave the word list
+        // (and, for an analysis failure, the tap spans) empty and the cache
+        // unwritten for an otherwise-successful translation.
+        val placeholderLookupCoversText = lookups.covers(result.originalText)
         _result.value = ResultState.Ready(result, onScreenBoxes)
         if (!(sameTextPlaceholder && placeholderLookupCoversText)) {
             startWordLookups(result.originalText, appCtx)
@@ -264,14 +207,7 @@ class TranslationResultViewModel(scope: CoroutineScope) : ViewModel(scope) {
 
     /** Leaving the results: both tiers' jobs cancelled, nothing on record
      *  (so the next result for any text runs its own lookup), state Idle. */
-    private fun resetWordLookups() {
-        analysisJob?.cancel()
-        rowsJob?.cancel()
-        analysis = null
-        lookupText = null
-        settledLookup = null
-        _wordLookups.value = WordLookupsState.Idle
-    }
+    private fun resetWordLookups() = lookups.reset()
 
     /** Patch the current Status's [showHint] flag. No-op if not
      *  currently in Status. */
@@ -416,166 +352,35 @@ class TranslationResultViewModel(scope: CoroutineScope) : ViewModel(scope) {
     }
 
     /**
-     * Write [LastSentenceCache] from the Ready result, each half as soon as it
-     * is known. The translation half is cached once a non-blank translation is
-     * Ready ([LastSentenceCache.setTranslation]), so the drag lens's
-     * open-in-app is served from the cache whether or not the rows ever settle
-     * (the rows are lazy: a hidden Words card never asks for them). The words
-     * half joins once the rows of the SAME source text settle
-     * ([settledLookup]), as one full snapshot
-     * ([LastSentenceCache.setFromTranslationResult]).
+     * Write [LastSentenceCache] from the Ready result, by the pipeline's
+     * pairing rule ([WordLookupPipeline.writeSentenceCache]): the
+     * translation half as soon as a non-blank translation is Ready, the
+     * words half once the rows of the same text have settled.
      *
-     * Called from both the rows-settle path ([requestWordRows]) and the Ready
-     * transitions, so the two land in either order: rows that outrun the
-     * translation write nothing until the Ready transition (no Ready, no
-     * write, so the cache never holds a null sentence/translation), and a
-     * translation that lands first is cached without rows of its own (words
-     * the cache already holds for that sentence stay) until the settle writes
-     * the full snapshot. A blank translation never writes either half.
+     * Called from both the rows-settle path ([WordLookupPipeline.onRowsSettled])
+     * and the Ready transitions, so the two land in either order: rows that
+     * outrun the translation write nothing until the Ready transition (no
+     * Ready, no write, so the cache never holds a null
+     * sentence/translation). A blank translation (a deferred result, or an
+     * error-path updateTranslation("")) never writes either half; the
+     * eventual real translation re-triggers this write.
      */
     private fun writeLastSentenceCache() {
-        val ready = _result.value as? ResultState.Ready ?: return
-        // A blank translation must never reach the cache: LastSentenceCache
-        // treats a cached "" as a HIT (awaitOrStartTranslation), which would
-        // poison every lazy Anki translation fill. Blank here means a deferred
-        // result (pendingTranslation) or an error-path updateTranslation("");
-        // the eventual real translation re-triggers this write.
-        if (ready.result.translatedText.isBlank()) return
-        val settled = settledLookup
-        if (settled == null || settled.text != ready.result.originalText) {
-            LastSentenceCache.setTranslation(
-                original = ready.result.originalText,
-                translation = ready.result.translatedText,
-                translationSource = ready.result.backendDisplayName,
-            )
-            return
-        }
-        LastSentenceCache.setFromTranslationResult(
-            original = ready.result.originalText,
-            translation = ready.result.translatedText,
-            translationSource = ready.result.backendDisplayName,
-            wordResults = settled.data.rows.toLegacyMap(),
-            surfaceForms = settled.data.surfaces,
-            wordEnrichment = settled.data.rows.toEnrichmentMap(),
-            annotation = settled.annotation,
-        )
+        val ready = (_result.value as? ResultState.Ready)?.result ?: return
+        lookups.writeSentenceCache(ready.originalText, ready.translatedText, ready.backendDisplayName)
     }
 
-    /**
-     * Run the analysis tier for [text] on [viewModelScope]: tokenize +
-     * phrase detection, no dictionary. Cancels any in-flight lookup of
-     * either tier. Emits [WordLookupsState.Loading] immediately and
-     * [WordLookupsState.Analyzed] when the analysis lands; the rows follow
-     * only through [requestWordRows].
-     */
-    fun startWordLookups(text: String, appCtx: Context) {
-        analysisJob?.cancel()
-        rowsJob?.cancel()
-        analysis = null
-        // Invalidate the prior settled lookup until this text's rows land, so
-        // a Ready transition mid-flight can't pair the cache write with stale
-        // word data.
-        settledLookup = null
-        lookupText = text
-        _wordLookups.value = WordLookupsState.Loading
-        analysisJob = viewModelScope.launch {
-            try {
-                val a = analyze(appCtx, text)
-                analysis = a
-                _wordLookups.value = WordLookupsState.Analyzed(
-                    tokenSpans = a.tokens.wordTokens,
-                    annotation = a.annotation,
-                    phrases = a.tokens.phrases,
-                )
-            } catch (e: CancellationException) {
-                // Caller cancelled (e.g. new text arrived) — let the next
-                // emission drive state. Don't write Settled here.
-                throw e
-            } catch (_: Exception) {
-                // Unexpected analysis failure — stop the spinner with an
-                // empty result so the UI doesn't hang on Loading forever, and
-                // drop the text from the record so displayResult re-runs it.
-                lookupText = null
-                _wordLookups.value = WordLookupsState.Settled(
-                    rows = emptyList(),
-                    tokenSpans = emptyList(),
-                    lookupToReading = emptyMap(),
-                )
-            }
-        }
-    }
+    /** Run the analysis tier for [text] ([WordLookupPipeline.start]):
+     *  [wordLookups] goes Loading, then Analyzed; the rows follow only
+     *  through [requestWordRows]. */
+    fun startWordLookups(text: String, appCtx: Context) = lookups.start(text, appCtx)
 
-    /**
-     * Run the row tier for the current analysis: one dictionary lookup per
-     * unique row token (with the machine-translation fallback tiers) plus
-     * the Words card's styled payload, then [WordLookupsState.Settled].
-     * Called by the Words card whenever it is visible and may need rows
-     * (see [WordRowsBinder.onRowsWanted]), so it is idempotent: a no-op
-     * unless the state is [WordLookupsState.Analyzed] and no rows job is
-     * active for it (Idle / Loading / Settled, or a repeat call while the
-     * rows resolve).
-     *
-     * On settle, records [settledLookup] and writes the [LastSentenceCache]
-     * (via [writeLastSentenceCache]) so the cache stays in sync with this
-     * VM's understanding of the result.
-     */
-    fun requestWordRows(appCtx: Context) {
-        // Analyzed is emitted only beside [analysis], and every path that
-        // clears it leaves Analyzed in the same step.
-        val a = analysis ?: return
-        if (_wordLookups.value !is WordLookupsState.Analyzed || rowsJob?.isActive == true) return
-        val wordTokens = a.tokens.wordTokens
-        rowsJob = viewModelScope.launch {
-            try {
-                // The SAME snapshot that tokenized resolves (see
-                // [WordLookupContext]): a settings change since the analysis
-                // must not resolve its tokens through another engine.
-                val data = resolveWordRows(appCtx, a.context, a.tokens.rowTokens)
-                // Tap spans project from the word tokens (phrase-free, see
-                // [PhraseAwareTokens]); the phrase occurrences ride to the
-                // fragment so its span computation can add tap targets for
-                // single-letter phrase members ("a" in "a great deal")
-                // anchored by the PHRASE's displayed range
-                // (SourceWordLookup.computeTapSpans).
-                val settledData = data.copy(tokenSpans = wordTokens)
-                _wordLookups.value = WordLookupsState.Settled(
-                    rows = data.rows,
-                    tokenSpans = wordTokens,
-                    lookupToReading = data.lookupToReading,
-                    annotation = a.annotation,
-                    phrases = a.tokens.phrases,
-                    definitionLang = a.sourceLang.yomitanConsumingLang(),
-                )
-                // Pair the settled rows with their source text and (re)write
-                // the cache. If the translation has already landed (Ready,
-                // same text), this completes the snapshot now; if not, the
-                // Ready transition will. writeLastSentenceCache no-ops without
-                // a Ready, non-blank translation, so rows that outran the
-                // translation never cache a null sentence.
-                settledLookup = SettledLookup(a.text, settledData, a.annotation)
-                writeLastSentenceCache()
-            } catch (e: CancellationException) {
-                throw e
-            } catch (_: Exception) {
-                // Unexpected row failure — stop the spinner with no rows but
-                // KEEP the analysis: unlike an analysis failure (which has no
-                // tokens to offer and settles fully empty), the tap spans are
-                // already derivable and stay tappable. No settledLookup, so
-                // only the translation half is cached for this text (by the
-                // Ready transition), not its words; and the text leaves the
-                // record, as on an analysis failure, so a same-text promotion
-                // retries the lookup (displayResult).
-                lookupText = null
-                _wordLookups.value = WordLookupsState.Settled(
-                    rows = emptyList(),
-                    tokenSpans = wordTokens,
-                    lookupToReading = emptyMap(),
-                    annotation = a.annotation,
-                    phrases = a.tokens.phrases,
-                )
-            }
-        }
-    }
+    /** Build the rows of the current analysis
+     *  ([WordLookupPipeline.requestRows]). Called by the Words card whenever
+     *  it is visible and may need rows ([WordRowsBinder.onRowsWanted]);
+     *  idempotent. On settle the sentence cache is written
+     *  ([writeLastSentenceCache]). */
+    fun requestWordRows(appCtx: Context) = lookups.requestRows(appCtx)
 
     /**
      * The sentence context an embedded word surface hands its Anki card:
@@ -593,7 +398,7 @@ class TranslationResultViewModel(scope: CoroutineScope) : ViewModel(scope) {
      */
     fun sentenceContext(fallback: SentenceContext?): SentenceContext {
         val ready = _result.value as? ResultState.Ready
-        val settledRows = (_wordLookups.value as? WordLookupsState.Settled)?.rows
+        val settledRows = (lookups.state.value as? WordLookupsState.Settled)?.rows
         return SentenceContext(
             original = ready?.result?.originalText ?: fallback?.original,
             translation = ready?.result?.translatedText ?: fallback?.translation,
@@ -602,31 +407,6 @@ class TranslationResultViewModel(scope: CoroutineScope) : ViewModel(scope) {
             wordEnrichment = settledRows?.toEnrichmentMap() ?: fallback?.wordEnrichment,
             pending = ready?.result?.pendingTranslation,
         )
-    }
-
-    /** The analysis tier: one prefs snapshot, the engine's annotation of
-     *  [text] and the phrase-aware tokens projected from it. No dictionary
-     *  work; [requestWordRows] resolves the rows from the result. */
-    private suspend fun analyze(appCtx: Context, text: String): Analysis {
-        // Snapshot source/target prefs ONCE, before analyzing, so both tiers
-        // run against one consistent language pair even if the user changes
-        // settings mid-flight (see [WordLookupContext]).
-        val prefs = Prefs(appCtx)
-        val sourceLang = prefs.sourceLangId
-        val engine = SourceLanguageEngines.get(appCtx, sourceLang)
-        val context = WordLookupContext(engine, prefs.targetLang, prefs.targetChineseVariant)
-        // ONE analysis: the same FULL-depth annotation the furigana display
-        // renders — its spans project the per-occurrence tokens the shared
-        // resolver hydrates (dedup → parallel-lookup → RowState, see
-        // [resolveWordRows]); tokenSpans round-trips so the fragment can
-        // derive word spans against the displayed text.
-        val annotation = withContext(Dispatchers.IO) { engine.annotate(text) }
-        // Phrase-aware row tokens come from the SHARED producer — the
-        // sentence cache's lookupWords builds from the same one, so the
-        // words panel and every Anki words payload agree on phrase policy
-        // by construction.
-        val tokens = phraseAwareRowTokens(engine, text, annotation)
-        return Analysis(text, context, sourceLang, tokens, annotation)
     }
 }
 

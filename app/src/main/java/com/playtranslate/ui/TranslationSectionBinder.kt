@@ -51,6 +51,13 @@ import java.util.Locale
  * same inline and in its header's ⋯ menu. List order is fold priority (the
  * tail folds first); the eyes are pinned and never fold.
  *
+ * A hidden section's header is its name (receded) and its crossed eye, and
+ * nothing else: every other action goes with the card. Two of the
+ * Translation header's actions are about the whole result, not that card
+ * (Text size sizes both texts, Show on screen puts the result over the
+ * game), so they do not go: while the Translation section is hidden they
+ * sit in the Original header ([syncResultActions]).
+ *
  * Views are found from [root]; ids are shared with both layouts.
  */
 class TranslationSectionBinder(
@@ -109,6 +116,17 @@ class TranslationSectionBinder(
         R.id.btnShowOnScreen, R.drawable.ic_subtitles, ctx.getString(R.string.capture_show_on_screen),
         presentation = HeaderAction.Presentation.TEXT_PILL,
     )
+    // The two whole-result actions' second homes, in the Original header
+    // (class doc). Same look and handler as the Translation header's; only
+    // one of each pair is ever available ([syncResultActions]).
+    private val showOnScreenInSource = HeaderAction(
+        R.id.btnShowOnScreenOriginal, R.drawable.ic_subtitles,
+        ctx.getString(R.string.capture_show_on_screen),
+        presentation = HeaderAction.Presentation.TEXT_PILL,
+    )
+    private val textSizeInSource = HeaderAction(
+        R.id.btnFontSizeOriginal, R.drawable.ic_format_size, ctx.getString(R.string.cd_text_size),
+    )
     private val targetAnki = HeaderAction(
         R.id.btnAnkiTranslation, R.drawable.ic_card_stack_add, ctx.getString(R.string.cd_add_to_anki),
     )
@@ -129,11 +147,18 @@ class TranslationSectionBinder(
         // are tinted by their row for the same reason.)
         btnSourceOcr.imageTintList =
             ColorStateList.valueOf(ctx.themeColor(R.attr.ptTextHint))
-        // Both until a host says otherwise: show-on-screen via
-        // setShowOnScreenAvailable, text size via onChooseFontSize.
-        showOnScreen.available = false
-        textSize.available = false
-        sourceRow.setActions(listOf(furigana, speak, edit, sourceAnki, sourceEye), R.id.btnMoreOriginal)
+        // Neither whole-result action is offered until a host says so
+        // (show-on-screen via setShowOnScreenAvailable, text size via
+        // onChooseFontSize), which is what [syncResultActions] then decides.
+        for (a in listOf(showOnScreen, showOnScreenInSource, textSize, textSizeInSource)) {
+            a.available = false
+        }
+        // The Original header takes the two whole-result actions at its
+        // tail, so they are the first to fold behind ⋯ in the busier header.
+        sourceRow.setActions(
+            listOf(furigana, speak, edit, sourceAnki, showOnScreenInSource, textSizeInSource, sourceEye),
+            R.id.btnMoreOriginal,
+        )
         targetRow.setActions(listOf(showOnScreen, targetAnki, textSize, targetEye), R.id.btnMoreTranslation)
         sourceRow.onMoreClick = ::toggleOverflow
         targetRow.onMoreClick = ::toggleOverflow
@@ -195,14 +220,39 @@ class TranslationSectionBinder(
     var onChooseFontSize: ((anchor: View) -> Unit)? = null
         set(value) {
             field = value
-            textSize.available = value != null
+            syncResultActions()
         }
+
+    /** Whether the host has boxes to show on screen right now
+     *  ([setShowOnScreenAvailable]). */
+    private var showOnScreenOffered = false
+
+    /**
+     * Put the two whole-result actions (Text size, Show on screen) in the
+     * header that can hold them: the Translation header while that section
+     * is shown, the Original header while it is hidden and the Original is
+     * shown. With both sections hidden neither header offers them (a hidden
+     * header is its name and its eye). Every input that decides this ends
+     * here: both eyes ([applyOriginalVisibility], [applyTranslationVisibility])
+     * and both hosts' offers ([onChooseFontSize], [setShowOnScreenAvailable]).
+     */
+    private fun syncResultActions() {
+        val inTarget = !prefs.hideTranslationSection
+        val inSource = !inTarget && !prefs.hideOriginalSection
+        val sizeOffered = onChooseFontSize != null
+        textSize.available = sizeOffered && inTarget
+        textSizeInSource.available = sizeOffered && inSource
+        showOnScreen.available = showOnScreenOffered && inTarget
+        showOnScreenInSource.available = showOnScreenOffered && inSource
+    }
 
     init {
         sourceNoteRow.setOnClickListener { onChooseOcr?.invoke() }
         labelOriginal.setOnClickListener { onChooseLanguage?.invoke(true) }
         labelTranslation.setOnClickListener { onChooseLanguage?.invoke(false) }
-        textSize.onClick = { anchor -> onChooseFontSize?.invoke(anchor) }
+        for (size in listOf(textSize, textSizeInSource)) {
+            size.onClick = { anchor -> onChooseFontSize?.invoke(anchor) }
+        }
     }
 
     // ── Source section ───────────────────────────────────────────────────
@@ -285,6 +335,8 @@ class TranslationSectionBinder(
             )
         }
         sourceEye.icon = if (hidden) R.drawable.ic_visibility_off else R.drawable.ic_visibility
+        sourceRow.labelDimmed = hidden
+        syncResultActions()
     }
 
     fun applyFurigana() {
@@ -379,37 +431,37 @@ class TranslationSectionBinder(
         // The add-to-Anki action goes with the card; its space returns to the
         // fit, and the eye stays put either way (pinned at the end).
         targetAnki.available = !hidden
-        // Text size deliberately survives the hide: the size range it edits
-        // governs the SOURCE text too, so it stays usable with this card closed.
+        // Text size and Show on screen survive the hide, in the Original
+        // header: the size range governs the SOURCE text too, and the boxes
+        // present the whole result.
         targetEye.icon = if (hidden) R.drawable.ic_visibility_off else R.drawable.ic_visibility
+        targetRow.labelDimmed = hidden
+        syncResultActions()
     }
 
-    /** Wire the "show on screen" toggle into the target header. The over-game
-     *  capture panel paints its in-window boxes; the in-app results page
-     *  (dual-screen) paints a standalone game-display window, or flips the
-     *  hide-overlays-during-auto setting while live. Each host gates
-     *  availability via [setShowOnScreenAvailable]. */
+    /** Wire the "show on screen" toggle. On the in-app results page while
+     *  live on two screens it flips the hide-overlays-during-auto setting;
+     *  the host gates availability via [setShowOnScreenAvailable]. */
     fun setShowOnScreenAction(onClick: () -> Unit) {
-        showOnScreen.onClick = { onClick() }
+        for (pill in listOf(showOnScreen, showOnScreenInSource)) pill.onClick = { onClick() }
     }
 
-    /** Whether the show-on-screen toggle currently has something to show
-     *  (overlay boxes exist for the bound result). Unavailable when not, so
-     *  surfaces that never enable it lose no header space. Deliberately
-     *  independent of the section's hidden state — the toggle presents the
-     *  whole result over the game, not this card, and hiding the card while
-     *  reading the boxes in place is a legitimate combination. ACCEPTED gap
-     *  (2026-07-15): in SIDE-BY-SIDE mode, hiding the translation collapses the
-     *  whole column — header and this toggle included — so that combo has no
-     *  manual switch; the boxes keep whatever state the toggle last set. */
+    /** Whether the show-on-screen toggle currently has something to act on.
+     *  Unavailable when not, so surfaces that never enable it lose no header
+     *  space. Independent of the Translation section's hidden state: the
+     *  toggle presents the whole result over the game, not that card, so
+     *  with the card hidden it is offered from the Original header
+     *  ([syncResultActions]). */
     fun setShowOnScreenAvailable(available: Boolean) {
-        showOnScreen.available = available
+        showOnScreenOffered = available
+        syncResultActions()
     }
 
     /** The show-on-screen toggle's state: while the boxes are ON the inline
      *  pill fills with the accent (and its ⋯ menu row's icon turns accent). */
     fun setShowOnScreenToggled(on: Boolean) {
         showOnScreen.active = on
+        showOnScreenInSource.active = on
     }
 
     /** Flip a section's hidden pref, re-apply its visibility, and notify the host
@@ -499,14 +551,28 @@ class TranslationSectionBinder(
         applyTranslationVisibility()
     }
 
-    /** The vertical results page's fit: each text tries to fit within half
-     *  of [viewportHeightPx] (the scroll viewport). The source is fitted to
-     *  its PLAIN text — ruby lands before the Ready fit and the scroll
-     *  absorbs its extra height, so measuring ruby would shrink the source
-     *  font the moment the translation lands (see [fitText]). */
-    fun fitToViewport(viewportHeightPx: Int) {
-        val half = viewportHeightPx / 2
-        fitText(translationTargetPx = half, sourceTargetPx = half, sourceMeasuresRuby = false)
+    /** The results page's fit to its scroll viewport, [viewportHeightPx]
+     *  tall. Stacked, each text tries to fit within half of it. [paired]
+     *  (Original and Translation side by side), each text has the viewport's
+     *  height to itself, so each is fitted to what its own header and card
+     *  chrome leave of it: the pair fills the viewport at most. The source
+     *  is fitted to its PLAIN text either way: ruby lands before the Ready
+     *  fit and the scroll absorbs its extra height, so measuring ruby would
+     *  shrink the source font the moment the translation lands (see
+     *  [fitText]). */
+    fun fitToViewport(viewportHeightPx: Int, paired: Boolean) {
+        if (!paired) {
+            val half = viewportHeightPx / 2
+            fitText(translationTargetPx = half, sourceTargetPx = half, sourceMeasuresRuby = false)
+            return
+        }
+        fitText(
+            translationTargetPx =
+                (viewportHeightPx - targetRow.height - targetContentOverhead()).coerceAtLeast(1),
+            sourceTargetPx =
+                (viewportHeightPx - sourceRow.height - sourceContentOverhead()).coerceAtLeast(1),
+            sourceMeasuresRuby = false,
+        )
     }
 
     // ── Buttons + text fitting ───────────────────────────────────────────

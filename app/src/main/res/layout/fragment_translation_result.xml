@@ -55,106 +55,20 @@
         android:fillViewport="true"
         android:visibility="gone">
 
-        <LinearLayout
+        <!-- The sections (results_sections.xml: each one a header + card
+             pair) are direct children of this layout, which arranges them:
+             stacked, or Original and Translation paired on top when the page
+             is wide enough. The Clear row is its one other child and stacks
+             beneath them. -->
+        <com.playtranslate.ui.ResultSectionsLayout
             android:id="@+id/resultsScrollContent"
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
-            android:orientation="vertical"
             android:paddingHorizontal="@dimen/pt_section_h_padding"
             android:paddingTop="0dp"
             android:paddingBottom="8dp">
 
-            <!-- ══════════════════════════════════════════════════════ -->
-            <!-- TRANSLATION                                           -->
-            <!-- ══════════════════════════════════════════════════════ -->
-
-            <include layout="@layout/section_target" />
-
-            <!-- ══════════════════════════════════════════════════════ -->
-            <!-- SOURCE (Original)                                     -->
-            <!-- ══════════════════════════════════════════════════════ -->
-
-            <include layout="@layout/section_source" />
-
-            <!-- ══════════════════════════════════════════════════════ -->
-            <!-- WORDS                                                 -->
-            <!-- ══════════════════════════════════════════════════════ -->
-
-            <LinearLayout
-                android:layout_width="match_parent"
-                android:layout_height="wrap_content"
-                android:orientation="horizontal"
-                android:gravity="center_vertical"
-                android:paddingTop="@dimen/pt_group_gap"
-                android:paddingBottom="8dp"
-                android:paddingStart="4dp"
-                android:paddingEnd="4dp">
-
-                <TextView
-                    android:id="@+id/labelWords"
-                    style="@style/Text.PT.GroupHeader"
-                    android:layout_width="0dp"
-                    android:layout_height="wrap_content"
-                    android:layout_weight="1"
-                    android:text="@string/section_words" />
-
-                <ImageButton
-                    android:id="@+id/btnToggleWords"
-                    android:layout_width="36dp"
-                    android:layout_height="32dp"
-                    android:background="?attr/selectableItemBackgroundBorderless"
-                    android:contentDescription="@string/cd_toggle_words_visibility"
-                    android:src="@drawable/ic_visibility"
-                    app:tint="?attr/ptTextMuted" />
-
-            </LinearLayout>
-
-            <com.google.android.material.card.MaterialCardView
-                android:id="@+id/cardWords"
-                android:layout_width="match_parent"
-                android:layout_height="wrap_content"
-                app:cardBackgroundColor="?attr/ptCard"
-                app:cardCornerRadius="@dimen/pt_radius"
-                app:cardElevation="0dp"
-                app:strokeColor="?attr/ptDivider"
-                app:strokeWidth="1dp">
-
-                <LinearLayout
-                    android:id="@+id/wordsContent"
-                    android:layout_width="match_parent"
-                    android:layout_height="wrap_content"
-                    android:orientation="vertical">
-
-                    <TextView
-                        android:id="@+id/tvMainWordsLoading"
-                        android:layout_width="match_parent"
-                        android:layout_height="wrap_content"
-                        android:paddingHorizontal="@dimen/pt_row_h_padding"
-                        android:paddingVertical="@dimen/pt_row_v_padding"
-                        android:text="@string/words_loading"
-                        android:textColor="?attr/ptTextHint"
-                        android:textSize="13sp"
-                        android:visibility="gone" />
-
-                    <LinearLayout
-                        android:id="@+id/mainWordsContainer"
-                        android:layout_width="match_parent"
-                        android:layout_height="wrap_content"
-                        android:orientation="vertical" />
-
-                    <TextView
-                        android:id="@+id/tvNoWords"
-                        android:layout_width="match_parent"
-                        android:layout_height="wrap_content"
-                        android:paddingHorizontal="@dimen/pt_row_h_padding"
-                        android:paddingVertical="@dimen/pt_row_v_padding"
-                        android:text="@string/words_none"
-                        android:textColor="?attr/ptTextHint"
-                        android:textSize="13sp"
-                        android:visibility="gone" />
-
-                </LinearLayout>
-            </com.google.android.material.card.MaterialCardView>
+            <include layout="@layout/results_sections" />
 
             <!-- Action buttons row -->
             <LinearLayout
@@ -184,7 +98,7 @@
 
             </LinearLayout>
 
-        </LinearLayout>
+        </com.playtranslate.ui.ResultSectionsLayout>
 
     </ScrollView>
 

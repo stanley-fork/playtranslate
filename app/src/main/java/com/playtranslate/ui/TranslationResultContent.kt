@@ -162,6 +162,10 @@ class TranslationResultContent(
     }
 
     val scrollView: ScrollView = root.findViewById(R.id.resultsContent)
+
+    /** The sections' layout: the scroll's content, and the owner of
+     *  whether Original and Translation are stacked or paired. */
+    private val sections: ResultSectionsLayout = root.findViewById(R.id.resultsScrollContent)
     private val statusContainer: View = root.findViewById(R.id.statusContainer)
     private val statusText: TextView = root.findViewById(R.id.tvStatus)
     private val statusHint: TextView = root.findViewById(R.id.tvStatusHint)
@@ -255,10 +259,12 @@ class TranslationResultContent(
             onAnkiOneTap = { host.onAnkiOneTap() },
         )
         val fontPicker = FontSizeRangePopover(ctx, prefs).apply {
-            // fitTextSizes fits each section to half the (unchanged) scroll
-            // height, so the sections resize in place and the anchor — the
-            // target header's button or ⋯, topmost in the scroll — never
-            // moves under the user's finger.
+            // fitTextSizes fits each section against the (unchanged) scroll
+            // height, so the sections resize in place and the anchor never
+            // moves under the user's finger: it is the button or ⋯ of the
+            // topmost header that still has a card (the Translation's, or
+            // the Original's while the Translation is hidden, whose bare
+            // header above it keeps its height).
             onRangeChanged = { fitTextSizes() }
         }
         binder.onChooseFontSize = { anchor -> popovers.toggle(fontPicker, anchor) }
@@ -272,6 +278,18 @@ class TranslationResultContent(
         // must run the translation that was skipped while it was hidden.
         binder.onSectionVisibilityChanged = { requestDeferredCompletion() }
         scrollView.setOnScrollChangeListener(scrollListener)
+        // A rotation or a resized window re-arranges the sections (their
+        // layout follows its width) without this page being rebuilt, and
+        // the text was fitted to the old arrangement: fit it again once the
+        // new one has laid out. Width only: a height change is the keyboard,
+        // which must not resize the text being asked about. The first
+        // layout of a reveal is not this path (the results are still
+        // INVISIBLE; [revealFitted] fits them).
+        scrollView.addOnLayoutChangeListener { _, left, _, right, _, oldLeft, _, oldRight, _ ->
+            if (right - left != oldRight - oldLeft && scrollView.isVisible) {
+                scrollView.post { if (host.isAlive) fitTextSizes() }
+            }
+        }
         root.findViewById<View>(R.id.btnResultClear).setOnClickListener { host.onClear() }
     }
 
@@ -501,11 +519,14 @@ class TranslationResultContent(
 
     // ── Fit + reveal + scroll ────────────────────────────────────────────
 
-    /** Shrink translation and original text so each tries to fit within
-     *  half the visible scroll area. */
+    /** Shrink translation and original text to the visible scroll area:
+     *  half of it each when stacked, all of it each when paired
+     *  ([TranslationSectionBinder.fitToViewport]). */
     fun fitTextSizes() {
         val height = scrollView.height.takeIf { it > 0 } ?: return
-        binder.fitToViewport(height)
+        binder.fitToViewport(
+            height, paired = sections.arrangement == ResultSectionsLayout.Arrangement.PAIRED,
+        )
     }
 
     /**
