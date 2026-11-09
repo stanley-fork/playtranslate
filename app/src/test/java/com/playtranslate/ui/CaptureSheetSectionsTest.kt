@@ -55,12 +55,18 @@ import java.time.Duration
  *    with a section already hidden settles where one toggled to it does;
  *    hiding never raises the need, and stacked it lowers it; with both hidden
  *    the ceiling is the panel floor; the need is the same however tall the
- *    panel is; and at the floor the paired cards stretch to the content's
+ *    panel is; and at the floor the paired cards stretch to the body's
  *    bottom (the fill).
  *  - The swipe-away gate: a long downward drag of the body dismisses while
- *    the content is at its top, scrollable or not; scrolled down, the drag is
- *    the scroll's; an upward drag never starts a dismiss drag; a host that
- *    does not dismiss on gestures keeps the sheet.
+ *    the content is at its top, whether the texts fit the body or overflow
+ *    it; scrolled down, the drag is the scroll's; an upward drag never
+ *    starts a dismiss drag; a host that does not dismiss on gestures keeps
+ *    the sheet.
+ *
+ * Every sheet here has its Words section HIDDEN, which is a sheet whose
+ * content is the two texts: a hidden section is a header row past the fold
+ * and adds nothing to the panel's need. The Words section shown in the
+ * sheet has its own class.
  *
  * The display is set to each sheet's own size before it is shown, as on a
  * device: Robolectric's default display is 320x470, and the bars it places
@@ -196,6 +202,8 @@ class CaptureSheetSectionsTest {
         // prefs, and a sheet closed earlier in a test must not hand its
         // hidden sections on to this one.
         for (section in Section.values()) setHiddenPref(section, section in hidden)
+        // The two texts are the content under test (class doc).
+        prefs.hideWordsSection = true
         // "It opens how you left it": a sheet closed earlier in a test must
         // not seed this one's auto-size ceiling either.
         prefs.capturePanelPosture = CaptureResultGeometry.NO_POSTURE
@@ -222,6 +230,11 @@ class CaptureSheetSectionsTest {
         val card = o.v(section.cardId)
         return card.height > o.v(section.contentId).height + card.paddingTop + card.paddingBottom
     }
+
+    /** What is past the fold when the two texts fit the body exactly: the
+     *  header rows of the sections hidden beneath them. That much a sheet of
+     *  two texts always scrolls by, and no more. */
+    private fun rowsPastTheFold(o: CaptureResultOverlay): Int = o.v(R.id.wordsHeaderRow).height
 
     /** How far the content can scroll: the sections past the viewport. */
     private fun scrollRange(o: CaptureResultOverlay): Int {
@@ -510,7 +523,7 @@ class CaptureSheetSectionsTest {
             stretchedHides > 0)
     }
 
-    @Test fun `a panel resting at the need shows both texts at their largest size with nothing left to scroll`() {
+    @Test fun `a panel resting at the need shows both texts at their largest size, filling the body`() {
         // The need is the WHOLE content at the largest text size, the
         // sections' own padding included: a need that left any part out would
         // rest the panel that much short, and the fit would shrink the text
@@ -525,7 +538,8 @@ class CaptureSheetSectionsTest {
                 maxPx, (o.v(R.id.tvOriginal) as android.widget.TextView).textSize, 0.01f)
             assertEquals("the Translation is at the largest size ($at)",
                 maxPx, (o.v(R.id.tvTranslation) as android.widget.TextView).textSize, 0.01f)
-            assertEquals("nothing is left to scroll ($at)", 0, scrollRange(o))
+            assertEquals("only the hidden sections' header rows are past the fold ($at)",
+                rowsPastTheFold(o), scrollRange(o))
             close(o)
         }
     }
@@ -625,7 +639,7 @@ class CaptureSheetSectionsTest {
         }
     }
 
-    @Test fun `paired at the panel floor, the two cards stretch to the content's bottom`() {
+    @Test fun `paired at the panel floor, the two cards stretch to the body's bottom`() {
         val tall = Screen(1280, 1600)
         val o = open(tall, "Short.", "Short too.")
         val s = o.sections
@@ -638,8 +652,11 @@ class CaptureSheetSectionsTest {
         assertTrue("the Original card is stretched past its content (${sourceCard.height} vs ${sourceContent.height})",
             sourceCard.height > sourceContent.height + o.binder.sourceCardInset())
         assertEquals("the cards end on one line", sourceCard.bottom, targetCard.bottom)
-        assertEquals("at the content's bottom less its bottom padding",
-            s.height - s.paddingBottom, sourceCard.bottom)
+        // The buffer under the cards is the layout's bottom padding; the
+        // sections hidden beneath begin right under the cards, their header
+        // rows past the fold but for that buffer's worth of blank padding.
+        assertEquals("at the body's bottom less the buffer",
+            o.scroll.height - s.paddingBottom, sourceCard.bottom)
     }
 
     // ── C. The swipe-away gate ──────────────────────────────────────────
@@ -658,10 +675,11 @@ class CaptureSheetSectionsTest {
     /** Let the exit slide run out. */
     private fun settleExit() = shadowOf(Looper.getMainLooper()).idleFor(Duration.ofSeconds(1))
 
-    @Test fun `content that fits dismisses on a long downward drag of the body`() {
+    @Test fun `texts that fit dismiss on a long downward drag of the body`() {
         val o = openFitting()
-        assertFalse("the content does not scroll",
-            o.scroll.canScrollVertically(1) || o.scroll.canScrollVertically(-1))
+        assertEquals("the texts fit: only the hidden sections' header rows are past the fold",
+            rowsPastTheFold(o), scrollRange(o))
+        assertEquals("at the top", 0, o.scroll.scrollY)
         val followed = swipeDown(o, wide)
         assertTrue("the sheet followed the finger past the distance ($followed)",
             followed >= constFloat("DISMISS_DISTANCE_DP") * density)
@@ -669,9 +687,9 @@ class CaptureSheetSectionsTest {
         assertEquals(listOf(CaptureResultOverlay.DismissReason.USER), dismissals)
     }
 
-    @Test fun `content that scrolls, at its top, dismisses on a long downward drag of the body`() {
+    @Test fun `texts that overflow, at the top, dismiss on a long downward drag of the body`() {
         val o = openScrolling()
-        assertTrue("the content scrolls", o.scroll.canScrollVertically(1))
+        assertTrue("the texts overflow the body (${scrollRange(o)})", scrollRange(o) > rowsPastTheFold(o))
         assertEquals("from its top", 0, o.scroll.scrollY)
         val followed = swipeDown(o, wide)
         assertTrue("the sheet followed the finger past the distance ($followed)",
@@ -694,10 +712,10 @@ class CaptureSheetSectionsTest {
         assertTrue("the drag scrolled the content back up (${o.scroll.scrollY})", o.scroll.scrollY < offset)
     }
 
-    @Test fun `an upward drag at the top never starts a dismiss drag, scrollable or not`() {
+    @Test fun `an upward drag at the top never starts a dismiss drag, whether the texts fit or overflow`() {
         for (scrolls in listOf(false, true)) {
             val o = if (scrolls) openScrolling() else openFitting()
-            assertEquals("scrollable: $scrolls", scrolls, o.scroll.canScrollVertically(1))
+            assertEquals("the texts overflow: $scrolls", scrolls, scrollRange(o) > rowsPastTheFold(o))
             assertEquals(0, o.scroll.scrollY)
             val (x, y) = bodyPoint(o, wide)
             val localY = y - panelTop(o)
@@ -731,8 +749,7 @@ class CaptureSheetSectionsTest {
         settle()
 
         val o = openFitting { it.dismissOnGesture = false }
-        assertFalse("the content does not scroll",
-            o.scroll.canScrollVertically(1) || o.scroll.canScrollVertically(-1))
+        assertEquals("at the top", 0, o.scroll.scrollY)
         val (x, y) = bodyPoint(o, wide)
         val localY = y - panelTop(o)
         drag(o, x, y, dismissTravel)

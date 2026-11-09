@@ -132,6 +132,7 @@ class WordRowsBinder(
             override fun onInteraction() = host.onInteraction()
         },
         WordRowList.COMPACT_SCALE,
+        onLayout = { onHeightChanged?.invoke() },
     )
 
     /** The rows of the last Settled render as the lookup gave them, and the
@@ -160,6 +161,12 @@ class WordRowsBinder(
      *  so a redundant call costs nothing. */
     var onRowsWanted: (() -> Unit)? = null
 
+    /** The card's height may have changed: its page laid its rows out, a
+     *  lookup state changed what it shows, or its eye was tapped. For a host
+     *  that sizes itself to its content (the capture sheet); a page just
+     *  reflows. The change may not have laid out yet when this is called. */
+    var onHeightChanged: (() -> Unit)? = null
+
     /** The card's effective hidden state: the persisted pref or the live
      *  session's auto-hide. */
     val isHidden: Boolean get() = prefs.hideWordsSection || liveAutoHide
@@ -176,6 +183,7 @@ class WordRowsBinder(
             prefs.hideWordsSection = hide
             liveAutoHide = false
             applyWordsVisibility()
+            onHeightChanged?.invoke()
         }
     }
 
@@ -249,6 +257,7 @@ class WordRowsBinder(
                 noWordsText.visibility = if (state.rows.isEmpty()) View.VISIBLE else View.GONE
             }
         }
+        onHeightChanged?.invoke()
     }
 
     private fun clearRows() {

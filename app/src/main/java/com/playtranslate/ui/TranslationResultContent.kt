@@ -19,7 +19,6 @@ import com.playtranslate.model.OcrProvenance
 import com.playtranslate.model.TranslationResult
 import com.playtranslate.overlay.OverlayHost
 import kotlinx.coroutines.CoroutineScope
-import kotlinx.coroutines.launch
 
 /**
  * The results page's content — `fragment_translation_result.xml` driven by
@@ -182,13 +181,10 @@ class TranslationResultContent(
         TranslationSectionBinder(root, ctx, prefs, host.scope, host.ttsAlertTarget, popovers)
     val wordRows: WordRowsBinder
     val sourceLens: SourceTextLens
+    private val lookupsRenderer: WordLookupsRenderer
 
     /** Bumped on every [render]; see the class doc's reveal rule. */
     private var renderGeneration = 0
-
-    /** Bumped per word-lookup render so a settled build held at the
-     *  enter-settle gate lands only if no newer lookup state arrived. */
-    private var lookupGeneration = 0
 
     /** Source text of the last Translating/Ready render — the scroll
      *  preservation key (class doc). Null after status/idle/error. */
@@ -244,6 +240,13 @@ class TranslationResultContent(
             opensWithoutEntry = host.opensWithoutEntry,
             deckBadges = true,
             wireActions = { lens, resolved -> host.wireLensActions(lens, resolved) },
+        )
+        lookupsRenderer = WordLookupsRenderer(
+            wordRows, sourceLens,
+            displayedSourceText = { binder.displayedSourceText() },
+            scope = { host.scope },
+            isAlive = { host.isAlive },
+            awaitEnterSettled = { host.awaitEnterSettled() },
         )
         binder.tvOriginal.onTapAtOffset = { offset -> sourceLens.onTapAtOffset(offset) }
         binder.editAvailable = host.editAvailable
@@ -385,58 +388,11 @@ class TranslationResultContent(
         }
     }
 
-    /** Mirror a word-lookup state: the tap spans + the lens follow it
-     *  synchronously (from the analysis on, rows or not); the settled rows
-     *  build after the host's enter-settle gate (immediate in-app), unless a
-     *  newer lookup state arrived first. */
-    fun renderWordLookups(state: WordLookupsState) {
-        if (!host.isAlive) return
-        val generation = ++lookupGeneration
-        when (state) {
-            is WordLookupsState.Idle -> {
-                sourceLens.wordSpans = emptyList()
-                wordRows.render(state)
-            }
-            is WordLookupsState.Loading -> {
-                sourceLens.dismiss()
-                sourceLens.wordSpans = emptyList()
-                wordRows.render(state)
-            }
-            is WordLookupsState.Analyzed -> {
-                // No resolved readings yet: computeSpans falls back to the
-                // token's own lookup hint (TokenSpan.reading), which the lens
-                // passes to its resolve as the reading hint; the rows'
-                // resolved readings replace it when Settled lands.
-                sourceLens.wordSpans = SourceWordLookup.computeTapSpans(
-                    binder.displayedSourceText(), state.tokenSpans, emptyMap(), state.phrases,
-                )
-                // Drawn like Loading; asks for the rows when the card is shown.
-                wordRows.render(state)
-                // The rows are being looked up: load their page meanwhile,
-                // but never inside the page's entrance (the first WebView of
-                // a process blocks the main thread while it loads).
-                host.scope.launch {
-                    host.awaitEnterSettled()
-                    if (host.isAlive && generation == lookupGeneration) wordRows.prepareRows()
-                }
-            }
-            is WordLookupsState.Settled -> {
-                // Spans project against the displayed text (which may carry
-                // OCR newlines the result's text doesn't).
-                sourceLens.wordSpans = SourceWordLookup.computeTapSpans(
-                    binder.displayedSourceText(), state.tokenSpans, state.lookupToReading, state.phrases,
-                )
-                // Furigana is NOT applied here: it's driven by bindSource in
-                // render, so it paints with the source text (during the
-                // Translating placeholder), not after this heavier lookup settles.
-                host.scope.launch {
-                    host.awaitEnterSettled()
-                    if (!host.isAlive || generation != lookupGeneration) return@launch
-                    wordRows.render(state)
-                }
-            }
-        }
-    }
+    /** Mirror a word-lookup state ([WordLookupsRenderer]): the tap spans +
+     *  the lens follow it synchronously (from the analysis on, rows or
+     *  not); the settled rows build after the host's enter-settle gate
+     *  (immediate in-app), unless a newer lookup state arrived first. */
+    fun renderWordLookups(state: WordLookupsState) = lookupsRenderer.render(state)
 
     /** Deferred-translation trigger funnel, the over-game panel's rule
      *  ([deferredCompletionNeeded], which its maybeCompleteDeferred applies):

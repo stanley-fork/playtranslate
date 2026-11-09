@@ -404,8 +404,11 @@ internal fun wordRowList(
     scope: CoroutineScope,
     host: WordRowList.Host<RowState>,
     scale: Float,
+    /** The page laid the rows out. */
+    onLayout: () -> Unit = {},
 ) = WordRowList(
     ctx, slot, scope, host,
     describe = RowState::toWordEntry,
     theme = { cardDocTheme(ctx, WordRowList.GLOSS_SP * scale) },
+    onLayout = onLayout,
 )

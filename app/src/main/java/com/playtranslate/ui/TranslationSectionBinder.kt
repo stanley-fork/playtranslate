@@ -30,6 +30,16 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.launch
 import java.util.Locale
 
+/** A results section card's fill at [alpha] (0 to 1) of the theme's card
+ *  colour: what the capture sheet tints every section's card with so its
+ *  frosted backdrop shows faintly through. */
+internal fun sectionCardFill(ctx: Context, alpha: Float): Int {
+    val card = ctx.themeColor(R.attr.ptCard)
+    return Color.argb(
+        (alpha.coerceIn(0f, 1f) * 255).toInt(), Color.red(card), Color.green(card), Color.blue(card),
+    )
+}
+
 /**
  * Renders the source (original) + target (translation) sections — the two shared
  * `<merge>` layouts (section_source.xml / section_target.xml) — given a
@@ -734,7 +744,7 @@ class TranslationSectionBinder(
      *  to let the frosted backdrop show faintly through; the results page leaves
      *  them opaque. */
     fun setCardFillAlpha(alpha: Float) {
-        val c = withAlpha(ctx.themeColor(R.attr.ptCard), alpha)
+        val c = sectionCardFill(ctx, alpha)
         cardOriginal.setCardBackgroundColor(c)
         cardTranslation.setCardBackgroundColor(c)
     }

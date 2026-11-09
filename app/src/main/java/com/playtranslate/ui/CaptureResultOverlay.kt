@@ -1,5 +1,7 @@
 package com.playtranslate.ui
 
+import android.animation.Animator
+import android.animation.AnimatorListenerAdapter
 import android.animation.ValueAnimator
 import android.annotation.SuppressLint
 import android.content.Context
@@ -47,6 +49,7 @@ import android.widget.ProgressBar
 import android.widget.TextView
 import androidx.core.view.isVisible
 import androidx.core.widget.NestedScrollView
+import com.google.android.material.card.MaterialCardView
 import com.playtranslate.AnkiManager
 import com.playtranslate.CaptureService
 import com.playtranslate.capture.CaptureBackendResolver
@@ -65,7 +68,6 @@ import com.playtranslate.R
 import com.playtranslate.RegionEntry
 import com.playtranslate.language.OcrBackend
 import com.playtranslate.language.SourceLangId
-import com.playtranslate.language.SourceLanguageEngines
 import com.playtranslate.ocr.registry.OcrModelManager
 import com.playtranslate.ocr.registry.selectionToken
 import com.playtranslate.model.TextSegments
@@ -78,6 +80,7 @@ import com.playtranslate.overlay.Sides
 import com.playtranslate.overlayThemedContext
 import com.playtranslate.themeColor
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -105,9 +108,10 @@ import kotlin.math.ceil
  * taps to dismiss. The drag-handle resize and the swipe/fling-down dismiss are
  * net-new (the lens grows programmatically and has neither).
  *
- * Sections come from the shared [TranslationSectionBinder], so they render and
- * behave exactly like the in-app results page. The words section, Clear, and the
- * Anki pill are intentionally excluded.
+ * The sections and their binders are the in-app results page's own
+ * ([TranslationSectionBinder], [WordRowsBinder]), so they render and behave
+ * exactly as they do there, the Words list included. The page's Clear row
+ * is not here.
  */
 @SuppressLint("ClickableViewAccessibility")
 class CaptureResultOverlay(
@@ -610,9 +614,17 @@ class CaptureResultOverlay(
 
     // In-place edit (the panel window goes focusable so the IME shows over the game).
     private var lastResult: TranslationResult? = null
-    /** Last original text written into [LastSentenceCache] from here, so a re-bind
-     *  of the same sentence (furigana toggle, re-fit) doesn't re-fire the lookups. */
-    private var lastCachedSentence: String? = null
+    /** The word lookup of the source text on show, both tiers
+     *  ([WordLookupPipeline]): its analysis gives the source text its tap
+     *  spans, and its rows fill the Words card while that is shown. */
+    private val wordLookups = WordLookupPipeline(scope)
+    private var wordRows: WordRowsBinder? = null
+    private var lookupsRenderer: WordLookupsRenderer? = null
+
+    /** Completes when the sheet's entrance has ended. The Words card's page
+     *  waits for it: the first WebView of a process blocks the main thread
+     *  while it loads, which must not land inside the slide-in. */
+    private val entranceSettled = CompletableDeferred<Unit>()
     /** Bumped per edit commit so an out-of-order translateOnce can't roll back a
      *  newer edit. */
     private var editGeneration = 0
@@ -911,38 +923,24 @@ class CaptureResultOverlay(
         )
         buildContent(paired = sideBySide)
 
-        val b = TranslationSectionBinder(
-            panel, ctx, prefs, scope,
-            ttsAlertTarget ?: TtsAlertTarget.Overlay(ctx, overlayHost, wm, displayId),
-            popovers,
-        )
+        val alertTarget = ttsAlertTarget ?: TtsAlertTarget.Overlay(ctx, overlayHost, wm, displayId)
+        val b = TranslationSectionBinder(panel, ctx, prefs, scope, alertTarget, popovers)
         b.setupSectionButtons(
             onEdit = { startInPlaceEdit() },
             onAddToAnki = { openSentenceAnkiReview() },
             onAnkiOneTap = { oneTapSentenceFromOverlay() },
         )
         b.onSectionVisibilityChanged = {
-            // A section was hidden/shown: the sections' layout re-arranges
-            // itself from the card's visibility (a hidden section keeps its
-            // header; in a pair the other card takes the full width). Then
-            // grow/shrink the panel to the new content. Two frames: that
-            // re-arrangement must lay out before we measure (the surviving
-            // card's text re-wraps at its new width), else we'd size to the
-            // stale layout. Same settle window before the controller cursor
-            // re-targets: the header actions under it may have gone.
-            sections.post {
-                sections.post {
-                    if (dismissed) return@post
-                    if (lastResult != null) autoSizeAndFit()
-                    nav?.revalidateCursor()
-                }
-            }
+            refitWhenLaidOut()
             // Eye reveal on a deferred result: run the skipped translation now.
             maybeCompleteDeferred()
         }
         // Furigana changes the source's rendered height (async on / sync off) — re-fit.
         b.onSourceTextHeightChanged = { if (!dismissed) autoSizeAndFit() }
-        b.setCardFillAlpha(if (opaqueBackgroundBoost) CARD_FILL_ALPHA_NO_IMAGE else CARD_FILL_ALPHA)
+        val cardAlpha = if (opaqueBackgroundBoost) CARD_FILL_ALPHA_NO_IMAGE else CARD_FILL_ALPHA
+        b.setCardFillAlpha(cardAlpha)
+        sections.findViewById<MaterialCardView>(R.id.cardWords)
+            ?.setCardBackgroundColor(sectionCardFill(ctx, cardAlpha))
         b.onChooseOcr = {
             val r = lastResult
             val p = r?.ocrProvenance
@@ -966,7 +964,7 @@ class CaptureResultOverlay(
             }
         })
         binder = b
-        sourceLens = SourceTextLens(
+        val lens = SourceTextLens(
             ctx, wm, displayId,
             // Null host = the lens's activity-window mode (see
             // [wordLensInActivity]); the camera panel's wm IS its Activity's
@@ -974,15 +972,45 @@ class CaptureResultOverlay(
             // token without any overlay permission.
             overlayHost = if (wordLensInActivity) null else overlayHost,
             scope = scope,
-            ttsAlertTarget = ttsAlertTarget ?: TtsAlertTarget.Overlay(ctx, overlayHost, wm, displayId),
+            ttsAlertTarget = alertTarget,
             binder = b,
             screenSize = { Point(screenW, screenH) },
             offersAnki = { it.entry != null },
             // The open works entry-or-not — it opens the sentence view — so
             // every section opens.
             opensWithoutEntry = true,
-            wireActions = { lens, resolvedAt -> wireLensActions(lens, resolvedAt) },
+            wireActions = { magnifier, resolvedAt -> wireLensActions(magnifier, resolvedAt) },
         )
+        sourceLens = lens
+        // The Words card, and the word lookup that feeds it and the source
+        // text's tap spans: the page's own binder, pipeline and renderer.
+        val words = WordRowsBinder(
+            panel, ctx, prefs,
+            object : WordRowsBinder.Host {
+                override val isAlive: Boolean get() = !dismissed
+                override val scope: CoroutineScope get() = this@CaptureResultOverlay.scope
+                override val ttsAlertTarget: TtsAlertTarget get() = alertTarget
+                override fun onWordTapped(row: RowState) = openWordRow(row)
+            },
+        )
+        // The card asks for its rows whenever it is shown and may need them;
+        // the pipeline no-ops unless an analysis is waiting for its rows.
+        words.onRowsWanted = { wordLookups.requestRows(ctx.applicationContext) }
+        words.onHeightChanged = { refitWhenLaidOut() }
+        words.attachCollectors(scope)
+        wordRows = words
+        val renderer = WordLookupsRenderer(
+            words, lens,
+            displayedSourceText = { b.displayedSourceText() },
+            scope = { scope },
+            isAlive = { !dismissed },
+            awaitEnterSettled = { entranceSettled.await() },
+            // New ranges: the controller cursor's word index is stale.
+            onSpanRangesChanged = { nav?.onWordSpansChanged() },
+        )
+        lookupsRenderer = renderer
+        wordLookups.onRowsSettled = { lastResult?.let(::writeSentenceCache) }
+        scope.launch { wordLookups.state.collect { renderer.render(it) } }
         // Bottom sheet: buffer the CONTENT above the navigation bar while it's
         // visible, the same way a top sheet buffers under the status bar — the
         // sheet fill keeps reaching the screen edge behind the bar, so nothing
@@ -1086,7 +1114,35 @@ class CaptureResultOverlay(
             .translationY(0f)
             .setDuration(ENTER_DURATION_MS)
             .setInterpolator(DecelerateInterpolator())
+            // The entrance has ended, or another animation of the panel cut
+            // it short, which ends it too: what waited for it may run
+            // ([entranceSettled]). One-shot, since a listener stays on the
+            // view's animator for every later animation.
+            .setListener(object : AnimatorListenerAdapter() {
+                override fun onAnimationEnd(animation: Animator) {
+                    panel.animate().setListener(null)
+                    entranceSettled.complete(Unit)
+                }
+            })
             .start()
+    }
+
+    /** A section's card was shown, hidden or resized: grow/shrink the panel
+     *  to the new content once that has laid out. Two frames: the sections'
+     *  layout re-arranges itself from the cards' visibility (a hidden
+     *  section keeps its header; in a pair the other card takes the full
+     *  width, and its text re-wraps there), and that must lay out before we
+     *  measure, else we'd size to the stale layout. Same settle window
+     *  before the controller cursor re-targets: what was under it may have
+     *  gone. */
+    private fun refitWhenLaidOut() {
+        sections.post {
+            sections.post {
+                if (dismissed) return@post
+                if (lastResult != null) autoSizeAndFit()
+                nav?.revalidateCursor()
+            }
+        }
     }
 
     /** Collect the one-shot capture session and drive the panel. The collector is
@@ -1356,6 +1412,7 @@ class CaptureResultOverlay(
         captureSession?.cancel()
         captureSession = null
         binder?.release()
+        wordRows?.release()
         layer.release()
         nav?.release()
         nav = null
@@ -1938,8 +1995,10 @@ class CaptureResultOverlay(
     ) {
         // A status takes over the panel (the scroll with the source text
         // hides below) — any word lens is now floating over vanished text
-        // with a stale action context.
+        // with a stale action context, and the text's word lookup has
+        // nothing left to show (the next result runs its own).
         dismissWordLens()
+        wordLookups.reset()
         // No-text status affordances, each its own tappable span (so tapping one can't
         // trigger the other): the source-language name is accent-colored → source picker
         // (same as the source header); the gear → OCR picker, shown only when a pinned
@@ -2023,7 +2082,6 @@ class CaptureResultOverlay(
             dismissWordLens()
         }
         lastResult = result
-        populateSentenceCache(result)
         nav?.clearCursor()   // fresh content: word indices + layout are stale
         statusText.visibility = View.GONE
         scroll.visibility = View.VISIBLE
@@ -2033,11 +2091,17 @@ class CaptureResultOverlay(
         statusMessage = null
         updateModeControl()
         b.bindResult(result)   // also paints furigana (bindResult → bindSource)
-        // Tap-a-word → definition: tokenize the source so taps resolve to spans.
-        // Readings refine on tap via the resolver, so an empty lookupToReading
-        // (no full word-list pipeline here) only loses the rare homograph hint.
+        wordRows?.applyWordsVisibility()
         b.tvOriginal.onTapAtOffset = { offset -> onSourceTapped(offset) }
-        refreshWordSpans(result.originalText)
+        // The source's word lookup: its analysis gives the taps their spans
+        // and the Words card asks it for rows. A re-bind of the text already
+        // being looked up (the Translating→Done promotion, a deferred
+        // translation landing) keeps the lookup it has; restarting would
+        // drop the spans and flash the word list back to loading.
+        if (!wordLookups.covers(result.originalText)) {
+            wordLookups.start(result.originalText, ctx.applicationContext)
+        }
+        writeSentenceCache(result)
         // Fit the text to the current panel NOW, before this frame draws. The first
         // (status→content) bind hasn't laid the scroll out yet, so this no-ops via
         // autoSizeAndFit's own width guard and the posts below do the work. But on a
@@ -2139,29 +2203,15 @@ class CaptureResultOverlay(
         }
     }
 
-    /** Mirror the Activity flow's LastSentenceCache write so the lens's Anki card
-     *  + open-detail tap carry the sentence translation + per-word results. */
-    private fun populateSentenceCache(result: TranslationResult) {
-        val original = result.originalText
-        if (original.isBlank() || result.translatedText.isBlank()) return
-        if (original == lastCachedSentence) return
-        lastCachedSentence = original
-        scope.launch {
-            LastSentenceCache.setFromTranslationResult(
-                original = original,
-                translation = result.translatedText,
-                translationSource = result.backendDisplayName,
-                wordResults = null,
-                surfaceForms = null,
-                wordEnrichment = null,
-            )
-            // awaitOrStartWordLookups only writes the word maps when original ==
-            // the cache's current sentence, so the translation above is preserved.
-            try {
-                LastSentenceCache.awaitOrStartWordLookups(ctx.applicationContext, original)
-            } catch (_: Exception) {}
-        }
-    }
+    /** Keep [LastSentenceCache] in step with the result on show, by the
+     *  lookup's pairing rule ([WordLookupPipeline.writeSentenceCache]): its
+     *  translation as soon as there is one, its words once their rows have
+     *  settled, which happens only while the Words card asks for them. The
+     *  lens's Anki card and open-detail tap read the cache, and fetch the
+     *  words themselves when it has none, as they do on the results pages. */
+    private fun writeSentenceCache(result: TranslationResult) = wordLookups.writeSentenceCache(
+        result.originalText, result.translatedText, result.backendDisplayName,
+    )
 
     /** On the first layout of a fresh result: measure the natural content height
      *  at max text size (the same StaticLayout basis as the fit, so they agree)
@@ -2190,8 +2240,41 @@ class CaptureResultOverlay(
      *  stretches the cards to the panel, so the layout's own height says how
      *  tall the panel is, not what the content needs. */
     private fun neededPanelHeight(b: TranslationSectionBinder): Int =
-        sections.paddingTop + topBlockNeed(b) + sections.paddingBottom +
+        sections.paddingTop + topBlockNeed(b) + belowNeed() + sections.paddingBottom +
             dp(HANDLE_HEIGHT_DP) + topInsetPx + bottomInsetPx
+
+    /** The sections beneath Original and Translation, top to bottom, each
+     *  as its header and its card. A section this sheet was not given is a
+     *  pair of nulls. */
+    private fun sectionsBelow(): List<Pair<View?, View?>> = listOf(
+        sections.findViewById<View>(R.id.askHeaderRow) to sections.findViewById<View>(R.id.cardAsk),
+        sections.findViewById<View>(R.id.wordsHeaderRow) to sections.findViewById<View>(R.id.cardWords),
+    )
+
+    /** Whether any section beneath the top two shows its card. */
+    private fun cardShownBelow(): Boolean =
+        sectionsBelow().any { (_, card) -> card != null && card.visibility != View.GONE }
+
+    /** What the sections beneath the top two add to the height the panel
+     *  sizes itself to: every header and card down to the LAST card that is
+     *  shown. A hidden section is its header row alone, and header rows with
+     *  no card after them are not counted: they sit just past the fold, so
+     *  a sheet whose lower sections are all hidden is as tall as its two
+     *  texts need and no taller. The cards' heights are their laid-out ones
+     *  (nothing here stretches them). */
+    private fun belowNeed(): Int {
+        var counted = 0
+        var headersSinceLastCard = 0
+        for ((header, card) in sectionsBelow()) {
+            if (header == null || header.visibility == View.GONE) continue
+            headersSinceLastCard += header.height
+            if (card != null && card.visibility != View.GONE) {
+                counted += headersSinceLastCard + card.height
+                headersSinceLastCard = 0
+            }
+        }
+        return counted
+    }
 
     /** A section's card with its text at max size: the card frame's inset,
      *  the in-card overhead (padding + the note row, read live) and the
@@ -2252,8 +2335,18 @@ class CaptureResultOverlay(
 
     /** Fill each card to a MINIMUM height ([cardHeights]) so its background is
      *  sized by the view, not the text — yet a card whose content runs slightly
-     *  tall grows + scrolls instead of clipping. */
+     *  tall grows + scrolls instead of clipping. Only while nothing beneath
+     *  the two shows a card. */
     private fun applyCardFill(b: TranslationSectionBinder, bodyH: Int) {
+        // With a card shown beneath them the two texts' cards keep their own
+        // height and that section follows directly; stretching them to the
+        // body would push it under the fold of every sheet. The floor is
+        // written back to 0, not left: a card keeps the last minimum it was
+        // given.
+        if (cardShownBelow()) {
+            b.setCardMinHeights(0, 0)
+            return
+        }
         val (src, tgt) = cardHeights(b, bodyH)
         b.setCardMinHeights(src, tgt)
     }
@@ -2321,44 +2414,6 @@ class CaptureResultOverlay(
         }
     }
 
-    /** The in-flight [refreshWordSpans] job. Each refresh cancels the prior
-     *  one: the sweep suspends on IO (tokenize + the phrase gate query), so
-     *  without cancellation a STALE refresh finishing after a newer bind or
-     *  edit would publish old tokens against the current displayed text and
-     *  misroute taps. Both launcher and publisher run on the main-dispatched
-     *  [scope], so cancel-before-relaunch fully orders the publishes (a
-     *  cancelled job's withContext resume throws instead of publishing). */
-    private var wordSpansJob: Job? = null
-
-    /** (Re)tokenize the source so taps resolve to spans against the displayed
-     *  text. Called for a fresh result and after an in-place edit. */
-    private fun refreshWordSpans(originalText: String) {
-        wordSpansJob?.cancel()
-        // The caller just bound NEW text; the old spans must die NOW, not
-        // at publish — a tap during the sweep's suspension would bind old
-        // ranges + lookupForms onto the freshly displayed text (wrong word,
-        // wrong phrase, attached to the new capture's context). A tap in
-        // the brief span-less window simply no-ops. (The in-app fragment
-        // already clears on Loading; this is the overlay's parity.)
-        sourceLens?.wordSpans = emptyList()
-        nav?.onWordSpansChanged()
-        wordSpansJob = scope.launch {
-            val engine = SourceLanguageEngines.get(ctx.applicationContext, prefs.sourceLangId)
-            // Phrase occurrences ride along so single-letter phrase members
-            // ("a" in "a great deal") get tap spans despite tokenize's
-            // sub-2-char filter — parity with the in-app results page.
-            val (tokens, phrases) = withContext(Dispatchers.IO) {
-                engine.tokenize(originalText) to engine.phrasesIn(originalText)
-            }
-            if (dismissed) return@launch
-            val b = binder ?: return@launch
-            sourceLens?.wordSpans = SourceWordLookup.computeTapSpans(
-                b.displayedSourceText(), tokens, emptyMap(), phrases,
-            )
-            nav?.onWordSpansChanged()
-        }
-    }
-
     /** Resolve the tapped word and show a display+speak lens over the game,
      *  anchored on the tapped line (the Anki button and the open-detail follow
      *  the resolved entry). [fromController] (the cursor's A press)
@@ -2387,21 +2442,10 @@ class CaptureResultOverlay(
             // hosting activity and the sheet restores on back
             // (dismissOnActivityLaunch, same contract as the sentence-level Anki
             // flow).
-            onLaunchedActivity = { kind ->
-                when (kind) {
-                    SourceLensActions.LaunchKind.Anki ->
-                        if (dismissOnActivityLaunch) dismissForPage()
-                    SourceLensActions.LaunchKind.Detail -> {
-                        val r = lastResult
-                        val nav = onNavigateToDetail
-                        if (r != null && nav != null) nav(r)
-                        else if (dismissOnActivityLaunch) dismissForPage()
-                    }
-                }
-            },
+            onLaunchedActivity = ::onWordPageLaunched,
             tagDetailReturn = !wordLensInActivity,
             showAnkiNotInstalled = if (wordLensInActivity) showAnkiNotInstalled else null,
-            route = if (wordLensInActivity) WorkspaceRoute.None else WorkspaceRoute.OpenNew(displayId),
+            route = wordPageRoute(),
             // Secondary-section drill-in (containing phrase, member words
             // or alternative entries): same open-sentence route, with the
             // secondary unit as the word context.
@@ -2435,6 +2479,53 @@ class CaptureResultOverlay(
                 lookupReading = resolved.lookupReading,
             )
         }
+    }
+
+    /** What the sheet does once a word's page has been launched from it,
+     *  by the lens or by a Words row. */
+    private fun onWordPageLaunched(kind: SourceLensActions.LaunchKind) {
+        when (kind) {
+            SourceLensActions.LaunchKind.Anki ->
+                if (dismissOnActivityLaunch) dismissForPage()
+            SourceLensActions.LaunchKind.Detail -> {
+                val r = lastResult
+                val nav = onNavigateToDetail
+                if (r != null && nav != null) nav(r)
+                else if (dismissOnActivityLaunch) dismissForPage()
+            }
+        }
+    }
+
+    /** How a word's page is reached from this sheet: a fresh workspace over
+     *  the game, or never for an in-activity host, whose pages are
+     *  Activity launches. */
+    private fun wordPageRoute(): WorkspaceRoute =
+        if (wordLensInActivity) WorkspaceRoute.None else WorkspaceRoute.OpenNew(displayId)
+
+    /** A Words row's tap: open that word's detail, by the path and with the
+     *  sheet's same reaction as the lens's open tap ([SentenceDetailOpener],
+     *  [onWordPageLaunched]). */
+    private fun openWordRow(row: RowState) {
+        val result = lastResult ?: return
+        dismissWordLens()
+        SentenceDetailOpener(
+            ctx.applicationContext, displayId,
+            route = wordPageRoute(),
+            tagDetailReturn = !wordLensInActivity,
+            onLaunched = { onWordPageLaunched(SourceLensActions.LaunchKind.Detail) },
+        ).open(
+            LensActionContext(
+                word = row.displayWord,
+                reading = row.reading.ifEmpty { null },
+                surface = row.surface.ifEmpty { null },
+                entry = null,
+                sentence = result.originalText,
+                screenshotPath = result.screenshotPath,
+                audioAnchorMs = result.createdAtMs.takeIf { it > 0 },
+                lookupForm = row.lookupForm,
+                lookupReading = row.lookupReading,
+            ),
+        )
     }
 
     private fun dismissWordLens() {
@@ -2712,7 +2803,7 @@ class CaptureResultOverlay(
         val gen = ++editGeneration
         b.bindSource(edited.segments)   // sets text + paints furigana
         b.setTargetTranslatingPlaceholder()
-        refreshWordSpans(newText)
+        wordLookups.start(newText, ctx.applicationContext)
         scope.launch {
             // translateOnce can throw (no usable backend / all backends fail) and
             // the service can be null — either way we MUST still land on a terminal
@@ -2965,8 +3056,7 @@ class CaptureResultOverlay(
             hPad, 0, hPad,
             dp(if (paired) SIDE_BY_SIDE_BOTTOM_BUFFER_DP else STACKED_BOTTOM_BUFFER_DP),
         )
-        inflater().inflate(R.layout.section_target, sections, true)
-        inflater().inflate(R.layout.section_source, sections, true)
+        inflater().inflate(R.layout.results_sections, sections, true)
         // One extra dp over the shared pad for a header in the top row. When
         // stacked the source header is the second row and rides 1dp tighter
         // than the shared pad: there is no divider between the stacked
@@ -2976,6 +3066,8 @@ class CaptureResultOverlay(
             sections.findViewById(R.id.sourceHeaderRow),
             if (paired) HEADER_TOP_DP + 1 else HEADER_TOP_DP - 1,
         )
+        // The sections beneath are each a row of their own, like the top row.
+        setHeaderTop(sections.findViewById(R.id.wordsHeaderRow), HEADER_TOP_DP + 1)
     }
 
     /** Set a section [header]'s top padding (the shared layout uses pt_group_gap;
