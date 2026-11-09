@@ -12,7 +12,6 @@ import android.widget.TextView
 import androidx.annotation.VisibleForTesting
 import com.playtranslate.R
 import com.playtranslate.themeColor
-import com.playtranslate.yomitan.YomitanDataStore
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.CoroutineScope
@@ -300,20 +299,14 @@ internal class DefinitionDocument(
                 else -> emptyList()
             }
         }
-        val rowids = groups.flatMap { g -> g.senses.mapNotNull { it.scRowid } }
-        var fetched: Map<Long, String> = emptyMap()
-        var css: Map<String, String> = emptyMap()
-        if (rowids.isNotEmpty()) {
-            val caps = YomitanDataStore.stylingFor(app, lang)
-            if (caps.stylingActive) {
-                fetched = YomitanDataStore.structuredGlossaries(app, lang, rowids)
-                val dictIds = groups.mapTo(HashSet()) { it.dictId }
-                css = caps.stylesByDict.filterKeys { it in dictIds }
-            }
-        }
-        val all = if (fetched.isEmpty()) known else known + fetched
+        // Null when there is nothing structured to draw, and when the store
+        // fails: these rows then draw their dictionaries' flat text, which
+        // every imported sense carries. A store failure costs the styling,
+        // never the rows.
+        val styled = fetchYomitanStyledData(app, lang, groups)
+        val all = if (styled == null) known else known + styled.structured
         val htmls = chunk.indices.map { DefRowHtml.html(ctx, chunk[it], doms[it], all, lang) }
-        return Built(htmls, all, css)
+        return Built(htmls, all, styled?.dictStyles.orEmpty())
     }
 
     private fun deliver(from: Int, chunk: List<DefRow>, doms: List<String>, built: Built, g: Int) {

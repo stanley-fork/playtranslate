@@ -6,10 +6,15 @@ import android.os.Looper
 import android.webkit.WebView
 import android.widget.FrameLayout
 import com.playtranslate.R
+import com.playtranslate.model.ImportedSense
+import com.playtranslate.model.ImportedSenseGroup
+import com.playtranslate.yomitan.YomitanDataStore
+import com.playtranslate.yomitan.YomitanDictionaryStore
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
+import kotlinx.coroutines.runBlocking
 import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -21,6 +26,7 @@ import org.junit.runner.RunWith
 import org.robolectric.Robolectric
 import org.robolectric.RobolectricTestRunner
 import org.robolectric.Shadows.shadowOf
+import java.io.File
 
 /**
  * [DefinitionDocument]'s rules, driven as the page drives them: the test
@@ -32,8 +38,9 @@ import org.robolectric.Shadows.shadowOf
  * a rebind with other ids is a new row set, and reports from the old one
  * are ignored; the view is 1 px only before its first layout; renderer
  * death is recovered once per content and the notice shows the second
- * time; a document with nothing to draw takes no shell; and the view is a
- * focus stop only while a row offers something to act on.
+ * time; a document with nothing to draw takes no shell; the view is a
+ * focus stop only while a row offers something to act on; and a dictionary
+ * store that fails costs a chunk its styling, never its rows.
  */
 @RunWith(RobolectricTestRunner::class)
 class DefinitionDocumentTest {
@@ -270,6 +277,43 @@ class DefinitionDocumentTest {
         assertNotSame("the document did not recover onto the dead spare", spare.webView, web)
         assertNotSame(first, web)
         assertFalse(doc.showsNotice)
+    }
+
+    @Test fun `a dictionary store that fails costs the styling, never the rows`() {
+        // The store's database cannot be opened: a directory sits where its
+        // file goes. The row asks the store, since its imported sense kept a
+        // structured glossary.
+        val root = YomitanDictionaryStore.rootDir(activity)
+        runBlocking { YomitanDataStore.resetForTest() }
+        root.deleteRecursively()
+        File(root, "yomitan.sqlite").mkdirs()
+        try {
+            assertTrue(
+                "the store really fails here",
+                runCatching { runBlocking { YomitanDataStore.stylingFor(activity, "ja") } }.isFailure,
+            )
+            val imported = ImportedSenseGroup("Dict", listOf(ImportedSense("its flat gloss", scRowid = 7L)), dictId = "d1")
+            val word = DefRow.Word(
+                "w",
+                WordDefinitionData(
+                    word = "w", reading = null, senses = emptyList(), freqScore = 0, isCommon = false,
+                    importedGroups = listOf(imported),
+                ),
+            )
+            doc.setRows(listOf(word), "ja")
+            pageReady()
+            // The fetch runs on the store's own thread: wait for its answer.
+            for (i in 0 until 300) {
+                idle()
+                if (sent().startsWith("ptSet(")) break
+                Thread.sleep(10)
+            }
+            assertTrue("the row is sent: ${sent().take(80)}", sent().startsWith("ptSet("))
+            assertTrue("with the sense's flat text", sent().contains("its flat gloss"))
+        } finally {
+            runBlocking { YomitanDataStore.resetForTest() }
+            root.deleteRecursively()
+        }
     }
 
     @Test fun `release drops the view and a later rebind starts over`() {

@@ -6,16 +6,16 @@ import com.playtranslate.yomitan.YomitanDataStore
 import kotlinx.coroutines.CancellationException
 
 /**
- * The structured glossaries and dictionary stylesheets behind a word's
- * imported definitions, fetched for the ANKI CARD: the send pipelines and
- * the word sheet resolve it in the same suspend pass that resolved the
- * word, so their synchronous card builders can draw the dictionaries' own
- * markup. (On screen a definitions document fetches its rows' content
- * itself, a chunk at a time.)
+ * The structured glossaries and dictionary stylesheets behind imported
+ * definitions. Two readers: the ANKI CARD (the send pipelines and the word
+ * sheet resolve it in the same suspend pass that resolved the word, so
+ * their synchronous card builders can draw the dictionaries' own markup),
+ * and a definitions document on screen, which fetches it for each chunk of
+ * rows it sends ([DefinitionDocument]).
  *
- * Null (from [fetchYomitanStyledData]) means the card carries flat text:
- * the styling toggle is off, no group carries a retained structured
- * glossary, or the fetch produced nothing.
+ * Null (from [fetchYomitanStyledData]) means flat text: the styling toggle
+ * is off, no group carries a retained structured glossary, or the fetch
+ * produced nothing or failed.
  */
 class YomitanStyledData(
     /** [com.playtranslate.model.ImportedSense.scRowid] → glossary JSON. */
@@ -137,10 +137,12 @@ internal suspend fun fetchStyledForSenses(
 /**
  * Runs a styled-payload fetch with datastore failure contained to null.
  * Flat text is every caller's standing fallback: the Anki word sheet's
- * card and both send pipelines carry it on null. The pipelines are
- * exception-free by contract (their one-tap hosts run detached coroutines
- * with no handler), so a SQLite or registry failure here must cost the
- * styling, never the card. Cancellation propagates.
+ * card and both send pipelines carry it on null, and a definitions
+ * document draws its rows with it. The pipelines are exception-free by
+ * contract (their one-tap hosts run detached coroutines with no handler),
+ * and a document that got no answer would send no rows at all, so a SQLite
+ * or registry failure here must cost the styling, never the card or the
+ * rows. Cancellation propagates.
  */
 private suspend fun containedStyledFetch(
     sourceLanguage: String,
