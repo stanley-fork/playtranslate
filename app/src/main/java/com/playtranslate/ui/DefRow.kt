@@ -14,26 +14,37 @@ internal sealed class DefRow {
     abstract val id: String
 
     /**
-     * A word with its definitions.
+     * A word with its definitions: the ONE word row, whichever surface
+     * lists it (the Words card, the dictionary search, a word page's
+     * sections, the lens).
      *
      * [opens] draws the chevron and makes the row itself a tap target
      * ([DefAction.OPEN]). [speak] and [trailing] are the row's two buttons,
-     * null for none. A [Trailing.SHOW] row is a hidden word's stub: the word
-     * alone, muted, on the sunk band, with the eye that shows it again; its
-     * reading, its definitions and its speak button are not drawn.
+     * null for none; [trailingHolds] makes a press held on the trailing
+     * button an action of its own ([DefAction.hold] of
+     * [DefAction.TRAILING]). A [Trailing.SHOW] row is a hidden word's stub:
+     * the word alone, muted, on the sunk band, with the eye that shows it
+     * again; its reading, its definitions and its speak button are not
+     * drawn.
+     *
+     * [full] is how much of the definitions the row shows. False, for a
+     * list whose row taps through to the word's own page: the imported
+     * dictionaries are a clamped preview and their links are inert, so a
+     * tap anywhere is the row's. True, where the row is where the word is
+     * read (the lens): everything, with live links.
      */
     data class Word(
         override val id: String,
-        val variant: Variant,
         val data: WordDefinitionData,
         val opens: Boolean = true,
         val speak: Speak? = null,
         val trailing: Trailing? = null,
-        /** A warning line over the definitions (the lens's "machine
-         *  translated"); [Variant.LENS] only. */
+        val trailingHolds: Boolean = false,
+        val full: Boolean = false,
+        /** A warning line over the definitions ("Machine translated"). */
         val label: String? = null,
-        /** What stands in for the definitions when the word has none (the
-         *  lens keeps a word with no entry on screen); [Variant.LENS] only. */
+        /** What stands in for the definitions when the word has none (a
+         *  looked-up word with no entry stays on screen). */
         val emptyText: String? = null,
     ) : DefRow()
 
@@ -140,13 +151,6 @@ internal sealed class DefRow {
      *  height, examples in full ink, dictionary names uncoloured. */
     enum class SenseLook { PAGE, SHEET }
 
-    /** The row's look. [CELL] is the word-list row: a large headword, the
-     *  buttons in the page's action columns, imported definitions clamped to
-     *  a preview. [LENS] is a section of the lens's card: a compact header
-     *  (word, reading, chevron) over the full definitions, with the
-     *  conjugation lines and live links, and no buttons of its own. */
-    enum class Variant { CELL, LENS }
-
     enum class Speak { IDLE, LOADING }
 
     /** The second button: add to Anki, hide the word (shown on a full row),
@@ -160,6 +164,10 @@ internal object DefAction {
     const val SPEAK = "speak"
     const val TRAILING = "trailing"
     const val MORE = "more"
+
+    /** [act] when its element was held, not tapped (an element that asks
+     *  for it: a row's trailing button with [DefRow.Word.trailingHolds]). */
+    fun hold(act: String): String = "$act:hold"
 
     /** A sheet word's row: toggle it as the card's target. */
     const val TARGET = "target"

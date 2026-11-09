@@ -223,7 +223,6 @@ internal object DefinitionsDocument {
 /* The conjugation line, sized like the label. The right margin is the native
    line's 17dp, clearing the open chevron the lens floats over the page's
    top-right corner (page px track dp: the root size is the flat body's sp). */
-.inflection { font-size: .8em; color: var(--pt-secondary); margin: 0 17px .3em 0; }
 .meta-row {
   display: flex; flex-wrap: wrap; align-items: center;
   margin: .1em 0 .15em;
@@ -355,7 +354,6 @@ ruby > rt { font-size: .5em; }
             "--pt-outline" to cssHex(theme.outline),
             "--pt-wash" to cssHex(theme.wash),
             "--pt-press" to cssAlpha(t.text, 0.08f),
-            "--pt-cursor" to cssAlpha(t.accent, 0.10f),
             "--pt-rail" to cssAlpha(t.accent, 0.35f),
             "--pt-link" to cssHex(theme.link),
             "--pt-chip" to cssAlpha(t.text, 0.10f),
@@ -477,34 +475,17 @@ button.act:active, .act.cur { background: var(--pt-press); }
   content: ''; position: absolute; left: 0; right: 0; bottom: 0; height: 28px;
   background: linear-gradient(transparent, var(--pt-panel));
 }
-/* A flat imported sense keeps the native row's four lines. */
-.imp > .dict-group > .def-row > .def-text {
+/* In a preview a flat imported sense keeps to four lines. */
+.pv > .dict-group > .def-row > .def-text {
   display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 4; overflow: hidden;
 }
-/* The lens's sections: a compact header over the full definitions, a
-   hairline with air above and below between them, and the controller's
-   cursor as a soft rounded wash inside the section, not a full-width band. */
-.lens { padding: 0 12px; }
-.lens + .row, .more { margin-top: 19px; }
-.lens + .row::before, .row + .more::before { top: -10px; left: 12px; right: 12px; }
-.lens.cur, .more.cur { background: none; }
-.lens.cur::after, .more.cur::after {
-  content: ''; position: absolute; top: 2px; bottom: 2px; left: 8px; right: 8px;
-  border-radius: 10px; background: var(--pt-cursor); pointer-events: none;
-}
-.lhead { display: flex; align-items: center; margin-bottom: 2px; }
-.lw, .lr { min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.lw { font-size: 1.136em; font-weight: 500; flex: 0 1 auto; }
-.lr { font-size: .909em; color: var(--pt-secondary); margin-left: 8px; flex: 0 2 auto; }
-[dir=rtl] .lr { margin-left: 0; margin-right: 8px; }
-.lchev { flex: none; display: flex; margin-left: auto; padding-left: 8px; color: var(--pt-secondary); }
-[dir=rtl] .lchev { margin-left: 0; margin-right: auto; padding-left: 0; padding-right: 8px; }
-.lchev .ic { width: 13px; height: 13px; }
-.empty { font-size: 1.06em; color: var(--pt-secondary); margin-top: .4em; }
+.empty { font-size: 1.06em; color: var(--pt-secondary); }
+/* A one-line action under the rows ("Load more"). */
 .more {
-  min-height: 40px; padding: 0 12px; display: flex; align-items: center; justify-content: center;
+  min-height: 44px; padding: 0 16px; display: flex; align-items: center; justify-content: center;
   font-size: .985em; color: var(--pt-link); white-space: nowrap;
 }
+.more:active { background: var(--pt-press); }
 /* A word's own page: the imported block in full, then one row per sense.
    Sizes are the native rows' sp, as px (the page's text zoom is the
    system's font scale). A numbered row's hairline starts at its gloss. */
@@ -746,7 +727,45 @@ button.act:active, .act.cur { background: var(--pt-press); }
     applyCursor();
   };
 
+  // A press held on an element that asks for it (data-hold) reports that
+  // element's action as held, and is not also a tap. The timer dies with
+  // the touch: a finger that moves away, lifts, or loses the gesture to the
+  // host's scroll.
+  var holdTimer = null, held = false, holdX = 0, holdY = 0;
+  function endHold() {
+    if (holdTimer) { clearTimeout(holdTimer); holdTimer = null; }
+  }
+  document.addEventListener('touchstart', function (e) {
+    endHold();
+    held = false;
+    var t = e.target;
+    var el = t && t.closest ? t.closest('[data-hold]') : null;
+    var row = el ? el.closest('[data-row]') : null;
+    if (!row || e.touches.length !== 1) return;
+    holdX = e.touches[0].clientX;
+    holdY = e.touches[0].clientY;
+    holdTimer = setTimeout(function () {
+      holdTimer = null;
+      held = true;
+      if (window.PTBridge && window.PTBridge.onAction) {
+        window.PTBridge.onAction(row.id, el.getAttribute('data-act') + ':hold');
+      }
+    }, 500);
+  }, { passive: true });
+  document.addEventListener('touchmove', function (e) {
+    if (!holdTimer) return;
+    var p = e.touches[0];
+    if (Math.abs(p.clientX - holdX) > 10 || Math.abs(p.clientY - holdY) > 10) endHold();
+  }, { passive: true });
+  document.addEventListener('touchend', endHold, { passive: true });
+  document.addEventListener('touchcancel', endHold, { passive: true });
+
   document.addEventListener('click', function (e) {
+    if (held) {
+      held = false;
+      e.preventDefault();
+      return;
+    }
     var t = e.target;
     if (!t || !t.closest) return;
     var row = t.closest('[data-row]');
@@ -853,16 +872,9 @@ button.act:active, .act.cur { background: var(--pt-press); }
         renderMisc: (List<String>) -> String? = { null },
         metaChips: List<MetaChip> = emptyList(),
         label: String? = null,
-        /** The conjugation lines ([InflectionChain.format]), rendered first,
-         *  one block each; the lens passes its word's, every other surface
-         *  none. */
-        inflectionLines: List<String> = emptyList(),
         importedCuration: ImportedCuration? = null,
     ): String {
         val sb = StringBuilder()
-        for (line in inflectionLines) {
-            sb.append("<div class=\"inflection\">").append(htmlEscape(line)).append("</div>")
-        }
         label?.takeIf { it.isNotBlank() }?.let {
             sb.append("<div class=\"label-warn\">").append(htmlEscape(it)).append("</div>")
         }

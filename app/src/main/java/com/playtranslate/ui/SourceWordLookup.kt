@@ -36,7 +36,7 @@ object SourceWordLookup {
     /** A resolved word, ready to feed a [MagnifierLens] via [WordDefinitionData]. */
     data class Resolved(
         val word: String,
-        /** Reading as resolved by headwordDisplay (raw; for the speak chip / Anki).
+        /** Reading as resolved by headwordDisplay (raw; for the row's Speak / Anki).
          *  The lens data already drops it when equal to [word]. */
         val reading: String?,
         /** The tapped token's own text (飲んでいなかった for the lemma 飲む),

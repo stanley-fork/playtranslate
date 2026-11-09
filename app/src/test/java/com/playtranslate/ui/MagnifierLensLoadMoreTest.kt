@@ -54,10 +54,17 @@ class MagnifierLensLoadMoreTest {
     private lateinit var lens: MagnifierLens
     private var loadMoreTaps = 0
 
-    private fun section(word: String, reading: String, opens: Boolean = true) = LensSection(
+    /** What the owner heard, by the row's place (null for the tapped unit,
+     *  else the secondary's index). */
+    private val ankiTaps = mutableListOf<Int?>()
+    private val ankiHolds = mutableListOf<Int?>()
+    private val spoken = mutableListOf<Int?>()
+
+    private fun section(word: String, reading: String, opens: Boolean = true, anki: Boolean = false) = LensSection(
         WordDefinitionData(word, reading, emptyList(), freqScore = 0, isCommon = false),
         label = null,
         opens = opens,
+        anki = anki,
     )
 
     private val primary = section("弾ける", "はじける")
@@ -71,6 +78,9 @@ class MagnifierLensLoadMoreTest {
         val activity = controller.get()
         lens = MagnifierLens(activity, activity.windowManager, Display.DEFAULT_DISPLAY)
         lens.onLoadMoreTap = { loadMoreTaps++ }
+        lens.onAnkiTap = { ankiTaps += it }
+        lens.onAnkiLongPress = { ankiHolds += it }
+        lens.onSpeak = { spoken += it }
         val dm = activity.resources.displayMetrics
         // Finger low on the screen: the lens sits above it, not flipped, so
         // the body is below the chrome and DPAD_DOWN walks into it.
@@ -111,7 +121,8 @@ class MagnifierLensLoadMoreTest {
         })
         lens.setSplitDefinitions(primary, listOf(sec1, sec2), false)
         assertEquals(listOf("弾ける", "弾く", "弾く"), words())
-        assertTrue(lens.shownRowsForTest().all { it is DefRow.Word && it.variant == DefRow.Variant.LENS })
+        // The app's one word row, with everything shown: the lens is where the word is read.
+        assertTrue(lens.shownRowsForTest().all { it is DefRow.Word && it.full && it.speak != null })
         assertFalse("a row names the word now", lens.pillShownForTest())
 
         // The longer unit on top: the secondaries first, the tapped unit last.
@@ -119,12 +130,12 @@ class MagnifierLensLoadMoreTest {
         assertEquals(listOf("弾く", "弾ける"), words())
 
         // A lone word is the same row, alone.
-        lens.setDefinitions(primary.data, null)
+        lens.setDefinitions(primary)
         assertEquals(listOf("弾ける"), words())
         assertFalse(lens.pillShownForTest())
 
         // Back to the magnifier: no rows, and the pill returns.
-        lens.setDefinitions(null, null)
+        lens.setDefinitions(null)
         assertTrue(words().isEmpty())
         assertTrue(lens.pillShownForTest())
     }
@@ -168,11 +179,93 @@ class MagnifierLensLoadMoreTest {
         assertEquals("the tapped unit's row, then the row", 2, nav.size)
         assertEquals(2, lens.shownRowsForTest().size)
 
-        // A primary with nothing to open leaves the row as the only target.
+        // A primary with nothing to open is no tap target itself, but its
+        // Speak button still is: the cursor starts there.
         lens.setSplitDefinitions(
             section("弾ける", "はじける", opens = false), emptyList(), false, LensLoadMore(2),
         )
-        assertEquals(listOf(nav.last()), laidOut())
+        assertEquals(nav, laidOut())
+        lens.focusForController()
+        assertEquals(nav.first() to DefAction.SPEAK, lens.cursorForTest())
+    }
+
+    @Test fun `each row's buttons reach the owner with that row's place`() {
+        lens.setSplitDefinitions(
+            section("弾ける", "はじける", anki = true),
+            listOf(section("弾く", "ひく", anki = true), section("弾く", "はじく")),
+            false,
+        )
+        laidOut()
+        val (p, s0, s1) = lens.shownRowsForTest().map { it.id }
+        // A row offers Anki only where its section says so.
+        assertEquals(
+            listOf(DefRow.Trailing.ANKI, DefRow.Trailing.ANKI, null),
+            lens.shownRowsForTest().map { (it as DefRow.Word).trailing },
+        )
+        lens.tapRowForTest(p, DefAction.TRAILING)
+        lens.tapRowForTest(s0, DefAction.TRAILING)
+        assertEquals(listOf(null, 0), ankiTaps)
+        // Held, it is the other action, for the same row.
+        lens.tapRowForTest(s0, DefAction.hold(DefAction.TRAILING))
+        assertEquals(listOf<Int?>(0), ankiHolds)
+        assertEquals(listOf(null, 0), ankiTaps)
+        // Every row speaks its own word, Anki or not.
+        lens.tapRowForTest(s1, DefAction.SPEAK)
+        lens.tapRowForTest(p, DefAction.SPEAK)
+        assertEquals(listOf(1, null), spoken)
+    }
+
+    @Test fun `a lens opened by the controller selects its first row once the page has laid it out`() {
+        lens.setSplitDefinitions(primary, listOf(sec1), false)
+        // The owner asks for the cursor right after it binds, before any layout.
+        lens.focusForController()
+        assertNull(lens.cursorForTest())
+        val nav = laidOut()
+        assertEquals("the next A opens the word", nav.first() to DefAction.OPEN, lens.cursorForTest())
+    }
+
+    @Test fun `the rows take the space the pill held`() {
+        lens.setLoading("弾ける", "はじける")
+        val (loadingTop, loadingBottom) = requireNotNull(lens.bodyPadsForTest())
+        assertTrue("the loading line clears the pill above it", loadingTop > loadingBottom && loadingBottom > 0)
+
+        lens.setSplitDefinitions(primary, listOf(sec1), false)
+        // The loading line stands, with its padding, until the rows have pixels.
+        assertEquals(loadingTop to loadingBottom, lens.bodyPadsForTest())
+        laidOut()
+        assertEquals("rows carry their own padding and the pill is hidden", 0 to 0, lens.bodyPadsForTest())
+    }
+
+    @Test fun `the cursor walks a row's buttons, and a held activate on Anki is its hold`() {
+        lens.setSplitDefinitions(section("弾ける", "はじける", anki = true), listOf(sec1), false)
+        laidOut()
+        val p = lens.shownRowsForTest().first().id
+        lens.focusForController()
+        assertEquals(p to DefAction.OPEN, lens.cursorForTest())
+        press(KeyEvent.KEYCODE_DPAD_RIGHT)
+        assertEquals(p to DefAction.SPEAK, lens.cursorForTest())
+        press(KeyEvent.KEYCODE_DPAD_RIGHT)
+        assertEquals(p to DefAction.TRAILING, lens.cursorForTest())
+
+        // A quick press is the tap.
+        press(KeyEvent.KEYCODE_BUTTON_A)
+        assertEquals(listOf<Int?>(null), ankiTaps)
+        assertTrue(ankiHolds.isEmpty())
+
+        // Held past the long-press timeout it is the hold, and the release
+        // is not also a tap.
+        val window = requireNotNull(lens.rootViewForTest())
+        window.dispatchKeyEvent(KeyEvent(KeyEvent.ACTION_DOWN, KeyEvent.KEYCODE_BUTTON_A))
+        shadowOf(Looper.getMainLooper()).idleFor(
+            Duration.ofMillis(android.view.ViewConfiguration.getLongPressTimeout() + 50L),
+        )
+        assertEquals(listOf<Int?>(null), ankiHolds)
+        window.dispatchKeyEvent(KeyEvent(KeyEvent.ACTION_UP, KeyEvent.KEYCODE_BUTTON_A))
+        assertEquals("the release after a hold is no tap", listOf<Int?>(null), ankiTaps)
+
+        // Down from a button lands on the next row's same button, or on the row.
+        press(KeyEvent.KEYCODE_DPAD_DOWN)
+        assertEquals(lens.shownRowsForTest()[1].id to DefAction.OPEN, lens.cursorForTest())
     }
 
     @Test fun `rebind without the row removes it`() {
@@ -195,14 +288,14 @@ class MagnifierLensLoadMoreTest {
         lens.setSplitDefinitions(primary, emptyList(), false, LensLoadMore(2))
         val first = laidOut()
         lens.focusForController()
-        assertEquals("the pill is hidden: the cursor starts on the word's row", first[0], lens.cursorRowForTest())
+        assertEquals("the pill is hidden: the cursor starts on the word's row", first[0], lens.cursorForTest()?.first)
         press(KeyEvent.KEYCODE_DPAD_DOWN)   // the word's row to the "Load more" row
-        assertEquals(first[1], lens.cursorRowForTest())
+        assertEquals(first[1], lens.cursorForTest()?.first)
 
         // No reveal: the section that took the row's slot, the first loaded.
         lens.setSplitDefinitions(primary, listOf(sec1, sec2), false)
         val nav = laidOut()
-        assertEquals(nav[1], lens.cursorRowForTest())
+        assertEquals(nav[1], lens.cursorForTest()?.first)
     }
 
     /** Twelve secondaries: a body taller than the grown card, so it scrolls. */
@@ -272,11 +365,11 @@ class MagnifierLensLoadMoreTest {
         val first = laidOut()
         lens.focusForController()
         press(KeyEvent.KEYCODE_DPAD_DOWN)   // the word's row to the "Load more" row
-        assertEquals(first[1], lens.cursorRowForTest())
+        assertEquals(first[1], lens.cursorForTest()?.first)
 
         lens.setSplitDefinitions(primary, listOf(sec1, sec2), false, scroll = LensScroll.Reveal(1))
         val nav = laidOut()
-        assertEquals("the cursor is on the revealed row", nav[2], lens.cursorRowForTest())
+        assertEquals("the cursor is on the revealed row", nav[2], lens.cursorForTest()?.first)
     }
 
     @Test fun `a controller cursor on a row keeps its place through a rebind`() {
@@ -285,11 +378,11 @@ class MagnifierLensLoadMoreTest {
         val before = laidOut()
         lens.focusForController()
         press(KeyEvent.KEYCODE_DPAD_DOWN)   // the word's row to the first secondary
-        assertEquals(before[1], lens.cursorRowForTest())
+        assertEquals(before[1], lens.cursorForTest()?.first)
 
         lens.setSplitDefinitions(primary, listOf(sec1, sec2), false, scroll = LensScroll.Keep)
         assertEquals("the same rows, so the same ids", before, laidOut())
-        assertEquals(before[1], lens.cursorRowForTest())
+        assertEquals(before[1], lens.cursorForTest()?.first)
     }
 
     @Test fun `a controller cursor on a row lands on the revealed row when the load row is tapped by touch`() {
@@ -297,13 +390,13 @@ class MagnifierLensLoadMoreTest {
         val first = laidOut()
         lens.focusForController()
         press(KeyEvent.KEYCODE_DPAD_DOWN)   // the word's row to the secondary
-        assertEquals(first[1], lens.cursorRowForTest())
+        assertEquals(first[1], lens.cursorForTest()?.first)
 
         // The row activated by touch, not by the cursor: the host rebinds
         // with the loaded section revealed.
         lens.setSplitDefinitions(primary, listOf(sec1, sec2), false, scroll = LensScroll.Reveal(1))
         val nav = laidOut()
-        assertEquals("the cursor is on the revealed row", nav[2], lens.cursorRowForTest())
+        assertEquals("the cursor is on the revealed row", nav[2], lens.cursorForTest()?.first)
     }
 
     private companion object {

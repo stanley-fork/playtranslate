@@ -55,8 +55,14 @@ class DefRowHtmlTest {
         speak: DefRow.Speak? = DefRow.Speak.IDLE,
         trailing: DefRow.Trailing? = DefRow.Trailing.HIDE,
         structured: Map<Long, String> = emptyMap(),
+        full: Boolean = false,
+        trailingHolds: Boolean = false,
+        label: String? = null,
+        emptyText: String? = null,
     ): String = DefRowHtml.html(
-        ctx, DefRow.Word("id", DefRow.Variant.CELL, data, opens, speak, trailing), "k7", structured, "ja",
+        ctx,
+        DefRow.Word("id", data, opens, speak, trailing, trailingHolds, full, label, emptyText),
+        "k7", structured, "ja",
     )
 
     private fun String.count(part: String): Int = split(part).size - 1
@@ -136,7 +142,7 @@ class DefRowHtmlTest {
         val h = html(data().copy(isCommon = true, importedGroups = imported))
         val body = h.substringAfter("<div class=\"body\">")
         val chips = body.indexOf("class=\"meta-row\"")
-        val imp = body.indexOf("<div class=\"imp\">")
+        val imp = body.indexOf("<div class=\"imp pv\">")
         val pack = body.indexOf("<div class=\"def-num\">1.</div>")
         assertTrue(body, chips in 0 until imp && imp < pack)
         assertTrue(body, body.contains("to eat (jitendex)"))
@@ -146,11 +152,42 @@ class DefRowHtmlTest {
         val glossary = """[{"type":"structured-content","content":{"tag":"span","content":"structured eat"}}]"""
         val imported = listOf(ImportedSenseGroup("Jitendex", listOf(ImportedSense("flat eat", scRowid = 5L)), dictId = "jt"))
         val styled = html(data().copy(importedGroups = imported), structured = mapOf(5L to glossary))
-        assertTrue(styled, styled.contains("<div class=\"imp clamp\">"))
+        assertTrue(styled, styled.contains("<div class=\"imp pv clamp\">"))
         assertTrue(styled, styled.contains("structured eat") && styled.contains("data-dictionary=\"jt\""))
-        // The same row before its content arrived, or with styling off: flat, unclamped block.
+        // The same row before its content arrived, or with styling off: a flat
+        // block kept to a few lines, not clamped by height.
         val flat = html(data().copy(importedGroups = imported))
-        assertTrue(flat, flat.contains("<div class=\"imp\">") && flat.contains("flat eat"))
+        assertTrue(flat, flat.contains("<div class=\"imp pv\">") && flat.contains("flat eat"))
+    }
+
+    @Test fun `a full row shows everything, with live links, where a preview is one tap target`() {
+        val glossary = """[{"type":"structured-content","content":{"tag":"span","content":"structured eat"}}]"""
+        val imported = listOf(ImportedSenseGroup("Jitendex", listOf(ImportedSense("flat eat", scRowid = 5L)), dictId = "jt"))
+        val preview = html(data().copy(importedGroups = imported), structured = mapOf(5L to glossary))
+        assertTrue(preview, preview.contains(" data-row data-inert"))
+        val full = html(data().copy(importedGroups = imported), structured = mapOf(5L to glossary), full = true)
+        // No inert links, no clamp, no line cap: the row is where the word is read.
+        assertFalse(full, full.contains("data-inert"))
+        assertTrue(full, full.contains("<div class=\"imp\">") && full.contains("structured eat"))
+        // Everything else is the same row: header, buttons, chevron.
+        assertEquals(preview.substringBefore("<div class=\"body\">").replace(" data-inert", ""), full.substringBefore("<div class=\"body\">"))
+    }
+
+    @Test fun `a row can carry a warning label and a placeholder for a word with no definition`() {
+        val labelled = html(label = "Machine translated")
+        assertTrue(labelled, labelled.contains("<div class=\"label-warn\">Machine translated</div>"))
+        assertTrue(labelled, labelled.indexOf("label-warn") < labelled.indexOf("def-num"))
+        val none = html(data(senses = emptyList()), emptyText = "No definitions found.")
+        assertTrue(none, none.contains("<div class=\"empty\">No definitions found.</div>"))
+        // A word with definitions never shows the placeholder.
+        assertFalse(html(emptyText = "No definitions found.").contains("class=\"empty\""))
+    }
+
+    @Test fun `a trailing button that holds says so to the page`() {
+        val holds = html(trailing = DefRow.Trailing.ANKI, trailingHolds = true)
+        assertTrue(holds, holds.contains("data-act=\"trailing\" data-hold aria-label="))
+        assertFalse(html(trailing = DefRow.Trailing.ANKI).contains("data-hold"))
+        assertEquals("trailing:hold", DefAction.hold(DefAction.TRAILING))
     }
 
     private fun pageRow(row: DefRow, structured: Map<Long, String> = emptyMap()): String =

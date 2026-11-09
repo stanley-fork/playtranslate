@@ -99,11 +99,10 @@ class WordRowsBinder(
     private val card: View = root.findViewById(R.id.cardWords)
     private val toggle: ImageButton = root.findViewById(R.id.btnToggleWords)
 
-    private val list = WordRowList(
+    private val list = wordRowList(
         ctx, container, host.scope,
-        object : WordRowList.Host {
+        object : WordRowList.Host<RowState> {
             override val isAlive: Boolean get() = host.isAlive
-            override val sourceLang get() = prefs.sourceLangId
             override val deckBadges: Boolean get() = true
 
             // The hidden-words eye, keyed like every other word path on
@@ -120,7 +119,7 @@ class WordRowsBinder(
 
             override suspend fun speak(row: RowState) = speakWord(
                 host.ttsAlertTarget,
-                LensSpeakChip.Request(row.displayWord, prefs.sourceLangId, reading = row.reading.ifEmpty { null }),
+                SpeakRequest(row.displayWord, prefs.sourceLangId, reading = row.reading.ifEmpty { null }),
             )
 
             override fun onInteraction() = host.onInteraction()
@@ -307,14 +306,6 @@ class WordRowsBinder(
     /** Re-queries deck membership for the listed words and redraws the rows
      *  whose badge changed. No-op until the list is built. */
     fun refreshWordBadges() = list.refreshDeckBadges()
-
-    /** The lens's deck back-fill source: the list's cache first, else one
-     *  query (cached for the list). Null when AnkiDroid is absent or
-     *  unpermitted — nothing to show. */
-    val deckSource: SourceTextLens.DeckSource = object : SourceTextLens.DeckSource {
-        override fun cached(word: String): List<String>? = list.cachedDecks(word)
-        override suspend fun load(word: String): List<String>? = list.loadDecks(word)
-    }
 
     // ── What the page shows, for its host ────────────────────────────────
 

@@ -515,7 +515,7 @@ class TranslationResultFragment : Fragment() {
         activity.startActivity(intent)
     }
 
-    /** Lens Anki chip handler — adds the tapped word (not the sentence)
+    /** A lens row's Anki button — adds that row's word (not the sentence)
      *  to Anki. Mirrors [DragLookupController.openAnkiReviewForLens]:
      *  installation gate here, permission gate handled by the launched
      *  [AnkiPermissionActivity]. Sentence context comes from the current
@@ -674,7 +674,7 @@ class TranslationResultFragment : Fragment() {
         val screenshotPath = ready?.screenshotPath
         val readingClean = reading?.takeIf { it != word } ?: ""
         // The popup is anchored inside a translated sentence on the
-        // result screen — the same context the lens chip has. Match
+        // result screen — the same context a lens row's button has. Match
         // the lens behavior: send a sentence card with the tapped
         // word highlighted when sentence context is available, and
         // only fall back to a word card when the source text isn't a
@@ -818,17 +818,17 @@ class TranslationResultFragment : Fragment() {
 
     /** The in-app lens's chips: the open chevron (only into a matched
      *  entry) and the secondary sections route through the host's word-tap
-     *  (the detail sheet); the Anki chip's tap opens the editable review,
-     *  its long-press is the headless one-tap shortcut (the pro-tip footer
-     *  in Settings). */
+     *  (the detail sheet); a row's Anki button opens the editable review
+     *  for that row's unit on a tap, and held is the headless one-tap
+     *  shortcut (the pro-tip footer in Settings). */
     private fun wireLensActions(lens: MagnifierLens, resolvedAt: SourceWordLookup.ResolvedAt) {
         val activity = activity ?: return
         val resolved = resolvedAt.word
         val secondaries = resolvedAt.secondaries()
-        val word = resolved.word
-        val popupReading = resolved.reading
         val displayEntry = resolved.entry
-        val displayEntries = resolved.entries
+        /** The unit of a row: the tapped one, or a secondary by index. */
+        fun unitOf(secondary: Int?): SourceWordLookup.Resolved? =
+            if (secondary == null) resolved else secondaries.getOrNull(secondary)
         fun openDetail(unit: SourceWordLookup.Resolved) {
             dismissWordPopup()
             host?.onInteraction()
@@ -854,13 +854,17 @@ class TranslationResultFragment : Fragment() {
                 secondaries.getOrNull(i)?.let { sec -> openDetail(sec) }
             }
         }
-        lens.onAnkiTap = {
-            host?.onInteraction()
-            launchWordAnki(activity, word, popupReading, displayEntry)
+        lens.onAnkiTap = { secondary ->
+            unitOf(secondary)?.let { unit ->
+                host?.onInteraction()
+                launchWordAnki(activity, unit.word, unit.reading, unit.entry)
+            }
         }
-        lens.onAnkiLongPress = {
-            host?.onInteraction()
-            oneTapWordFromPopup(activity, word, popupReading, displayEntry, displayEntries)
+        lens.onAnkiLongPress = { secondary ->
+            unitOf(secondary)?.let { unit ->
+                host?.onInteraction()
+                oneTapWordFromPopup(activity, unit.word, unit.reading, unit.entry, unit.entries)
+            }
         }
     }
 

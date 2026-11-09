@@ -553,39 +553,15 @@ class DefinitionsDocumentTest {
     }
 
     @Test
-    fun `inflection lines render first, escaped, guillemets kept as text`() {
-        val html = DefinitionsDocument.contentHtml(
-            data(senses = listOf(SenseDisplay(listOf("verb"), "to drink", emptyList()))),
-            emptyMap(),
-            localizePos = { it.joinToString("/") },
-            metaChips = listOf(DefinitionsDocument.MetaChip("Common", DefinitionsDocument.MetaChip.Kind.COMMON)),
-            label = "warn",
-            inflectionLines = listOf("飲んでいなかった · -て « -いる « negative « -た", "a<b"),
-        )
-        assertTrue(
-            "the first block is the first conjugation line",
-            html.startsWith("<div class=\"inflection\">飲んでいなかった · -て « -いる « negative « -た</div>"),
-        )
-        assertTrue("every line is its own block, escaped", html.contains("<div class=\"inflection\">a&lt;b</div>"))
-        assertTrue(
-            "the lines precede the label and the meta row",
-            html.indexOf("class=\"inflection\"") < html.indexOf("class=\"label-warn\"") &&
-                html.indexOf("class=\"inflection\"") < html.indexOf("class=\"meta-row\""),
-        )
-    }
-
-    @Test
-    fun `no inflection lines, no inflection block`() {
-        val html = content(data(senses = listOf(SenseDisplay(listOf("verb"), "to drink", emptyList()))))
-        assertFalse(html.contains("class=\"inflection\""))
-    }
-
-    @Test
-    fun `the shell styles the inflection line muted with the chevron margin`() {
-        val css = shell().substringAfter(".inflection {").substringBefore("}")
-        assertTrue(css.contains("color: var(--pt-secondary)"))
-        assertTrue(css.contains("font-size: .8em"))
-        assertTrue(css.contains("margin: 0 17px .3em 0"))
+    fun `the page reports a held press as its own action, and not also a tap`() {
+        // Catches: the hold report dropped, the tap not suppressed after it,
+        // and a hold that outlives a finger that moved or lost the gesture.
+        val shell = shell()
+        assertTrue(shell.contains("closest('[data-hold]')"))
+        assertTrue(shell.contains("el.getAttribute('data-act') + ':hold'"))
+        assertTrue(shell.contains("if (held) {"))
+        assertTrue(shell.contains("addEventListener('touchcancel', endHold"))
+        assertTrue(shell.contains("addEventListener('touchmove'"))
     }
 
     @Test

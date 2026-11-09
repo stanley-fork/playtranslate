@@ -263,8 +263,9 @@ class DefinitionDocumentBenchmark {
     private val themed by lazy { android.view.ContextThemeWrapper(ctx, R.style.Theme_PlayTranslate) }
     private var nextDom = 0
 
-    /** [row] as the app draws it: the list row (its imported block clamped
-     *  to a preview) or, [open], the lens's section with everything in full. */
+    /** [row] as the app draws it: the word row as a list shows it (its
+     *  imported block clamped to a preview) or, [open], as the lens does,
+     *  with everything in full. */
     private fun rowHtml(row: RowState, structured: Map<Long, String>, lang: String, open: Boolean): String {
         val data = WordDefinitionData(
             word = row.displayWord,
@@ -274,11 +275,11 @@ class DefinitionDocumentBenchmark {
             isCommon = row.isCommon,
             importedGroups = row.importedGroups,
         )
-        val defRow = if (open) {
-            DefRow.Word("r", DefRow.Variant.LENS, data, opens = true)
-        } else {
-            DefRow.Word("r", DefRow.Variant.CELL, data, speak = DefRow.Speak.IDLE, trailing = DefRow.Trailing.HIDE)
-        }
+        val defRow = DefRow.Word(
+            "r", data, speak = DefRow.Speak.IDLE,
+            trailing = if (open) DefRow.Trailing.ANKI else DefRow.Trailing.HIDE,
+            full = open,
+        )
         return DefRowHtml.html(themed, defRow, "k${nextDom++}", structured, lang)
     }
 
@@ -579,7 +580,7 @@ class DefinitionDocumentBenchmark {
         fun build(n: Int, open: Boolean): List<String> {
             val t0 = now()
             val list = pick(n).map { rowHtml(it, structured, lang, open) }
-            out("BUILD rows=$n look=${if (open) "open (lens section)" else "clamped (list row)"} html=${list.sumOf { it.length }}ch kotlin=${now() - t0}ms")
+            out("BUILD rows=$n look=${if (open) "open (the lens's full row)" else "clamped (a list's preview row)"} html=${list.sumOf { it.length }}ch kotlin=${now() - t0}ms")
             return list
         }
         val clamped = build(wantRows, open = false)

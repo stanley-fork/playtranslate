@@ -96,6 +96,14 @@ class DefinitionDocumentSmokeTest {
         pointer(android.view.MotionEvent.ACTION_UP, down, x, y)
     }
 
+    /** A finger held still at ([x], [y]) for [ms], then lifted. */
+    private fun hold(x: Float, y: Float, ms: Long) {
+        val down = SystemClock.uptimeMillis()
+        pointer(android.view.MotionEvent.ACTION_DOWN, down, x, y)
+        Thread.sleep(ms)
+        pointer(android.view.MotionEvent.ACTION_UP, down, x, y)
+    }
+
     private fun drag(x: Float, fromY: Float, toY: Float) {
         val down = SystemClock.uptimeMillis()
         pointer(android.view.MotionEvent.ACTION_DOWN, down, x, fromY)
@@ -130,7 +138,6 @@ class DefinitionDocumentSmokeTest {
         fun rowsOf(stub: Set<Int>, speaking: Set<Int>) = states.mapIndexed { i, s ->
             DefRow.Word(
                 id = "row$i",
-                variant = DefRow.Variant.CELL,
                 data = WordDefinitionData(
                     word = s.displayWord, reading = s.reading.ifEmpty { null }, senses = s.senses,
                     freqScore = s.freqScore, isCommon = s.isCommon, pitch = s.pitch,
@@ -286,10 +293,12 @@ class DefinitionDocumentSmokeTest {
     }
     /**
      * The lens's rows in a real WebView, in a card of the lens's width: the
-     * tapped unit and a related one under their own headwords, a word with
-     * no entry and its placeholder, and the "Load more" row. Each comes
-     * back as a target for its own action, and a tap on the "Load more"
-     * row reaches the host as that row's.
+     * app's word row with everything shown, for the tapped unit and a
+     * related one, a word with no entry and its placeholder, and the "Load
+     * more" row. Each row and each of its buttons comes back as a target
+     * for its own action; a tap on the "Load more" row reaches the host as
+     * that row's; and a finger held on a row's Anki button is that
+     * button's hold and not also its tap, where a quick touch is the tap.
      */
     @Test
     fun lensRowsRenderAndReportTheirActions() {
@@ -310,13 +319,17 @@ class DefinitionDocumentSmokeTest {
             freqScore = s.freqScore, isCommon = s.isCommon, pitch = s.pitch, frequencies = s.frequencies,
             importedGroups = s.importedGroups, inflectedForms = s.inflectedForms,
         )
+        fun lensRow(id: String, data: WordDefinitionData, opens: Boolean, anki: Boolean, label: String? = null) = DefRow.Word(
+            id, data, opens = opens, speak = DefRow.Speak.IDLE,
+            trailing = if (anki) DefRow.Trailing.ANKI else null, trailingHolds = anki,
+            full = true, label = label, emptyText = "No definitions found.",
+        )
         val rows = listOf(
-            DefRow.Word("p", DefRow.Variant.LENS, dataOf(looked[0]), opens = true, emptyText = "No definitions found."),
-            DefRow.Word("s0", DefRow.Variant.LENS, dataOf(looked[1]), opens = true, label = "Machine translated", emptyText = "No definitions found."),
-            DefRow.Word(
-                "s1", DefRow.Variant.LENS,
-                WordDefinitionData("星と深淵を目指せ", "ほしとしんえんをめざせ", emptyList(), freqScore = 0, isCommon = false),
-                opens = false, emptyText = "No definitions found.",
+            lensRow("p", dataOf(looked[0]), opens = true, anki = true),
+            lensRow("s0", dataOf(looked[1]), opens = true, anki = true, label = "Machine translated"),
+            lensRow(
+                "s1", WordDefinitionData("星と深淵を目指せ", "ほしとしんえんをめざせ", emptyList(), freqScore = 0, isCommon = false),
+                opens = false, anki = false,
             ),
             DefRow.More("more", "Load more (2)"),
         )
@@ -378,21 +391,42 @@ class DefinitionDocumentSmokeTest {
             await("the lens rows as targets") { d.targets.map { it.rowId }.distinct().size == 4 }
             var targets = emptyList<com.playtranslate.ui.DocTarget>()
             onMain { targets = d.targets }
-            fun acts(row: String) = targets.filter { it.rowId == row }.map { it.act }
-            assertEquals(listOf(DefAction.OPEN), acts("p"))
-            assertEquals(listOf(DefAction.OPEN), acts("s0"))
-            assertEquals("a row that does not open is laid out but no target", listOf(""), acts("s1"))
-            assertEquals(listOf(DefAction.MORE), acts("more"))
+            fun acts(row: String) = targets.filter { it.rowId == row && it.act.isNotEmpty() }.map { it.act }.toSet()
+            assertEquals(setOf(DefAction.OPEN, DefAction.SPEAK, DefAction.TRAILING), acts("p"))
+            assertEquals(setOf(DefAction.OPEN, DefAction.SPEAK, DefAction.TRAILING), acts("s0"))
+            assertEquals("a row that does not open still speaks", setOf(DefAction.SPEAK), acts("s1"))
+            assertEquals(setOf(DefAction.MORE), acts("more"))
 
-            // The controller's cursor on a row, then a real touch on "Load more".
-            onMain { d.setCursor(targets.first { it.rowId == "s0" }) }
-            val r = android.graphics.Rect()
-            var ok = false
-            onMain { ok = com.playtranslate.ui.DocNavTarget(d, "more", DefAction.MORE).rectOnScreen(r) }
-            assertTrue(ok)
-            touch(r.exactCenterX(), r.exactCenterY())
+            fun rect(row: String, act: String): android.graphics.Rect {
+                val r = android.graphics.Rect()
+                var ok = false
+                onMain { ok = com.playtranslate.ui.DocNavTarget(d, row, act).rectOnScreen(r) }
+                assertTrue("no rect for $row/$act", ok)
+                return r
+            }
+            // The controller's cursor on a row's button, then a real touch on "Load more".
+            onMain { d.setCursor(targets.first { it.rowId == "s0" && it.act == DefAction.SPEAK }) }
+            val more = rect("more", DefAction.MORE)
+            touch(more.exactCenterX(), more.exactCenterY())
             await("the tap on Load more") { actions.isNotEmpty() }
             assertEquals(listOf("more" to DefAction.MORE), actions.toList())
+
+            // A quick touch on a row's Anki button is its tap; a finger held
+            // there is its hold, once, and lifting is not also a tap.
+            val anki = rect("p", DefAction.TRAILING)
+            touch(anki.exactCenterX(), anki.exactCenterY())
+            await("the tap on Anki") { actions.size == 2 }
+            assertEquals("p" to DefAction.TRAILING, actions.last())
+            hold(anki.exactCenterX(), anki.exactCenterY(), 900)
+            await("the hold on Anki") { actions.size == 3 }
+            assertEquals("p" to DefAction.hold(DefAction.TRAILING), actions.last())
+            Thread.sleep(400)
+            assertEquals("lifting after a hold reported a tap as well", 3, actions.size)
+            // A row's Speak button is its own action, never the row's open.
+            val speak = rect("p", DefAction.SPEAK)
+            touch(speak.exactCenterX(), speak.exactCenterY())
+            await("the tap on Speak") { actions.size == 4 }
+            assertEquals("p" to DefAction.SPEAK, actions.last())
 
             Thread.sleep(600)
             val dir = File(app.getExternalFilesDir(null), "defdoc").apply { mkdirs() }

@@ -73,65 +73,27 @@ class MagnifierLensGeometryTest {
 /**
  * The pill's width cap and the chip lanes it exists to protect.
  *
- * The chips are laid out off the pill's own edges, so the pill's width decides
- * where they land: past a certain width they are seated outside the lens host
- * and the FrameLayout clips them away — visible disk and touch target both.
- * [computeMaxPillWidth] is where the pill has to stop for that never to happen,
- * and [computePillTextAllotment] is how the word and reading are squeezed into
- * it.
+ * The pill is a capsule centered on the card's edge: [computeMaxPillWidth] is
+ * where it has to stop so a long word's capsule never hangs past the card's
+ * rounded corners, and [computePillTextAllotment] is how the word and reading
+ * are squeezed into it.
  *
- * Numbers below are [MagnifierLens]'s at density 1: a 380 card in a 388 host
- * (4 of chip-halo inset per side), and a 58 chip lane = 8 halo pad + 36 visible
- * disk + 14 gap to the pill.
+ * Numbers below are [MagnifierLens]'s at density 1: a 380 card and a 16 inset
+ * (the card's corner radius) on each side.
  */
 class MagnifierLensPillWidthTest {
 
-    private val viewW = 388
-    private val chipLane = 58
-    private val cap = computeMaxPillWidth(viewW, chipLane)
+    private val cardW = 380
+    private val sideInset = 16
+    private val cap = computeMaxPillWidth(cardW, sideInset)
 
     /** Pill chrome with a reading shown: 18 + 14 padding, 2 divider, 2 × 12
      *  gaps. (The pill carries no chevron; the open cue is on the body.) */
     private val chrome = 58
 
     @Test
-    fun capLeavesExactlyOneLanePerSide() {
-        assertEquals(388 - 2 * 58, cap)
-    }
-
-    /** The resting placement the chips are first laid out at is flush with the
-     *  host's two edges — so a pill at exactly the cap asks for the very same
-     *  margins the pre-reveal layout uses. */
-    @Test
-    fun pillAtCap_seatsChipsFlushWithTheFrame() {
-        assertEquals(0 to 0, computeChipLaneMargins(viewW, cap, chipLane))
-    }
-
-    @Test
-    fun shortPill_seatsChipsWellInsideTheFrame() {
-        // 200-wide pill: 94 of slack per side, less the 58 lane.
-        assertEquals(36 to 36, computeChipLaneMargins(viewW, 200, chipLane))
-    }
-
-    /** The regression: an unbounded pill (a long word measured at WRAP_CONTENT
-     *  ran to the host's full width and beyond) seats both chips at negative
-     *  margins — off the frame, where they are clipped. */
-    @Test
-    fun pillPastCap_wouldSeatChipsOffTheFrame() {
-        val (left, right) = computeChipLaneMargins(viewW, viewW, chipLane)
-        assertTrue("left chip pushed off the frame: $left", left < 0)
-        assertTrue("right chip pushed off the frame: $right", right < 0)
-    }
-
-    /** Every width the capped pill can actually take — including the odd ones,
-     *  where the halved slack truncates toward the left chip. */
-    @Test
-    fun everyWidthWithinCap_keepsBothChipsOnTheFrame() {
-        for (w in 0..cap) {
-            val (left, right) = computeChipLaneMargins(viewW, w, chipLane)
-            assertTrue("pill $w seats the left chip at $left", left >= 0)
-            assertTrue("pill $w seats the right chip at $right", right >= 0)
-        }
+    fun capLeavesTheInsetOnEachSide() {
+        assertEquals(380 - 2 * 16, cap)
     }
 
     @Test
@@ -173,11 +135,11 @@ class MagnifierLensPillWidthTest {
         }
     }
 
-    /** A host too narrow to hold both lanes yields no pill at all rather than a
-     *  negative one — the arithmetic stays sane on a tiny display. */
+    /** A card narrower than its two insets yields no pill at all rather than
+     *  a negative one — the arithmetic stays sane on a tiny display. */
     @Test
-    fun hostNarrowerThanTwoLanes_capsAtZero() {
-        assertEquals(0, computeMaxPillWidth(80, chipLane))
+    fun cardNarrowerThanItsInsets_capsAtZero() {
+        assertEquals(0, computeMaxPillWidth(24, sideInset))
         assertEquals(0 to 0, computePillTextAllotment(0, chrome, readingWidth = 40))
     }
 }

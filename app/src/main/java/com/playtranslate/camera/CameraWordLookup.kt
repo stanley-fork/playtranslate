@@ -24,7 +24,7 @@ import kotlin.math.abs
  * Word lookup on the frozen snapshot itself: taps and drags on the
  * screenshot (outside the result sheet) drive the floating icon's
  * drag-lookup machinery — magnified frame under the finger, word readout,
- * dwell definitions, release lookup, speak/Anki/open-detail chips — against
+ * dwell definitions, release lookup, each row's speak/Anki/open — against
  * the ALREADY-recognised scene: no capture, no OCR; the session's display
  * caches are the source, so a region-filtered snapshot looks up only the
  * region's text.
@@ -82,7 +82,7 @@ class CameraWordLookup(
     private val controller = DragLookupController(
         activity, Display.DEFAULT_DISPLAY, popup, magnifier,
         // Dead in this configuration: every consumer that would touch it
-        // (speak-chip alerts, the Anki-not-installed dialog) is overridden
+        // (a Speak button's alerts, the Anki-not-installed dialog) is overridden
         // with an activity surface below. Constructed only to satisfy the
         // shared signature, same as the snapshot panel's host.
         overlayHost = OverlayHost(activity, WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY),

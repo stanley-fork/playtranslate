@@ -540,8 +540,9 @@ internal class DefinitionDocument(
      * Plays the page for a JVM test, where no engine lays anything out: a
      * layout report in which every row the page has been sent is
      * [rowHeightCssPx] tall, stacked from the top, a tap target for its own
-     * action when it has one. Goes through what a real report does: the
-     * height, the targets, the host's callback, the next chunk.
+     * action when it has one, a word row's buttons after it as the page
+     * reports them. Goes through what a real report does: the height, the
+     * targets, the host's callback, the next chunk.
      */
     @VisibleForTesting
     fun layoutForTest(rowHeightCssPx: Int) {
@@ -556,6 +557,11 @@ internal class DefinitionDocument(
                 is DefRow.SheetWord -> if (row.hidden) "" else DefAction.TARGET
             }
             out += DocTarget(row.id, act, 0, top, 300, rowHeightCssPx)
+            if (row is DefRow.Word) {
+                val stub = row.trailing == DefRow.Trailing.SHOW
+                if (row.speak != null && !stub) out += DocTarget(row.id, DefAction.SPEAK, 180, top, 36, 40)
+                if (row.trailing != null) out += DocTarget(row.id, DefAction.TRAILING, 232, top, 36, 40)
+            }
             top += rowHeightCssPx
         }
         applyHeight((top * density).roundToInt())

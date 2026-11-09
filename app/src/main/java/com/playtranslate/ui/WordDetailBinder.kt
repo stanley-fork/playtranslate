@@ -316,7 +316,7 @@ class WordDetailBinder(
     /** The Words and Other matches sections' lists, each one definitions
      *  document: released with the page, and by [loadSecondarySections]
      *  before it builds those sections. */
-    private val sectionLists = mutableListOf<WordRowList>()
+    private val sectionLists = mutableListOf<WordRowList<RowState>>()
 
     /** Host teardown: cancel audio, let the pages go. Idempotent; the
      *  host must also cancel [scope]. */
@@ -1330,11 +1330,10 @@ class WordDetailBinder(
     ) {
         addGroupHeader(content, title)
         val card = addGroupCard(content)
-        val list = WordRowList(
+        val list = wordRowList(
             ctx, card, scope,
-            object : WordRowList.Host {
+            object : WordRowList.Host<RowState> {
                 override val isAlive: Boolean get() = ui.isAlive
-                override val sourceLang get() = sourceLangId
                 // These rows carry no deck pill (the page's own header does).
                 override val deckBadges: Boolean get() = false
                 override fun trailing(row: RowState): DefRow.Trailing = DefRow.Trailing.ANKI

@@ -92,13 +92,13 @@ fun WorkspaceWordDetailPage(args: LensDetailArgs): WorkspaceWordDetailPage =
     )
 
 /**
- * The magnifying-lens "open detail" tap + Anki chip actions, shared by the
+ * The magnifying-lens "open detail" tap + a row's Anki button, shared by the
  * floating-icon drag flow ([DragLookupController]) and the over-game capture
  * overlay ([CaptureResultOverlay]). Constructing it wires the lens's
- * onOpenTap / onAnkiTap / onAnkiLongPress; [current] supplies the
- * word/entry/sentence/screenshot at the moment a chip is tapped — read ONCE
- * up front in each handler, before [MagnifierLens.dismiss] nulls the source's
- * word/entry state.
+ * onOpenTap / onAnkiTap / onAnkiLongPress; [current] supplies the tapped
+ * unit's word/entry/sentence/screenshot and [currentSecondary] a secondary
+ * row's at the moment of the tap — read ONCE up front in each handler,
+ * before [MagnifierLens.dismiss] nulls the source's word/entry state.
  */
 class SourceLensActions(
     private val context: Context,
@@ -116,7 +116,7 @@ class SourceLensActions(
      *  not installed" dialog through their own presenter — the default
      *  overlay window needs a permission an activity flow may not have. */
     private val showAnkiNotInstalled: (() -> Unit)? = null,
-    /** How the open-detail tap and the Anki chip reach the floating
+    /** How the open-detail tap and the Anki button reach the floating
      *  workspace (single-screen, word context present) before falling back
      *  to their Activity launches: a fresh workspace from a non-workspace
      *  surface, a push from a workspace page's own lens, or never for the
@@ -131,7 +131,8 @@ class SourceLensActions(
     /** Context for the lens's split-body SECONDARY sections by index — the
      *  containing phrase (space-delimited surfaces) or a fused expression's
      *  member words (JA) — same sentence/screenshot as [current], with the
-     *  secondary unit as the word. Null (the default) leaves
+     *  secondary unit as the word: what that row's open and its Anki
+     *  button act on. Null (the default) leaves
      *  [MagnifierLens.onSecondaryOpenTap] unwired; a wired provider may
      *  itself return null (no such secondary at the moment of the tap) for
      *  a no-op. */
@@ -144,15 +145,20 @@ class SourceLensActions(
     init {
         // "Open in detail view": the workspace detail page over the game when
         // the route can present it, else TranslationResultActivity (sentence +
-        // its Sentence/Word toggle). Anki chip: tap opens the editable
-        // review; long-press is the headless one-tap shortcut.
+        // its Sentence/Word toggle). A row's Anki button: tap opens the
+        // editable review; held is the headless one-tap shortcut.
         lens.onOpenTap = { openSentenceInApp(current()) }
-        lens.onAnkiTap = { openAnkiReviewForLens() }
-        lens.onAnkiLongPress = { oneTapFromLens() }
+        lens.onAnkiTap = { secondary -> contextOf(secondary)?.let { openAnkiReviewForLens(it) } }
+        lens.onAnkiLongPress = { secondary -> contextOf(secondary)?.let { oneTapFromLens(it) } }
         currentSecondary?.let { secondary ->
             lens.onSecondaryOpenTap = { i -> secondary(i)?.let { openSentenceInApp(it) } }
         }
     }
+
+    /** The context of a row: the tapped unit's ([current]), or a
+     *  secondary's by index; null when there is no such secondary now. */
+    private fun contextOf(secondary: Int?): LensActionContext? =
+        if (secondary == null) current() else currentSecondary?.invoke(secondary)
 
     private data class LensAnkiSnapshot(
         val word: String,
@@ -281,8 +287,7 @@ class SourceLensActions(
         onLaunchedActivity(LaunchKind.Detail)
     }
 
-    private fun openAnkiReviewForLens() {
-        val cur = current()
+    private fun openAnkiReviewForLens(cur: LensActionContext) {
         val word = cur.word ?: return
         val entry = cur.entry ?: return
         val ankiManager = AnkiManager(context)
@@ -329,18 +334,17 @@ class SourceLensActions(
         return opened
     }
 
-    private fun oneTapFromLens() {
-        val cur = current()
+    private fun oneTapFromLens(cur: LensActionContext) {
         val word = cur.word ?: return
         val entry = cur.entry ?: return
         val ankiManager = AnkiManager(context)
         if (!ankiManager.isAnkiDroidInstalled() || !ankiManager.hasPermission()) {
-            openAnkiReviewForLens()
+            openAnkiReviewForLens(cur)
             return
         }
         val prefs = Prefs(context)
         if (prefs.ankiDeckId < 0L) {
-            openAnkiReviewForLens()
+            openAnkiReviewForLens(cur)
             return
         }
         val snap = snapshotLensFieldsForAnki(word, entry, cur)

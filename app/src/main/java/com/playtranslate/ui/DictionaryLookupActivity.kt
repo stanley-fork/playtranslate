@@ -47,7 +47,7 @@ class DictionaryLookupActivity : SettingsSubPageActivity() {
 
     /** The results: one definitions document, with the deck badges and each
      *  row's speak spinner. */
-    private lateinit var list: WordRowList
+    private lateinit var list: WordRowList<RowState>
 
     /** Identity guard so a repeated row list isn't drawn again. */
     private var lastRenderedRows: List<RowState>? = null
@@ -57,11 +57,10 @@ class DictionaryLookupActivity : SettingsSubPageActivity() {
         resultsCard = findViewById(R.id.cardResults)
         countView = findViewById(R.id.tvCount)
         loadingView = findViewById(R.id.pbLoading)
-        list = WordRowList(
+        list = wordRowList(
             this, resultsContainer, lifecycleScope,
-            object : WordRowList.Host {
+            object : WordRowList.Host<RowState> {
                 override val isAlive: Boolean get() = !isDestroyed
-                override val sourceLang get() = prefs.sourceLangId
                 override val deckBadges: Boolean get() = true
 
                 // Dictionary results never stub or hide: the user searched
@@ -71,7 +70,7 @@ class DictionaryLookupActivity : SettingsSubPageActivity() {
                 override fun onTrailing(row: RowState, shown: DefRow.Trailing) = launchAnki(row)
                 override suspend fun speak(row: RowState) = speakWord(
                     TtsAlertTarget.InActivity(this@DictionaryLookupActivity),
-                    LensSpeakChip.Request(row.displayWord, prefs.sourceLangId, reading = row.reading.ifEmpty { null }),
+                    SpeakRequest(row.displayWord, prefs.sourceLangId, reading = row.reading.ifEmpty { null }),
                 )
             },
             WordRowList.LARGE_SCALE,

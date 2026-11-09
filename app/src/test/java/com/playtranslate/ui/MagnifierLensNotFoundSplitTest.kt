@@ -79,12 +79,18 @@ class MagnifierLensNotFoundSplitTest {
         val unlisted = DefRowHtml.html(activity, rows[0], "k0", emptyMap(), "ja")
         val listed = DefRowHtml.html(activity, rows[1], "k1", emptyMap(), "ja")
         assertTrue(unlisted, unlisted.contains("星と深淵を目指せ") && unlisted.contains(placeholder))
-        assertFalse(unlisted, unlisted.contains("data-act="))
+        // Nothing to open into, so the row itself is no tap target; it can
+        // still be spoken.
+        assertFalse(unlisted, unlisted.contains("data-act=\"open\""))
+        assertTrue(unlisted, unlisted.contains("data-act=\"speak\""))
         assertTrue(listed, listed.contains("star") && listed.contains("data-act=\"open\""))
         assertFalse(listed, listed.contains(placeholder))
 
-        // Only the member opens, so it is the one controller target.
+        // Both rows are within the controller's reach: the unlisted word by
+        // its Speak button, the member by its row.
         lens.layoutRowsForTest(100)
-        assertEquals(listOf(rows[1].id), lens.navRowsForTest())
+        assertEquals(listOf(rows[0].id, rows[1].id), lens.navRowsForTest())
+        lens.focusForController()
+        assertEquals(rows[0].id to DefAction.SPEAK, lens.cursorForTest())
     }
 }

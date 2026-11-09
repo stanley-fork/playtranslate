@@ -76,7 +76,7 @@ class DefinitionDocumentTest {
     }
 
     private fun row(id: String, meaning: String = "meaning of $id") = DefRow.Word(
-        id, DefRow.Variant.CELL,
+        id,
         WordDefinitionData(
             word = id, reading = null, senses = listOf(SenseDisplay(emptyList(), meaning, emptyList())),
             freqScore = 0, isCommon = false,

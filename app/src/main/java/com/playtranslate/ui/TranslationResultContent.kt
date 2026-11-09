@@ -32,8 +32,8 @@ import kotlinx.coroutines.launch
  * update, the deferred-translation request). The in-app
  * [TranslationResultFragment] and the floating workspace's
  * [WorkspaceSentencePage] are shells over this, each supplying what only
- * it knows through [Host]: where the lens's window lives, what its chips
- * do, what a word tap opens, the Anki entries, editing, the OCR and
+ * it knows through [Host]: where the lens's window lives, what its rows'
+ * actions do, what a word tap opens, the Anki entries, editing, the OCR and
  * language pickers, the Clear action, the show-on-screen toggle, and who
  * completes a deferred translation. Same constraints as every other
  * shared binder: plain views, ids from the shared layout.
@@ -85,7 +85,7 @@ class TranslationResultContent(
          *  (see [SourceTextLens]). */
         val opensWithoutEntry: Boolean
 
-        /** Wire a freshly built lens's chips for this tap. */
+        /** Wire a freshly built lens's actions for this tap. */
         fun wireLensActions(lens: MagnifierLens, resolved: SourceWordLookup.ResolvedAt)
 
         /** A word row's body tap: open that word's detail. [surface] is the
@@ -234,9 +234,11 @@ class TranslationResultContent(
             ttsAlertTarget = host.ttsAlertTarget,
             binder = binder,
             screenSize = { host.screenSize() },
-            showAnkiChip = { true },
+            // The review looks a word up again by itself, so every row
+            // offers it, entry or not.
+            offersAnki = { true },
             opensWithoutEntry = host.opensWithoutEntry,
-            decks = wordRows.deckSource,
+            deckBadges = true,
             wireActions = { lens, resolved -> host.wireLensActions(lens, resolved) },
         )
         binder.tvOriginal.onTapAtOffset = { offset -> sourceLens.onTapAtOffset(offset) }

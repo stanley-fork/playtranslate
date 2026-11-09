@@ -19,8 +19,10 @@ import com.playtranslate.model.ReadingRow
  * Every tappable element carries `data-act` with a [DefAction]; the row
  * element carries `data-row` and its DOM id, which is how the page names
  * the row a tap or a rect belongs to. `data-inert` makes a link inside the
- * row a tap on the row: a list row is one tap target that opens its word,
- * and a link in a clamped preview would otherwise take that tap away.
+ * row a tap on the row: a row that previews its definitions is one tap
+ * target that opens its word, and a link in a clamped preview would
+ * otherwise take that tap away. `data-hold` makes a press held on the
+ * element its own action ([DefAction.hold]).
  */
 internal object DefRowHtml {
 
@@ -37,10 +39,7 @@ internal object DefRowHtml {
         structured: Map<Long, String>,
         sourceLang: String,
     ): String = when (row) {
-        is DefRow.Word -> when (row.variant) {
-            DefRow.Variant.CELL -> word(ctx, row, domId, structured, sourceLang)
-            DefRow.Variant.LENS -> lens(ctx, row, domId, structured, sourceLang)
-        }
+        is DefRow.Word -> word(ctx, row, domId, structured, sourceLang)
         is DefRow.More -> more(row, domId)
         is DefRow.Imported -> imported(ctx, row, domId, structured)
         is DefRow.Sense -> sense(ctx, row, domId)
@@ -267,56 +266,6 @@ internal object DefRowHtml {
             .append("\" aria-label=\"").append(htmlEscape(label)).append("\">\u2715</button>")
     }
 
-    /**
-     * A section of the lens's card: the word and its reading on one line
-     * (the reading under its accent contour, or the word itself when it is
-     * kana and so is its own reading), the chevron at the line's end when
-     * the section opens, then everything the lens shows of the word: the
-     * conjugation lines, the chips, the warning label, the imported
-     * dictionaries in full and the pack's senses. Links are live here.
-     */
-    private fun lens(
-        ctx: Context,
-        row: DefRow.Word,
-        domId: String,
-        structured: Map<Long, String>,
-        sourceLang: String,
-    ): String {
-        val d = row.data
-        val reading = d.reading?.takeIf { it.isNotEmpty() }
-        val kanaOnly = reading == null && d.pitch.isNotEmpty() && d.word.all(Deinflector::isKana)
-        val lang = htmlEscape(sourceLang)
-        val sb = StringBuilder(1024)
-        sb.append("<div class=\"row lens\" id=\"").append(domId).append("\" data-row")
-        if (row.opens) sb.append(" data-act=\"").append(DefAction.OPEN).append('"')
-        sb.append("><div class=\"lhead\"><span class=\"lw\" lang=\"").append(lang).append("\">")
-        val wordPitch = if (kanaOnly) PitchAccentHtml.pitchAccentHtml(d.word, d.pitch) else ""
-        sb.append(wordPitch.ifEmpty { htmlEscape(d.word) }).append("</span>")
-        if (reading != null) {
-            sb.append("<span class=\"lr\" lang=\"").append(lang).append("\">")
-                .append(PitchAccentHtml.pitchAccentHtml(reading, d.pitch).ifEmpty { htmlEscape(reading) })
-                .append("</span>")
-        }
-        if (row.opens) {
-            sb.append("<span class=\"lchev\">").append(icon(ctx, R.drawable.ic_lens_chevron)).append("</span>")
-        }
-        sb.append("</div>")
-        sb.append(
-            DefinitionsDocument.contentHtml(
-                d, structured,
-                localizePos = { ctx.localizePos(it) },
-                showMisc = false,
-                metaChips = styledMetaChips(ctx, d),
-                label = row.label,
-                inflectionLines = d.inflectedForms.map { InflectionChain.format(ctx, it) },
-            ),
-        )
-        if (d.senses.isEmpty() && d.importedGroups.isEmpty() && row.emptyText != null) {
-            sb.append("<div class=\"empty\">").append(htmlEscape(row.emptyText)).append("</div>")
-        }
-        return sb.append("</div>").toString()
-    }
-
     private fun more(row: DefRow.More, domId: String): String {
         val sb = StringBuilder()
         sb.append("<div class=\"row more\" id=\"").append(domId).append("\" data-row data-act=\"")
@@ -346,7 +295,9 @@ internal object DefRowHtml {
 
         val sb = StringBuilder(1024)
         sb.append("<div class=\"row cell").append(if (stub) " stub" else "")
-            .append("\" id=\"").append(domId).append("\" data-row data-inert")
+            .append("\" id=\"").append(domId).append("\" data-row")
+        // A preview's links are the row's tap; a full row's are live.
+        if (!row.full) sb.append(" data-inert")
         if (row.opens) sb.append(" data-act=\"").append(DefAction.OPEN).append('"')
         sb.append("><div class=\"head\"><div class=\"title\" lang=\"").append(htmlEscape(sourceLang)).append("\">")
         sb.append("<span class=\"w\">")
@@ -373,8 +324,9 @@ internal object DefRowHtml {
                 DefRow.Trailing.HIDE -> R.drawable.ic_visibility to R.string.hidden_word_hide_content_description
                 DefRow.Trailing.SHOW -> R.drawable.ic_visibility_off to R.string.hidden_word_show_content_description
             }
-            sb.append("<button class=\"act\" data-act=\"").append(DefAction.TRAILING)
-                .append("\" aria-label=\"").append(htmlEscape(ctx.getString(label))).append("\">")
+            sb.append("<button class=\"act\" data-act=\"").append(DefAction.TRAILING).append('"')
+            if (row.trailingHolds) sb.append(" data-hold")
+            sb.append(" aria-label=\"").append(htmlEscape(ctx.getString(label))).append("\">")
                 .append(icon(ctx, drawable)).append("</button>")
         }
         if (row.opens) {
@@ -398,29 +350,36 @@ internal object DefRowHtml {
                 .append(lines.joinToString("<br>") { htmlEscape(it) }).append("</div>")
         }
 
-        val body = body(ctx, d, structured)
+        val body = body(ctx, row, structured)
         if (body.isNotEmpty()) sb.append("<div class=\"body\">").append(body).append("</div>")
         return sb.append("</div>").toString()
     }
 
     /**
-     * The definitions under a list row: the meta chips, then the imported
-     * dictionaries, then the pack's own senses. An imported block that holds
-     * structured content is clamped to a preview (`clamp`), because the row
-     * taps through to the word's own page and one long entry must not
-     * out-size the list; the pack's senses are never clamped.
+     * The definitions under a word's header: the warning label and the meta
+     * chips, then the imported dictionaries, then the pack's own senses, or
+     * the row's placeholder when the word has none of either. In a preview
+     * row an imported block that holds structured content is clamped
+     * (`clamp`) and a flat imported sense keeps to four lines (`pv`),
+     * because the row taps through to the word's own page and one long
+     * entry must not out-size the list; a full row shows all of it. The
+     * pack's senses are never clamped.
      */
-    private fun body(ctx: Context, d: WordDefinitionData, structured: Map<Long, String>): String {
+    private fun body(ctx: Context, row: DefRow.Word, structured: Map<Long, String>): String {
+        val d = row.data
         val localize: (List<String>) -> String = { ctx.localizePos(it) }
         val none = WordDefinitionData(word = "", reading = null, senses = emptyList(), freqScore = 0, isCommon = false)
         val sb = StringBuilder()
         val chips = styledMetaChips(ctx, d)
-        if (chips.isNotEmpty()) {
-            sb.append(DefinitionsDocument.contentHtml(none, emptyMap(), localize, metaChips = chips))
+        if (chips.isNotEmpty() || !row.label.isNullOrBlank()) {
+            sb.append(DefinitionsDocument.contentHtml(none, emptyMap(), localize, metaChips = chips, label = row.label))
         }
         if (d.importedGroups.isNotEmpty()) {
             val styled = d.importedGroups.any { g -> g.senses.any { it.scRowid?.let(structured::containsKey) == true } }
-            sb.append("<div class=\"imp").append(if (styled) " clamp" else "").append("\">")
+            sb.append("<div class=\"imp")
+                .append(if (row.full) "" else " pv")
+                .append(if (styled && !row.full) " clamp" else "")
+                .append("\">")
                 .append(DefinitionsDocument.contentHtml(none.copy(importedGroups = d.importedGroups), structured, localize))
                 .append("</div>")
         }
@@ -430,6 +389,9 @@ internal object DefRowHtml {
                 showMisc = true, renderMisc = { ctx.renderMiscText(it) },
             ),
         )
+        if (d.senses.none { !it.imported } && d.importedGroups.isEmpty() && row.emptyText != null) {
+            sb.append("<div class=\"empty\">").append(htmlEscape(row.emptyText)).append("</div>")
+        }
         return sb.toString()
     }
 
