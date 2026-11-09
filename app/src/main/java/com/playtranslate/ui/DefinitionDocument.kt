@@ -11,6 +11,7 @@ import android.view.ViewTreeObserver
 import android.widget.TextView
 import androidx.annotation.VisibleForTesting
 import com.playtranslate.R
+import com.playtranslate.model.ImportedSenseGroup
 import com.playtranslate.themeColor
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineDispatcher
@@ -69,7 +70,9 @@ internal data class DocNavTarget(
  *    thread, under the language the rows were looked up in.
  *  - **A rebind with the same rows patches.** [setRows] with the same ids
  *    in the same order replaces only the rows whose value changed (a deck
- *    badge, a hide, a spinner): no new row set, no jump.
+ *    badge, a hide, a spinner): no new row set, no jump. The exception is
+ *    a row that gains a dictionary's structured glossary under its id:
+ *    only feeding fetches that, so the rebind is a new row set.
  *  - **The view is 1 px only before its first layout.** A later row set
  *    keeps the height on screen until its own first layout, so a rebind
  *    never collapses the surface. Never GONE: the page reports nothing
@@ -162,8 +165,9 @@ internal class DefinitionDocument(
     /**
      * The rows to show, looked up in [language] (the dictionary store's
      * language key, which also routes the page's media). Same ids in the
-     * same order as the last call: a patch of the rows that changed.
-     * Anything else: a new row set, fed from the top.
+     * same order as the last call, no row gaining a structured glossary
+     * ([gainsStructured]): a patch of the rows that changed. Anything else:
+     * a new row set, fed from the top.
      */
     fun setRows(newRows: List<DefRow>, language: String) {
         if (newRows.isEmpty() && shell == null) {
@@ -173,8 +177,11 @@ internal class DefinitionDocument(
             return
         }
         prepare()
-        val patch = shell != null && language == this.language && newRows.size == rows.size &&
+        val sameIds = shell != null && language == this.language && newRows.size == rows.size &&
             newRows.indices.all { newRows[it].id == rows[it].id }
+        // Over every row, sent or not: a chunk in flight was fetched for
+        // the rows as they were.
+        val patch = sameIds && newRows.indices.none { gainsStructured(rows[it], newRows[it]) }
         if (patch) {
             val old = rows
             rows = newRows
@@ -188,6 +195,31 @@ internal class DefinitionDocument(
         this.language = language
         content++
         restart()
+    }
+
+    /** The imported dictionary content [row] draws, whose structured form
+     *  is fetched when the row is fed ([build]). */
+    private fun importedGroups(row: DefRow): List<ImportedSenseGroup> = when (row) {
+        is DefRow.Word -> row.data.importedGroups
+        is DefRow.Imported -> row.groups
+        is DefRow.SheetWord -> row.importedGroups
+        is DefRow.More, is DefRow.Sense -> emptyList()
+    }
+
+    /**
+     * Whether [new] draws a structured glossary that [old], the row it
+     * replaces under the same id, did not. Such a row cannot be patched: a
+     * patch draws with what feeding fetched, so the new glossary would stay
+     * flat text until the next row set. Compared row against row and never
+     * against what has been fetched, which stays empty when styling is off
+     * or a fetch failed and would make every patch a new row set.
+     */
+    private fun gainsStructured(old: DefRow, new: DefRow): Boolean {
+        val now = importedGroups(new)
+        val before = importedGroups(old)
+        if (now == before) return false
+        val had = before.flatMapTo(HashSet()) { g -> g.senses.mapNotNull { it.scRowid } }
+        return now.any { g -> g.senses.any { s -> s.scRowid?.let { it !in had } == true } }
     }
 
     /** The view is a focus stop only while a row offers something to act
@@ -291,14 +323,7 @@ internal class DefinitionDocument(
         lang: String,
         known: Map<Long, String>,
     ): Built {
-        val groups = chunk.flatMap {
-            when (it) {
-                is DefRow.Word -> it.data.importedGroups
-                is DefRow.Imported -> it.groups
-                is DefRow.SheetWord -> it.importedGroups
-                else -> emptyList()
-            }
-        }
+        val groups = chunk.flatMap(::importedGroups)
         // Null when there is nothing structured to draw, and when the store
         // fails: these rows then draw their dictionaries' flat text, which
         // every imported sense carries. A store failure costs the styling,

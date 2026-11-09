@@ -39,8 +39,9 @@ import java.io.File
  * are ignored; the view is 1 px only before its first layout; renderer
  * death is recovered once per content and the notice shows the second
  * time; a document with nothing to draw takes no shell; the view is a
- * focus stop only while a row offers something to act on; and a dictionary
- * store that fails costs a chunk its styling, never its rows.
+ * focus stop only while a row offers something to act on; a dictionary
+ * store that fails costs a chunk its styling, never its rows; and a row that
+ * gains dictionary content under its id is fed again, not patched.
  */
 @RunWith(RobolectricTestRunner::class)
 class DefinitionDocumentTest {
@@ -106,6 +107,17 @@ class DefinitionDocumentTest {
 
     /** The last script the document ran in the page. */
     private fun sent(): String = shadowOf(web).lastEvaluatedJavascript.orEmpty()
+
+    /** Waits for the page to be sent a script that [arrived] accepts. A row
+     *  holding dictionary content asks the store on the store's own thread,
+     *  so its chunk is not sent within the step that set it. */
+    private fun awaitSent(arrived: (String) -> Boolean) {
+        for (i in 0 until 300) {
+            idle()
+            if (arrived(sent())) return
+            Thread.sleep(10)
+        }
+    }
 
     /** The page reports a layout of row set [gen]. */
     private fun layout(gen: Int, heightCssPx: Int, targets: String = "[]") {
@@ -302,18 +314,49 @@ class DefinitionDocumentTest {
             )
             doc.setRows(listOf(word), "ja")
             pageReady()
-            // The fetch runs on the store's own thread: wait for its answer.
-            for (i in 0 until 300) {
-                idle()
-                if (sent().startsWith("ptSet(")) break
-                Thread.sleep(10)
-            }
+            awaitSent { it.startsWith("ptSet(") }
             assertTrue("the row is sent: ${sent().take(80)}", sent().startsWith("ptSet("))
             assertTrue("with the sense's flat text", sent().contains("its flat gloss"))
         } finally {
             runBlocking { YomitanDataStore.resetForTest() }
             root.deleteRecursively()
         }
+    }
+
+    @Test fun `a row that gains dictionary content under its id is a new row set`() {
+        // Each sense kept a structured glossary under its rowid, which only
+        // feeding fetches.
+        fun word(vararg rowids: Long, speak: DefRow.Speak = DefRow.Speak.IDLE) = DefRow.Word(
+            "w",
+            WordDefinitionData(
+                word = "w", reading = null, senses = emptyList(), freqScore = 0, isCommon = false,
+                importedGroups = listOf(
+                    ImportedSenseGroup("Dict", rowids.map { ImportedSense("gloss $it", scRowid = it) }, dictId = "d1"),
+                ),
+            ),
+            speak = speak,
+        )
+        doc.setRows(listOf(word(1)), "ja")
+        pageReady()
+        awaitSent { it.startsWith("ptSet(") }
+        assertTrue(sent(), sent().startsWith("ptSet(") && sent().endsWith(",1)"))
+
+        // The same content with a spinner: a patch, as ever.
+        doc.setRows(listOf(word(1, speak = DefRow.Speak.LOADING)), "ja")
+        awaitSent { it.startsWith("ptReplace(") }
+        assertTrue(sent(), sent().startsWith("ptReplace("))
+
+        // A second glossary under the same id: nothing has fetched it, so
+        // the rows are fed again.
+        doc.setRows(listOf(word(1, 2)), "ja")
+        awaitSent { it.startsWith("ptSet(") }
+        assertTrue("a new row set: ${sent().take(60)}", sent().startsWith("ptSet(") && sent().endsWith(",2)"))
+        assertTrue(sent().contains("gloss 2"))
+
+        // Losing one needs no fetch: a patch.
+        doc.setRows(listOf(word(2)), "ja")
+        awaitSent { it.startsWith("ptReplace(") }
+        assertTrue(sent(), sent().startsWith("ptReplace(") && sent().endsWith(",2)"))
     }
 
     @Test fun `release drops the view and a later rebind starts over`() {
