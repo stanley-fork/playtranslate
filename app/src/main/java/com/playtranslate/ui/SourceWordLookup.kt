@@ -36,7 +36,7 @@ object SourceWordLookup {
     /** A resolved word, ready to feed a [MagnifierLens] via [WordDefinitionData]. */
     data class Resolved(
         val word: String,
-        /** Reading as resolved by headwordDisplay (raw; for the speak chip / Anki).
+        /** Reading as resolved by headwordDisplay (raw; for the row's Speak / Anki).
          *  The lens data already drops it when equal to [word]. */
         val reading: String?,
         /** The tapped token's own text (飲んでいなかった for the lemma 飲む),
@@ -60,10 +60,6 @@ object SourceWordLookup {
          *  rows flatten across them (POS-split packs), so an Anki card built
          *  from this resolution must span them too. */
         val entries: List<DictionaryEntry> = listOfNotNull(entry),
-        /** The line the lens draws above this unit's section header
-         *  ([LensSection.caption]): "Also matches" on an alternative, null
-         *  on every other resolution. */
-        val caption: String? = null,
     )
 
     /** One tappable unit of the displayed source text: its char [range], the
@@ -249,8 +245,7 @@ object SourceWordLookup {
      * ([com.playtranslate.language.SourceLanguageEngine.alternativesOf])
      * theirs. With no containing phrase, the alternatives follow the
      * members, one per entry as [collectSecondaryKeys] keeps them, each
-     * resolved under its own key on the tapped surface and captioned
-     * [R.string.lens_also_matches]. The sections whose definitions need no
+     * resolved under its own key on the tapped surface. The sections whose definitions need no
      * machine translation ([SecondaryKeys.eager]) resolve before this
      * returns; the rest ([SecondaryKeys.pending]) come back unresolved in
      * [ResolvedAt.pending], in section order, for [resolvePending] when the
@@ -297,28 +292,27 @@ object SourceWordLookup {
         // in order, so its resolutions fill the non-null slots in turn.
         val eager = resolveKeys(appCtx, keys.eager).iterator()
         val resolved = keys.all.map { if (it.needsMt) null else eager.next() }
-        return assemble(word, keys.all, resolved, appCtx.getString(R.string.lens_also_matches))
+        return assemble(word, keys.all, resolved)
     }
 
     /** [word]'s lens result from its secondary [keys] and their [resolved]
      *  sections, index-parallel, a null slot being a key not resolved yet:
      *  a [SecondaryKind.PHRASE] key's section is the [ResolvedAt.phrase],
      *  the members and the alternatives keep [keys]' order
-     *  ([sectionsByKind]), and each alternative carries [caption]. The
+     *  ([sectionsByKind]). The
      *  result keeps [keys] and holds the null slots' keys, in order, as
      *  [ResolvedAt.pending]. */
     internal fun assemble(
         word: Resolved,
         keys: List<SecondaryKey>,
         resolved: List<Resolved?>,
-        caption: String,
     ): ResolvedAt {
         val sections = sectionsByKind(keys, resolved)
         return ResolvedAt(
             word = word,
             phrase = sections.phrase,
             members = sections.members,
-            alternatives = sections.alternatives.map { it.copy(caption = caption) },
+            alternatives = sections.alternatives,
             keys = keys,
             pending = keys.filterIndexed { i, _ -> resolved[i] == null },
         )
@@ -351,18 +345,16 @@ object SourceWordLookup {
      *  after the load as it would have with nothing held back. Nothing is
      *  left pending. */
     suspend fun resolvePending(appCtx: Context, at: ResolvedAt): ResolvedAt =
-        mergeLoaded(at, resolveKeys(appCtx, at.pending), appCtx.getString(R.string.lens_also_matches))
+        mergeLoaded(at, resolveKeys(appCtx, at.pending))
 
     /** [at] with [loaded], index-parallel to its [ResolvedAt.pending], placed
      *  among its sections by [ResolvedAt.keys] ([placeLoaded]): a held-back
      *  member lands before the members whose keys follow it, an alternative
-     *  likewise, and every alternative carries [caption]. Nothing is left
-     *  pending. */
-    internal fun mergeLoaded(at: ResolvedAt, loaded: List<Resolved>, caption: String): ResolvedAt =
+     *  likewise. Nothing is left pending. */
+    internal fun mergeLoaded(at: ResolvedAt, loaded: List<Resolved>): ResolvedAt =
         assemble(
             at.word, at.keys,
             placeLoaded(at.keys, Sections(at.phrase, at.members, at.alternatives), at.pending, loaded),
-            caption,
         )
 
     /** Resolve [lookupForm] (+ optional disambiguating [reading]) into lens data,
@@ -460,12 +452,7 @@ object SourceWordLookup {
         } else {
             emptyList()
         }
-        // Styled-path payload rides the same suspend resolution, so the lens
-        // bind stays synchronous. Null = flat tier (the common case).
         val importedGroups = entry?.importedSenses.orEmpty()
-        val styled = fetchYomitanStyledData(
-            appCtx, prefs.sourceLangId.yomitanConsumingLang(), importedGroups,
-        )
         val inflectedForms = surface?.let {
             InflectionChain.lines(
                 it, defResult?.response?.deinflection.orEmpty(), tokenTags,
@@ -490,7 +477,9 @@ object SourceWordLookup {
                 pitch = popupPitch,
                 frequencies = popupFrequencies,
                 importedGroups = importedGroups,
-                styled = styled,
+                // The lens's document fetches the groups' structured
+                // content under the language this lookup ran in.
+                definitionLang = prefs.sourceLangId.yomitanConsumingLang(),
                 inflectedForms = inflectedForms,
             ),
             entry = entry,

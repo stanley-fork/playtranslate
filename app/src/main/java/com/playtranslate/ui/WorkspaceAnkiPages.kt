@@ -54,9 +54,11 @@ import kotlinx.coroutines.launch
  * runtime request).
  */
 
-/** Every clickable, visible view under [root] as a controller target,
- *  excluding styled-definition WebViews (a dead A-press). [holdFor] marks
- *  hold-capable targets (long-press semantics via [ConfirmKeyPress]). */
+/** Every clickable, visible view under [root] as a controller target, and
+ *  the rows and buttons of every definitions document under it
+ *  ([DefinitionDocumentView.navActions]: the document's view is one view
+ *  holding many targets). [holdFor] marks hold-capable targets (long-press
+ *  semantics via [ConfirmKeyPress]). */
 internal fun collectWorkspaceNavActions(
     root: View?,
     holdFor: (View) -> Boolean = { false },
@@ -64,7 +66,10 @@ internal fun collectWorkspaceNavActions(
     root ?: return emptyList()
     val out = ArrayList<NavAction>()
     fun walk(v: View) {
-        if (v is YomitanDefinitionsView) return
+        if (v is DefinitionDocumentView) {
+            if (v.isShown) out.addAll(v.navActions())
+            return
+        }
         if (v.isClickable && v.isShown) out.add(NavAction(v, holdActivates = holdFor(v)))
         if (v is ViewGroup) {
             for (i in 0 until v.childCount) walk(v.getChildAt(i))

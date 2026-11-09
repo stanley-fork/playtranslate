@@ -26,7 +26,7 @@ import kotlinx.coroutines.launch
  * driving the lookup page's shared [TranslationResultViewModel] through
  * the shared [SentenceTranslationFlow]. What this shell supplies is only
  * what the workspace knows: the lens lives in the workspace's overlay
- * window and its chips push onto this workspace ([WorkspaceRoute.PushInto]);
+ * window and its rows' actions push onto this workspace ([WorkspaceRoute.PushInto]);
  * a word tap pushes a nested word page whose Anki card reads this page's
  * live sentence state; the sentence Anki entries are the shared over-game
  * ones ([presentSentenceAnkiReview] / [launchSentenceOneTap]); the
@@ -158,9 +158,9 @@ class WorkspaceSentencePage(
 
         override suspend fun awaitEnterSettled() = host.awaitEnterSettled()
 
-        /** The lens's chips through the shared router, pushing onto this
-         *  workspace: the open chevron (and secondary sections) push a nested
-         *  word page, the Anki chip pushes the word editor. */
+        /** The lens's actions through the shared router, pushing onto this
+         *  workspace: a row's open pushes a nested word page, its Anki
+         *  button pushes the word editor. */
         override fun wireLensActions(lens: MagnifierLens, resolved: SourceWordLookup.ResolvedAt) {
             val unit = resolved.word
             val secondaries = resolved.secondaries()

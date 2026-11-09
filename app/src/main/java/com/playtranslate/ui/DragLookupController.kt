@@ -10,7 +10,6 @@ import android.os.Handler
 import android.os.Looper
 import android.util.Log
 import android.util.TypedValue
-import com.playtranslate.AnkiManager
 import com.playtranslate.CaptureService
 import com.playtranslate.R
 import com.playtranslate.displaySizePx
@@ -96,8 +95,8 @@ class DragLookupController(
     private var ocrLines: List<OcrManager.OcrLine>? = null
     private var ocrJob: Job? = null
     private var lookupJob: Job? = null
-    /** Wires the lens Speak chip to the TTS engine. Created in [init]. */
-    private var speakChip: LensSpeakChip? = null
+    /** Wires the lens's rows' Speak buttons to the TTS engine. Created in [init]. */
+    private var speech: LensSpeech? = null
     private var lastWord: String? = null
     /** The text [lastWord] was dragged on (the matched token's surface),
      *  handed to the detail page for its conjugation line. */
@@ -114,7 +113,7 @@ class DragLookupController(
      *  popup's sense rows. */
     private var currentEntries: List<DictionaryEntry> = emptyList()
     /** Reading shown in the lens for [lastWord] — the occurrence reading
-     *  (明日 → あす), stored so the Speak chip pronounces what's displayed
+     *  (明日 → あす), stored so its row's Speak button pronounces what's displayed
      *  rather than re-deriving the entry's primary headword reading (あした). */
     private var lastReading: String? = null
     /** Path to the screenshot captured at drag start. */
@@ -141,19 +140,17 @@ class DragLookupController(
     private var currentSecondaryPopups: List<PopupData> = emptyList()
 
     // The sticky lens's body state, read by [publishCurrent]: set by the
-    // release lookup in [onDragEnd], updated by its deck badge fill and by
-    // [loadSecondaries], cleared by [clearSecondaryLoad] on a new drag, a
-    // dismiss and the lens's own dismissal.
+    // release lookup in [onDragEnd], updated by [loadSecondaries], cleared
+    // by [clearSecondaryLoad] on a new drag, a dismiss and the lens's own
+    // dismissal.
     /** The resolution the sticky lens shows; [loadSecondaries] replaces it
      *  with the filled one. */
     private var currentResolution: LookupResolution? = null
-    /** The primary's Anki decks once the badge fill found any. */
-    private var currentAnkiDecks: List<String> = emptyList()
     /** True while [loadSecondaries] resolves the pending sections. */
     private var secondaryLoading = false
     private var secondaryLoadJob: Job? = null
 
-    /** Open-detail + Anki chip actions, shared with the capture overlay. Reads
+    /** Open-detail + Anki button actions, shared with the capture overlay. Reads
      *  this controller's live word/entry/sentence/screenshot at tap time. */
     private val lensActions = SourceLensActions(
         context, displayId, overlayHost, magnifier,
@@ -271,25 +268,22 @@ class DragLookupController(
         // "Lens-Replaces-Popup"). The popup constructor parameter stays
         // for non-drag consumers (TranslationResultFragment) and as a
         // context fallback below; drag-flow callbacks live on the lens.
-        // The lens's open-detail tap + Anki chip taps are wired by
+        // The lens's open-detail tap + its rows' Anki buttons are wired by
         // [lensActions] (shared with the capture overlay).
-        // Speak chip → pronounce the looked-up headword via the system TTS
-        // engine. LensSpeakChip installs the lens's onSpeakTap handler and
-        // owns the speak coroutine + alert routing.
-        speakChip = LensSpeakChip(
+        // A row's Speak button pronounces that row's headword: the
+        // looked-up word's, or a related unit's by its index.
+        speech = LensSpeech(
             magnifier,
-            scope,
             ttsAlertTarget
                 ?: TtsAlertTarget.Overlay(magnifier.rawCtx, overlayHost, magnifier.wm, displayId),
-        ) {
-            lastWord?.let { word ->
-                LensSpeakChip.Request(
-                    word,
-                    Prefs(popup.ctx).sourceLangId,
-                    // Speak the displayed kana reading (JA) so audio matches the
-                    // lens — the resolved occurrence reading, not the primary.
-                    reading = lastReading,
-                )
+        ) { secondary ->
+            val lang = Prefs(popup.ctx).sourceLangId
+            if (secondary == null) {
+                // Speak the displayed kana reading (JA) so audio matches the
+                // lens — the resolved occurrence reading, not the primary.
+                lastWord?.let { word -> SpeakRequest(word, lang, reading = lastReading) }
+            } else {
+                currentSecondaryPopups.getOrNull(secondary)?.let { SpeakRequest(it.word, lang, reading = it.reading) }
             }
         }
         // Lens dismissal post-drag fires [onSettled] so the service can
@@ -581,21 +575,10 @@ class DragLookupController(
      * popup is committed at release ([onDragEnd]).
      */
     fun onDragStart(existingScreenshotPath: String? = null) {
-        // Pre-pay the styled renderer's startup while the user is still
-        // dragging toward a word: the once-per-process provider init
-        // (warmUp) AND this window's shell-page load (prewarm) — a bind
-        // against a loaded shell is what lets the lens reveal styled
-        // directly instead of flashing flat-then-styled. Gated on styling
-        // actually being live.
-        scope.launch {
-            if (YomitanDataStore.stylingFor(
-                    context, Prefs(context).sourceLangId.yomitanConsumingLang(),
-                ).stylingActive
-            ) {
-                YomitanDefinitionsView.warmUp(context)
-                magnifier.prewarmStyledRenderer()
-            }
-        }
+        // A drag is a lookup under way: load the lens's definitions page
+        // while the user moves toward a word, so the first definition does
+        // not wait for it.
+        magnifier.prepareDefinitions()
         // Tear down everything left over from the previous drag. Previous
         // drag's lift-time lookupJob may still be in flight; cancel it so it
         // doesn't transition the lens after this drag has started. Hand the
@@ -856,7 +839,7 @@ class DragLookupController(
             dwellScheduled = false
             // Definitions panel was visible if dwell already fired; revert
             // the lens to ZOOM mode for the new anchor.
-            magnifier.setDefinitions(null, null)
+            magnifier.setDefinitions(null)
             dwellAnchorX = lastX
             dwellAnchorY = lastY
             dwellAnchorToken = currentHit
@@ -1093,9 +1076,10 @@ class DragLookupController(
      * sentence recorded in Text History and, with [sendsLineToApp], sent to
      * the app's page on dual-screen), then in one main-thread step [place],
      * which puts the lens where it will show (false: nowhere, and the
-     * session ends), the bind and the promotion to sticky; last the
-     * "already in Anki" deck badge. The drag's release and the tap on a
-     * word's box ([lookUpWord]) share it.
+     * session ends), the bind and the promotion to sticky. (The "already in
+     * Anki" deck pill is the lens's own list's to fill, after the rows are
+     * up.) The drag's release and the tap on a word's box ([lookUpWord])
+     * share it.
      */
     private suspend fun presentResolution(
         resolved: LookupResolution,
@@ -1119,7 +1103,6 @@ class DragLookupController(
         // The sticky lens's body state; its pending sections wait
         // behind the "Load more" row for [loadSecondaries].
         currentResolution = resolved
-        currentAnkiDecks = emptyList()
         secondaryLoading = false
         var sentenceToRecord: String? = null
         currentSentence?.let { sent ->
@@ -1149,32 +1132,6 @@ class DragLookupController(
             interactive
         }
         if (!shown) return
-        // Fill the "already in Anki" deck badge AFTER the definitions
-        // are up, so the Anki query never delays them. Runs in this
-        // lookupJob (a new lookup cancels it) and is isolated so an
-        // Anki failure can't dismiss an already-shown lens. The
-        // badge joins the lens's current state, so it keeps any
-        // sections a load added meanwhile (a load keeps the
-        // word, hence the word identity); a lens dismissed meanwhile
-        // has cleared that state and takes nothing.
-        try {
-            val anki = AnkiManager(context)
-            if (anki.isAnkiDroidInstalled() && anki.hasPermission()) {
-                val decks = withContext(Dispatchers.IO) {
-                    anki.decksByWord(listOf(popupData.word))[popupData.word].orEmpty()
-                }
-                if (decks.isNotEmpty()) withContext(Dispatchers.Main) {
-                    if (currentResolution?.word === popupData) {
-                        currentAnkiDecks = decks
-                        publishCurrent(LensScroll.Keep)
-                    }
-                }
-            }
-        } catch (e: CancellationException) {
-            throw e
-        } catch (e: Exception) {
-            Log.w(TAG, "Lens deck badge fill failed: ${e.message}")
-        }
     }
 
     /**
@@ -1217,7 +1174,7 @@ class DragLookupController(
     ) {
         lookupJob?.cancel()
         clearSecondaryLoad()
-        speakChip?.release()
+        speech?.release()
         dragInProgress = false
         lensRevealed = false
         ocrLines = lines
@@ -1300,7 +1257,7 @@ class DragLookupController(
         clearSecondaryLoad()
         // Cancel a pending speak and stop any in-progress speech when
         // the lens goes away.
-        speakChip?.release()
+        speech?.release()
         if (!dragInProgress) {
             sessionGeometry = null
             onSettled?.invoke()
@@ -1624,14 +1581,12 @@ class DragLookupController(
                 pitch = display.pitch,
                 frequencies = display.frequencies,
                 importedGroups = entry.importedSenses,
-                styled = fetchYomitanStyledData(
-                    context, prefs.sourceLangId.yomitanConsumingLang(), entry.importedSenses,
-                ),
+                definitionLang = prefs.sourceLangId.yomitanConsumingLang(),
             )
         } else {
             // No dictionary entry. Keep the lens up with an empty sense
-            // list — the lens's WordDefinitionsView renders its
-            // "No definitions found." placeholder. (The genuine "no token
+            // list: the lens's row draws its "No definitions found."
+            // placeholder. (The genuine "no token
             // under the finger" cases already returned null above.)
             PopupData(
                 word = lookupForm,
@@ -1682,11 +1637,7 @@ class DragLookupController(
             engine, resolver, entries, popupData.word, phraseKey, memberSpans, alternativeSpans,
         )
 
-        // The "already in Anki" deck badge is filled in AFTER the definitions
-        // render (see onDragEnd), so the dictionary lookup is never delayed by
-        // the Anki content-provider query.
-        val caption = context.getString(R.string.lens_also_matches)
-        val slots = keys.all.map { if (it.needsMt) null else popupFor(it, resolver, prefs.targetLang, caption) }
+        val slots = keys.all.map { if (it.needsMt) null else popupFor(it, resolver, prefs.targetLang) }
         return LookupResolution(word = popupData, phrase = null).withSections(keys.all, slots, pending = keys.pending)
     }
 
@@ -1727,12 +1678,11 @@ class DragLookupController(
     /** [key]'s section, resolved on the response it carries: a phrase under
      *  its own key; a member under its span, its surface picking the
      *  displayed headword; an alternative under its key with the dragged
-     *  surface, its chain to that surface and [caption]. */
+     *  surface and its chain to that surface. */
     private suspend fun popupFor(
         key: SecondaryKey,
         resolver: DefinitionResolver,
         targetLang: String,
-        caption: String,
     ): PopupData? {
         val span = key.span
         return when (key.kind) {
@@ -1744,7 +1694,7 @@ class DragLookupController(
             )
             SecondaryKind.ALTERNATIVE -> relatedPopupData(
                 resolver, targetLang, span.lookupForm, span.lookupForm, span.reading,
-                foundAs = span.surface, foundTags = span.inflections, caption = caption, response = key.response,
+                foundAs = span.surface, foundTags = span.inflections, response = key.response,
             )
         }
     }
@@ -1756,8 +1706,7 @@ class DragLookupController(
      *  null when [response] has no entry. [surface] picks the displayed
      *  headword. An alternative passes [foundAs], the dragged surface it is
      *  offered for, and [foundTags], its chain from [lookupForm] to that
-     *  surface: they become its surface and its conjugation line.
-     *  [caption] is the section's [LensSection.caption]. */
+     *  surface: they become its surface and its conjugation line. */
     private suspend fun relatedPopupData(
         resolver: DefinitionResolver,
         targetLang: String,
@@ -1766,7 +1715,6 @@ class DragLookupController(
         readingHint: String?,
         foundAs: String? = null,
         foundTags: List<InflectionTag> = emptyList(),
-        caption: String? = null,
         response: DictionaryResponse,
     ): PopupData? {
         val result = withContext(Dispatchers.IO) { resolver.resolve(response, lookupForm, readingHint) }
@@ -1800,10 +1748,7 @@ class DragLookupController(
             pitch = display.pitch,
             frequencies = display.frequencies,
             importedGroups = entry.importedSenses,
-            styled = fetchYomitanStyledData(
-                context, Prefs(context).sourceLangId.yomitanConsumingLang(), entry.importedSenses,
-            ),
-            caption = caption,
+            definitionLang = Prefs(context).sourceLangId.yomitanConsumingLang(),
         )
     }
 
@@ -1843,46 +1788,42 @@ class DragLookupController(
      *  Latin scripts; member words and then alternative entries below the
      *  word on JA; last, a "Load more (n)" row counting the pending ones,
      *  in its loading state while [loadMoreLoading]), the single-unit body
-     *  otherwise. [ankiDecks] rides the PRIMARY section. The sticky lens
-     *  binds only through [publishCurrent] (the release, the deck badge
-     *  fill, a finished load), so none of them can drop what another
-     *  added; the dwell preview binds here directly, with the default
+     *  otherwise. A row offers Add to Anki when its unit has an entry to
+     *  make a card from. The sticky lens binds only through
+     *  [publishCurrent] (the release, a finished load), so neither can drop
+     *  what the other added; the dwell preview binds here directly, with the default
      *  [scroll], its row untappable until the release makes the lens
      *  interactive. [scroll] places the split body's viewport
      *  ([LensScroll]); the single-unit body takes no policy and binds at
      *  its top. */
     private fun publishLensDefinitions(
         res: LookupResolution,
-        ankiDecks: List<String> = emptyList(),
         loadMoreLoading: Boolean = false,
         scroll: LensScroll = LensScroll.Top,
     ) {
-        val wordData = res.word.toLensData()
-            .let { if (ankiDecks.isEmpty()) it else it.copy(ankiDecks = ankiDecks) }
-        val wordLabel = res.word.machineTranslatedLabel()
+        fun section(p: PopupData) =
+            LensSection(p.toLensData(), p.machineTranslatedLabel(), opens = true, anki = p.entry != null)
         val secondaries = res.secondaries()
         val loadMore = res.pending.takeIf { it.isNotEmpty() }?.let { LensLoadMore(it.size, loadMoreLoading) }
         if (secondaries.isNotEmpty() || loadMore != null) {
             magnifier.setSplitDefinitions(
-                LensSection(wordData, wordLabel, opens = true),
-                secondaries.map {
-                    LensSection(it.toLensData(), it.machineTranslatedLabel(), opens = true, caption = it.caption)
-                },
+                section(res.word),
+                secondaries.map(::section),
                 secondariesOnTop = res.phrase != null,
                 loadMore = loadMore,
                 scroll = scroll,
             )
         } else {
-            magnifier.setDefinitions(wordData, wordLabel)
+            magnifier.setDefinitions(section(res.word))
         }
     }
 
     /** Bind the sticky lens's body from its state fields, its viewport
-     *  placed by [scroll]: Top for the release, Keep for the deck badge
-     *  fill, a Reveal of the first loaded section for [loadSecondaries].
-     *  No-op without a [currentResolution]. */
+     *  placed by [scroll]: Top for the release, a Reveal of the first
+     *  loaded section for [loadSecondaries]. No-op without a
+     *  [currentResolution]. */
     private fun publishCurrent(scroll: LensScroll) {
-        currentResolution?.let { publishLensDefinitions(it, currentAnkiDecks, secondaryLoading, scroll) }
+        currentResolution?.let { publishLensDefinitions(it, secondaryLoading, scroll) }
     }
 
     /** Resolves the sections held back behind the "Load more" row for the
@@ -1907,8 +1848,7 @@ class DragLookupController(
                 val prefs = Prefs(context)
                 val engine = SourceLanguageEngines.get(context, prefs.sourceLangId)
                 val resolver = newResolver(engine, prefs)
-                val caption = context.getString(R.string.lens_also_matches)
-                val loaded = res.pending.map { popupFor(it, resolver, prefs.targetLang, caption) }
+                val loaded = res.pending.map { popupFor(it, resolver, prefs.targetLang) }
                 val slots = placeLoaded(
                     res.keys, Sections(res.phrase, res.members, res.alternatives), res.pending, loaded,
                 )
@@ -1944,7 +1884,6 @@ class DragLookupController(
         secondaryLoadJob?.cancel()
         secondaryLoadJob = null
         currentResolution = null
-        currentAnkiDecks = emptyList()
         secondaryLoading = false
     }
 
@@ -1964,7 +1903,7 @@ class DragLookupController(
             pitch = pitch,
             frequencies = frequencies,
             importedGroups = importedGroups,
-            styled = styled,
+            definitionLang = definitionLang,
             inflectedForms = inflectedForms,
         )
 
@@ -2002,13 +1941,11 @@ class DragLookupController(
         val pitch: List<Int> = emptyList(),
         /** Per-dictionary frequency chips from the displayed headword. */
         val frequencies: List<FrequencyTag> = emptyList(),
-        /** Structured imported groups + prefetched styled payload — see
-         *  [WordDefinitionData.importedGroups]/[WordDefinitionData.styled]. */
+        /** The imported groups and the language they were looked up
+         *  under: see [WordDefinitionData.importedGroups] and
+         *  [WordDefinitionData.definitionLang]. */
         val importedGroups: List<com.playtranslate.model.ImportedSenseGroup> = emptyList(),
-        val styled: YomitanStyledData? = null,
-        /** The section's [LensSection.caption]: "Also matches" on an
-         *  alternative, null otherwise. */
-        val caption: String? = null,
+        val definitionLang: String = "",
     )
 
     private fun findLineAt(x: Int, y: Int, lines: List<OcrManager.OcrLine>): OcrManager.OcrLine? {

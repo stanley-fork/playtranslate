@@ -20,16 +20,13 @@ import com.playtranslate.AnkiManager
 import com.playtranslate.R
 import com.playtranslate.language.ChineseScriptVariant
 import com.playtranslate.language.SourceLangId
-import com.playtranslate.themeColor
-import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
-import kotlinx.coroutines.withContext
 import java.util.Locale
 
 /**
  * Standalone dictionary-lookup screen: type or paste source-language text and
- * get live word results. Reuses the translation-result [WordResultCell] and
- * its tap / speak / Anki actions, driven by [DictionaryLookupViewModel] (which
+ * get live word results. The results are a [WordRowList], the row the
+ * translation result's Words card draws, with its tap / speak / Anki actions, driven by [DictionaryLookupViewModel] (which
  * auto-selects prefix-completion vs. sentence-segmentation per query).
  *
  * Reached from Settings → Debug for now (debug builds only). Subclasses
@@ -48,12 +45,11 @@ class DictionaryLookupActivity : SettingsSubPageActivity() {
     private lateinit var countView: TextView
     private lateinit var loadingView: View
 
-    /** Per-word cells for in-place Anki-badge updates, mirroring the
-     *  translation-result fragment. */
-    private var cellsByWord: Map<String, List<WordResultCell>> = emptyMap()
-    private val ankiDecksByWord = HashMap<String, List<String>>()
+    /** The results: one definitions document, with the deck badges and each
+     *  row's speak spinner. */
+    private lateinit var list: WordRowList<RowState>
 
-    /** Identity guard so a repeated row list doesn't rebuild identical cells. */
+    /** Identity guard so a repeated row list isn't drawn again. */
     private var lastRenderedRows: List<RowState>? = null
 
     override fun onContentCreated(savedInstanceState: Bundle?) {
@@ -61,6 +57,24 @@ class DictionaryLookupActivity : SettingsSubPageActivity() {
         resultsCard = findViewById(R.id.cardResults)
         countView = findViewById(R.id.tvCount)
         loadingView = findViewById(R.id.pbLoading)
+        list = wordRowList(
+            this, resultsContainer, lifecycleScope,
+            object : WordRowList.Host<RowState> {
+                override val isAlive: Boolean get() = !isDestroyed
+                override val deckBadges: Boolean get() = true
+
+                // Dictionary results never stub or hide: the user searched
+                // for this word on purpose. The second button adds it to Anki.
+                override fun trailing(row: RowState): DefRow.Trailing = DefRow.Trailing.ANKI
+                override fun onOpen(row: RowState) = openWordDetail(row)
+                override fun onTrailing(row: RowState, shown: DefRow.Trailing) = launchAnki(row)
+                override suspend fun speak(row: RowState) = speakWord(
+                    TtsAlertTarget.InActivity(this@DictionaryLookupActivity),
+                    SpeakRequest(row.displayWord, prefs.sourceLangId, reading = row.reading.ifEmpty { null }),
+                )
+            },
+            WordRowList.LARGE_SCALE,
+        )
 
         findViewById<TextView>(R.id.tvLangPair).text = languagePairLabel()
 
@@ -88,7 +102,12 @@ class DictionaryLookupActivity : SettingsSubPageActivity() {
         super.onResume()
         // Deck membership can change while away (added here or in AnkiDroid);
         // re-evaluate so badges aren't stuck on a stale pre-add state.
-        refreshBadges()
+        list.refreshDeckBadges()
+    }
+
+    override fun onDestroy() {
+        list.release()
+        super.onDestroy()
     }
 
     // ── Rendering ─────────────────────────────────────────────────────────
@@ -117,45 +136,9 @@ class DictionaryLookupActivity : SettingsSubPageActivity() {
         if (rows === lastRenderedRows) return
         lastRenderedRows = rows
 
-        resultsContainer.removeAllViews()
-        if (rows.isEmpty()) {
-            cellsByWord = emptyMap()
-            return
-        }
-        val byWord = HashMap<String, MutableList<WordResultCell>>()
-        rows.forEachIndexed { idx, rowState ->
-            if (idx > 0) resultsContainer.addView(inflateDivider())
-            val cell = WordResultCell(this)
-            bindCell(cell, rowState)
-            resultsContainer.addView(cell)
-            byWord.getOrPut(rowState.displayWord) { mutableListOf() }.add(cell)
-        }
-        cellsByWord = byWord
-        loadDeckBadges(rows.map { it.displayWord }, byWord)
-    }
-
-    private fun bindCell(cell: WordResultCell, rowState: RowState) {
-        val data = WordDefinitionData(
-            word = rowState.displayWord,
-            reading = rowState.reading.ifEmpty { null },
-            senses = rowState.senses,
-            freqScore = rowState.freqScore,
-            isCommon = rowState.isCommon,
-            ankiDecks = ankiDecksByWord[rowState.displayWord].orEmpty(),
-            pitch = rowState.pitch,
-            frequencies = rowState.frequencies,
-            readingRows = rowState.readingRows,
-            inflectedForms = rowState.inflectedForms,
-        )
-        cell.bind(
-            data = data,
-            scale = WordResultCell.DEFAULT_SCALE,
-            onCellTap = { openWordDetail(rowState) },
-            onSpeak = { speakFromCell(cell, rowState) },
-            // Dictionary results never stub or hide: the user searched for
-            // this word on purpose.
-            trailing = WordResultCell.TrailingAction.Anki { launchAnki(rowState) },
-        )
+        // Under the language the query was looked up in: the list fetches
+        // each row's dictionary content with it. No rows lets the page go.
+        list.setRows(rows, prefs.sourceLangId.yomitanConsumingLang())
     }
 
     private fun openWordDetail(rowState: RowState) {
@@ -175,28 +158,6 @@ class DictionaryLookupActivity : SettingsSubPageActivity() {
             lookupForm = rowState.lookupForm,
             lookupReading = rowState.lookupReading,
         ).show(supportFragmentManager, WordDetailBottomSheet.TAG)
-    }
-
-    /** Speak a cell's word, driving that cell's own spinner. Each cell owns
-     *  its in-flight [WordResultCell.speakJob] so concurrent taps on different
-     *  rows don't clobber one another. */
-    private fun speakFromCell(cell: WordResultCell, rowState: RowState) {
-        if (cell.speakJob?.isActive == true) return
-        cell.speakJob = lifecycleScope.launch {
-            cell.setSpeakLoading(true)
-            try {
-                speakWord(
-                    TtsAlertTarget.InActivity(this@DictionaryLookupActivity),
-                    LensSpeakChip.Request(
-                        rowState.displayWord,
-                        prefs.sourceLangId,
-                        reading = rowState.reading.ifEmpty { null },
-                    ),
-                )
-            } finally {
-                cell.setSpeakLoading(false)
-            }
-        }
     }
 
     private fun launchAnki(rowState: RowState) {
@@ -222,56 +183,7 @@ class DictionaryLookupActivity : SettingsSubPageActivity() {
         startActivity(intent)
     }
 
-    // ── Anki deck badges ──────────────────────────────────────────────────
-
-    /** Batched "already in Anki" lookup; fills each matching cell's meta-row
-     *  deck pill. Gated + silent; mirrors the translation-result fragment. */
-    private fun loadDeckBadges(words: List<String>, cells: Map<String, List<WordResultCell>>) {
-        val anki = AnkiManager(this)
-        if (!anki.isAnkiDroidInstalled() || !anki.hasPermission()) return
-        val uncached = words.distinct().filter { it !in ankiDecksByWord }
-        if (uncached.isEmpty()) return
-        lifecycleScope.launch {
-            val result = withContext(Dispatchers.IO) { anki.decksByWord(uncached) }
-            for (w in uncached) {
-                val decks = result[w].orEmpty()
-                ankiDecksByWord[w] = decks
-                if (decks.isEmpty()) continue
-                cells[w]?.forEach { it.updateAnkiDecks(decks) }
-            }
-        }
-    }
-
-    private fun refreshBadges() {
-        val cells = cellsByWord
-        if (cells.isEmpty()) return
-        val anki = AnkiManager(this)
-        if (!anki.isAnkiDroidInstalled() || !anki.hasPermission()) {
-            cells.values.flatten().forEach { it.updateAnkiDecks(emptyList()) }
-            return
-        }
-        ankiDecksByWord.clear()
-        lifecycleScope.launch {
-            val result = withContext(Dispatchers.IO) { anki.decksByWord(cells.keys.toList()) }
-            for ((word, list) in cells) {
-                val decks = result[word].orEmpty()
-                ankiDecksByWord[word] = decks
-                list.forEach { it.updateAnkiDecks(decks) }
-            }
-        }
-    }
-
     // ── Helpers ───────────────────────────────────────────────────────────
-
-    private fun inflateDivider(): View {
-        val dp1 = resources.displayMetrics.density.toInt().coerceAtLeast(1)
-        return View(this).apply {
-            layoutParams = LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, dp1).apply {
-                marginStart = resources.getDimensionPixelSize(R.dimen.pt_row_h_padding)
-            }
-            setBackgroundColor(themeColor(R.attr.ptDivider))
-        }
-    }
 
     /** "Japanese → English"-style label, matching how Settings resolves the
      *  source/target display names (system locale). */

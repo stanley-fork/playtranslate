@@ -126,6 +126,8 @@ class TranslationResultContentTest {
     fun setUp() {
         clearPrefs()
         Prefs(app).hideTranslationSection = false
+        // A new install starts with the Words card collapsed; these tests are about a shown card.
+        Prefs(app).hideWordsSection = false
         controller = Robolectric.buildActivity(Host::class.java).setup()
         activity = controller.get()
         root = LayoutInflater.from(activity).inflate(R.layout.fragment_translation_result, null)
@@ -272,10 +274,7 @@ class TranslationResultContentTest {
         )
         idle()
         assertFalse("rows build after the enter-settle gate", content.wordRows.isEmpty)
-        val cell = (0 until content.wordRows.container.childCount)
-            .map { content.wordRows.container.getChildAt(it) }
-            .filterIsInstance<WordResultCell>().single()
-        cell.performClick()
+        content.wordRows.tapForTest(0, DefAction.OPEN)
         assertEquals(
             "the row's occurrence text rides with the word, for the detail header",
             listOf(Triple("食べる", "たべる", "食べた")), host.tappedWords,

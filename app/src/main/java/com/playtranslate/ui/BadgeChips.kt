@@ -13,9 +13,9 @@ import com.playtranslate.model.FrequencyTag
 import com.playtranslate.themeColor
 
 /**
- * Builders for the badge/meta-row chips shared by [WordDefinitionsView]
- * (the lens + result-cell meta row) and [WordDetailBottomSheet]'s header.
- * The two surfaces deliberately keep distinct looks — sizes, paddings, and
+ * Builders for the native badge chips of [WordDetailBottomSheet]'s header
+ * (a definitions document draws its own meta row: [styledMetaChips]).
+ * The surfaces deliberately keep distinct looks — sizes, paddings, and
  * star treatment differ by design — so each builder takes the surface's
  * style values rather than imposing one; what lives here is the chip
  * structure, so a chip added or changed in one surface can't silently

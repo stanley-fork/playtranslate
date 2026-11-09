@@ -57,7 +57,6 @@ class WordCardDefinitionTest {
     private fun styled(css: Map<String, String> = emptyMap()) = YomitanStyledData(
         structured = mapOf(7L to structuredCat),
         dictStyles = css,
-        sourceLanguage = "ja",
     )
 
     @Test
@@ -243,7 +242,6 @@ class WordCardDefinitionTest {
         val st = YomitanStyledData(
             structured = mapOf(7L to structuredCat, 8L to structuredCat),
             dictStyles = mapOf("d1" to "li{color:red}", "d2" to "li{color:blue}"),
-            sourceLanguage = "ja",
         )
 
         val html = def.panelHtml(classStyler, st, header, noMisc)

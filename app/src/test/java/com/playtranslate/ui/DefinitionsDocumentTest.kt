@@ -291,15 +291,17 @@ class DefinitionsDocumentTest {
     }
 
     @Test
-    fun `the shell reports a remove tap before the link check and spaces curated rows`() {
-        // Catches: the remove branch placed after the link check, the sibling rule deleted,
-        // and the flat row's margin reset deleted.
+    fun `the shell reports a tap by its data-act and spaces curated rows`() {
+        // Catches: the action report dropped, the sibling rule deleted, and
+        // the flat row's margin reset deleted.
         val shell = shell()
-        assertTrue(shell.contains("closest('.imp-x')"))
-        assertTrue(shell.contains("PTBridge.onRemoveImported"))
+        assertTrue(shell.contains("closest('[data-act]')"))
+        assertTrue(shell.contains("PTBridge.onAction(row.id, el.getAttribute('data-act'))"))
         assertTrue(shell.contains(".imp-sense + .imp-sense"))
         assertTrue(shell.contains(".imp-body > .def-row { margin: 0; }"))
-        assertTrue(shell.indexOf("onRemoveImported") < shell.indexOf("closest('a[href]')"))
+        // A link in a row that is not inert is the page's own to follow:
+        // the link check comes first and reports nothing.
+        assertTrue(shell.indexOf("closest('a[href]')") < shell.indexOf("closest('[data-act]')"))
     }
 
     @Test
@@ -349,23 +351,30 @@ class DefinitionsDocumentTest {
     }
 
     @Test
-    fun `shell carries csp, tokens, and the scope-enforcing script`() {
-        val shell = DefinitionsDocument.shellHtml(
-            DefinitionsDocument.Tokens(
-                text = 0xFFEFEFEF.toInt(),
-                textMuted = 0xFFA0A0A0.toInt(),
-                textHint = 0xFF606060.toInt(),
-                accent = 0xFF00BCD4.toInt(),
-                panel = 0xFF242424.toInt(),
-                baseFontSizePx = 14.5f,
-            ),
-        )
+    fun `shell carries csp and the scope-enforcing script, and its theme the tokens`() {
+        val shell = DefinitionsDocument.documentShellHtml()
         assertTrue(shell.contains("Content-Security-Policy"))
         assertTrue(shell.contains("default-src 'none'"))
         assertTrue(shell.contains("img-src https://pt-media.internal"))
-        assertTrue(shell.contains("--text-color: #EFEFEF"))
-        assertTrue(shell.contains("--background-color: #242424"))
-        assertTrue(shell.contains("font-size: 14.5px"))
+        // The theme arrives at bind, so one loaded shell fits any surface.
+        val theme = DefinitionsDocument.themeJs(
+            DefinitionsDocument.DocTheme(
+                DefinitionsDocument.Tokens(
+                    text = 0xFFEFEFEF.toInt(),
+                    textMuted = 0xFFA0A0A0.toInt(),
+                    textHint = 0xFF606060.toInt(),
+                    accent = 0xFF00BCD4.toInt(),
+                    panel = 0xFF242424.toInt(),
+                    baseFontSizePx = 14.5f,
+                ),
+                divider = 0, band = 0,
+            ),
+            rtl = false,
+        )
+        assertTrue(theme, theme.contains("\"--text-color\":\"#EFEFEF\""))
+        assertTrue(theme, theme.contains("\"--background-color\":\"#242424\""))
+        assertTrue(theme, theme.contains("fontPx:14.5"))
+        assertTrue(shell.contains("document.body.style.fontSize = t.fontPx + 'px'"))
         // The scope-escape sweep: every top-level rule other than the
         // wrapper is deleted post-parse.
         assertTrue(shell.contains("selectorText !== scope"))
@@ -387,19 +396,22 @@ class DefinitionsDocumentTest {
         assertFalse(shell.contains("adoptedStyleSheets"))
         assertFalse(shell.contains("new CSSStyleSheet"))
         assertTrue(shell.contains("createElement('style')"))
-        // Render-generation contract (stale-height race): ptSwap stamps the
-        // generation and every height report echoes it, so the Kotlin side
-        // can drop reports from superseded swaps. Both halves pinned here;
-        // the Kotlin gate is pinned in YomitanDefinitionsViewRenderSeqTest.
-        assertTrue(shell.contains("ptSwap = function (html, g)"))
-        assertTrue(shell.contains("gen = g || 0"))
+        // Render-generation contract (stale-height race): ptSet stamps the
+        // generation and every layout report echoes it, so the Kotlin side
+        // can drop reports from a superseded row set, and an append or a
+        // replace built for an older one does nothing. The Kotlin gate is
+        // pinned in DefinitionDocumentTest.
+        assertTrue(shell.contains("ptSet = function (html, g)"))
+        assertTrue(shell.contains("window.PTBridge.onLayout(gen,"))
+        assertEquals(2, Regex("if \\(g !== gen\\) return;").findAll(shell).count())
         // Height-metric contract (viewport-ratchet bug): the report must be
         // content-intrinsic (root rect), NEVER documentElement.scrollHeight
         // (= max(content, viewport), which can only ratchet up once the
         // host sizes the view from one oversized report), and must skip
         // zero-width layouts (content wrapped at every character).
         assertFalse(shell.contains("documentElement.scrollHeight"))
-        assertTrue(shell.contains("getBoundingClientRect().height"))
+        assertTrue(shell.contains("var base = r.getBoundingClientRect();"))
+        assertTrue(shell.contains("Math.ceil(base.height)"))
         assertTrue(shell.contains("clientWidth < 1"))
         assertTrue(shell.contains("#root { display: flow-root; }"))
         // The scope is per glossary, so consecutive structured senses' items
@@ -416,8 +428,8 @@ class DefinitionsDocumentTest {
 
     // ── Meta-chip colour contract ───────────────────────────────────────
     //
-    // This document is a SECOND implementation of the meta row that
-    // WordDefinitionsView draws natively, and the accent override is two
+    // This document was a SECOND implementation of the meta row a native
+    // view once drew, and the accent override is two
     // coupled decisions: the accent becomes the fill AND the label takes an
     // ink that reads on it. The port took only the first half, leaving
     // accent-tinted chips at the stylesheet's muted secondary colour —
@@ -507,11 +519,13 @@ class DefinitionsDocumentTest {
         // above it is never consulted. Chromium 109 (the Thor) has no
         // color-mix, so every meta chip lost its fill; the accent-tinted
         // ones survived only because their inline style is a plain colour.
-        val shell = shell()
-        // The CSS comment names it; what must not ship is the CALL.
-        assertFalse(shell.contains("color-mix("))
-        assertTrue(shell.contains("background: rgba(236,239,241,0.102)"))  // .meta-chip
-        assertTrue(shell.contains("background: rgba(0,188,212,0.161)"))    // .meta-chip.common
+        // The shell reads each fill from a variable the theme sets to a
+        // concrete colour, so the stylesheet never holds an engine feature.
+        // (The CSS comment names color-mix; what must not ship is the CALL.)
+        assertFalse(shell().contains("color-mix("))
+        assertFalse(theme().contains("color-mix("))
+        assertTrue(theme().contains("\"--pt-chip\":\"rgba(236,239,241,0.102)\""))    // .meta-chip
+        assertTrue(theme().contains("\"--pt-common\":\"rgba(0,188,212,0.161)\""))    // .meta-chip.common
     }
 
     @Test
@@ -531,7 +545,7 @@ class DefinitionsDocumentTest {
                     DefinitionsDocument.cssAlpha(0xFFECEFF1.toInt(), 0.10f),
                 )
                 assertEquals("in $locale", "#ECEFF1", DefinitionsDocument.cssHex(0xFFECEFF1.toInt()))
-                assertTrue("in $locale", shell().contains("background: rgba(236,239,241,0.102)"))
+                assertTrue("in $locale", theme().contains("rgba(236,239,241,0.102)"))
             }
         } finally {
             Locale.setDefault(original)
@@ -539,39 +553,29 @@ class DefinitionsDocumentTest {
     }
 
     @Test
-    fun `inflection lines render first, escaped, guillemets kept as text`() {
-        val html = DefinitionsDocument.contentHtml(
-            data(senses = listOf(SenseDisplay(listOf("verb"), "to drink", emptyList()))),
-            emptyMap(),
-            localizePos = { it.joinToString("/") },
-            metaChips = listOf(DefinitionsDocument.MetaChip("Common", DefinitionsDocument.MetaChip.Kind.COMMON)),
-            label = "warn",
-            inflectionLines = listOf("飲んでいなかった · -て « -いる « negative « -た", "a<b"),
-        )
-        assertTrue(
-            "the first block is the first conjugation line",
-            html.startsWith("<div class=\"inflection\">飲んでいなかった · -て « -いる « negative « -た</div>"),
-        )
-        assertTrue("every line is its own block, escaped", html.contains("<div class=\"inflection\">a&lt;b</div>"))
-        assertTrue(
-            "the lines precede the label and the meta row",
-            html.indexOf("class=\"inflection\"") < html.indexOf("class=\"label-warn\"") &&
-                html.indexOf("class=\"inflection\"") < html.indexOf("class=\"meta-row\""),
-        )
+    fun `the page reports a held press as its own action, and not also a tap`() {
+        // Catches: the hold report dropped, the tap not suppressed after it,
+        // and a hold that outlives a finger that moved or lost the gesture.
+        val shell = shell()
+        assertTrue(shell.contains("closest('[data-hold]')"))
+        assertTrue(shell.contains("el.getAttribute('data-act') + ':hold'"))
+        assertTrue(shell.contains("if (held) {"))
+        assertTrue(shell.contains("addEventListener('touchcancel', endHold"))
+        assertTrue(shell.contains("addEventListener('touchmove'"))
     }
 
     @Test
-    fun `no inflection lines, no inflection block`() {
-        val html = content(data(senses = listOf(SenseDisplay(listOf("verb"), "to drink", emptyList()))))
-        assertFalse(html.contains("class=\"inflection\""))
-    }
-
-    @Test
-    fun `the shell styles the inflection line muted with the chevron margin`() {
-        val css = shell().substringAfter(".inflection {").substringBefore("}")
-        assertTrue(css.contains("color: var(--pt-secondary)"))
-        assertTrue(css.contains("font-size: .8em"))
-        assertTrue(css.contains("margin: 0 17px .3em 0"))
+    fun `a row is drawn pressed only for a press of its own`() {
+        // Catches: the row lighting up behind its own button (an element is
+        // :active while anything inside it is), and the mark being dropped
+        // at the lift, where a quick tap's pressed look is still showing.
+        val shell = shell()
+        assertTrue(shell.contains(".cell[data-act]:active:not(.np), .row.cur { background: var(--pt-press); }"))
+        assertTrue(shell.contains("t.closest('[data-act]') === row && (!link || row.hasAttribute('data-inert'))"))
+        assertTrue(shell.contains("if (!own) { unpressed = row; row.classList.add('np'); }"))
+        // Cleared where the next touch begins, and nowhere else.
+        assertEquals(1, Regex("classList\\.remove\\('np'\\)").findAll(shell).count())
+        assertTrue(shell.contains("document.addEventListener('touchstart', function (e) {\n    if (unpressed) { unpressed.classList.remove('np'); unpressed = null; }"))
     }
 
     @Test
@@ -582,14 +586,38 @@ class DefinitionsDocumentTest {
         assertEquals("rgba(236,239,241,0.102)", DefinitionsDocument.cssAlpha(0x40ECEFF1, 0.10f))
     }
 
-    private fun shell() = DefinitionsDocument.shellHtml(
-        DefinitionsDocument.Tokens(
-            text = 0xFFECEFF1.toInt(),
-            textMuted = 0xFFA0A0A0.toInt(),
-            textHint = 0xFF606060.toInt(),
-            accent = 0xFF00BCD4.toInt(),
-            panel = 0xFF141719.toInt(),
-            baseFontSizePx = 14f,
+    @Test
+    fun `bold in a CJK language is the page's own stroke, never the engine's made-up weight`() {
+        // The system's CJK font has one weight: an engine asked for bold
+        // thickens the outline until a dense character closes up. Each
+        // element the page draws bold (a headword, a bolded reading, a
+        // sentence-sheet word) is the regular weight under a light stroke
+        // in the three languages that font serves.
+        val css = shell()
+        val rule = Regex("""([^{}]*)\{ font-weight: 400; -webkit-text-stroke: \.02em; }""").find(css)
+            ?: error("no drawn-weight rule")
+        val selectors = rule.groupValues[1].substringAfterLast("*/").split(',').map { it.trim() }.toSet()
+        val expected = listOf(".w", ".rd.b", ".sww").flatMap { el -> listOf("ja", "zh", "ko").map { "$el:lang($it)" } }.toSet()
+        assertEquals(expected, selectors)
+        // The elements still ask for bold where a real bold face exists.
+        assertTrue(css.contains(".w { font-size: 1.636em; font-weight: 700;"))
+    }
+
+    private fun shell() = DefinitionsDocument.documentShellHtml()
+
+    /** The `ptTheme` call a surface gives a loaded shell. */
+    private fun theme() = DefinitionsDocument.themeJs(
+        DefinitionsDocument.DocTheme(
+            DefinitionsDocument.Tokens(
+                text = 0xFFECEFF1.toInt(),
+                textMuted = 0xFFA0A0A0.toInt(),
+                textHint = 0xFF606060.toInt(),
+                accent = 0xFF00BCD4.toInt(),
+                panel = 0xFF141719.toInt(),
+                baseFontSizePx = 14f,
+            ),
+            divider = 0, band = 0,
         ),
+        rtl = false,
     )
 }

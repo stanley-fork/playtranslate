@@ -48,7 +48,7 @@ import kotlinx.coroutines.withContext
  * sessions (camera/screen badge, optional saved-image thumbnail that
  * re-opens in the import review), collapsible live-session transcripts,
  * and plain cards for lookups + legacy rows. Rows carry an inline action cluster (copy /
- * add-to-Anki / delete + chevron) mirroring WordResultCell's header-button
+ * add-to-Anki / delete + chevron) mirroring the word-list row's header-button
  * idiom, and tapping a row opens [TranslationResultActivity] pushed
  * in-task, seeded with the entry (its date/time in the toolbar; a missing
  * translation self-translates there AND feeds back into the log). The

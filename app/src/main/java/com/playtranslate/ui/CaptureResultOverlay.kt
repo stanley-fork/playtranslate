@@ -612,7 +612,7 @@ class CaptureResultOverlay(
     private var autoMaxPx = Int.MAX_VALUE
 
     // Tap-a-word → definition lens (the shared presenter): display + speak +
-    // (when a dict entry matches) the open-detail tap and Anki chip, shared
+    // (when a dict entry matches) the open-detail tap and the Anki button, shared
     // with the drag flow via SourceLensActions. Built with the binder in show().
     private var sourceLens: SourceTextLens? = null
 
@@ -1019,7 +1019,7 @@ class CaptureResultOverlay(
             ttsAlertTarget = ttsAlertTarget ?: TtsAlertTarget.Overlay(ctx, overlayHost, wm, displayId),
             binder = b,
             screenSize = { Point(screenW, screenH) },
-            showAnkiChip = { it.word.entry != null },
+            offersAnki = { it.entry != null },
             // The open works entry-or-not — it opens the sentence view — so
             // every section opens.
             opensWithoutEntry = true,
@@ -2481,9 +2481,9 @@ class CaptureResultOverlay(
     }
 
     /** Resolve the tapped word and show a display+speak lens over the game,
-     *  anchored on the tapped line (the Anki chip and the open-detail follow
+     *  anchored on the tapped line (the Anki button and the open-detail follow
      *  the resolved entry). [fromController] (the cursor's A press)
-     *  pre-selects the lens pill so the next A opens the detail screen; a
+     *  pre-selects the word's row so the next A opens the detail screen; a
      *  touch tap leaves the lens unselected until its first controller
      *  input. */
     private fun onSourceTapped(offset: Int, fromController: Boolean = false) {
@@ -2491,7 +2491,7 @@ class CaptureResultOverlay(
         sourceLens?.onTapAtOffset(offset, fromController)
     }
 
-    /** Open-detail tap + Anki chip — same actions as the drag flow. The
+    /** Open-detail tap + a row's Anki button — same actions as the drag flow. The
      *  resolved unit is this tap's word/entry; sentence + screenshot come
      *  from the current capture result, read lazily at chip-tap time (the
      *  bind guard in [bindResult] keeps that read same-source). */

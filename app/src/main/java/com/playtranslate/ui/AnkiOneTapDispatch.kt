@@ -297,7 +297,7 @@ suspend fun Context.oneTapSendSentence(
         else
             emptySet()
     // Per-target-word audio: the sheet seeds each target's audio
-    // toggle from prefs.ankiWordAudioEnabled (SentenceAnkiContentView.addWordAudioRow).
+    // toggle from prefs.ankiWordAudioEnabled (SentenceAnkiContentView.wordAudio).
     // Mirror that — every selected target gets word audio when the
     // pref is on. With selectedWords empty (path A), this is empty
     // too; no extra TTS synthesis.

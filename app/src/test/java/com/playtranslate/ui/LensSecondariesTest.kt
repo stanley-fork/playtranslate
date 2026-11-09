@@ -81,17 +81,17 @@ class LensSecondariesTest {
         SecondaryKey(kind, TokenSpan(form, form), DictionaryResponse(emptyList()), needsMt)
 
     @Test
-    fun `assemble places each section by its key's kind and captions only the alternatives`() {
+    fun `assemble places each section by its key's kind`() {
         val keys = listOf(
             key(SecondaryKind.MEMBER, "気"), key(SecondaryKind.ALTERNATIVE, "弾く"),
             key(SecondaryKind.MEMBER, "間"), key(SecondaryKind.ALTERNATIVE, "弾く"),
         )
-        val at = SourceWordLookup.assemble(word, keys, listOf(member, hiku, ma, hajiku), caption = "Also matches")
+        val at = SourceWordLookup.assemble(word, keys, listOf(member, hiku, ma, hajiku))
         assertEquals(word, at.word)
         assertNull(at.phrase)
         assertEquals(listOf(member, ma), at.members)
         assertEquals(
-            listOf(hiku.copy(caption = "Also matches"), hajiku.copy(caption = "Also matches")),
+            listOf(hiku, hajiku),
             at.alternatives,
         )
         assertEquals(keys, at.keys)
@@ -99,9 +99,9 @@ class LensSecondariesTest {
     }
 
     @Test
-    fun `assemble makes a phrase key's section the phrase, uncaptioned`() {
+    fun `assemble makes a phrase key's section the phrase`() {
         val at = SourceWordLookup.assemble(
-            word, listOf(key(SecondaryKind.PHRASE, "一番")), listOf(phrase), caption = "Also matches",
+            word, listOf(key(SecondaryKind.PHRASE, "一番")), listOf(phrase),
         )
         assertEquals(phrase, at.phrase)
         assertEquals(listOf(phrase), at.secondaries())
@@ -111,7 +111,7 @@ class LensSecondariesTest {
     fun `assemble holds the keys of unresolved slots as pending`() {
         val kiKey = key(SecondaryKind.MEMBER, "気")
         val hajikuKey = key(SecondaryKind.ALTERNATIVE, "弾く", needsMt = true)
-        val at = SourceWordLookup.assemble(word, listOf(kiKey, hajikuKey), listOf(member, null), caption = "Also matches")
+        val at = SourceWordLookup.assemble(word, listOf(kiKey, hajikuKey), listOf(member, null))
         assertEquals(listOf(hajikuKey), at.pending)
         assertEquals(listOf(kiKey, hajikuKey), at.keys)
         assertEquals(listOf(member), at.secondaries())
@@ -126,19 +126,18 @@ class LensSecondariesTest {
         val hikuKey = key(SecondaryKind.ALTERNATIVE, "弾く")
         val hajikuKey = key(SecondaryKind.ALTERNATIVE, "弾く", needsMt = true)
         val keys = listOf(kiKey, maKey, hikuKey, hajikuKey)
-        val captioned = { r: SourceWordLookup.Resolved -> r.copy(caption = "Also matches") }
 
-        val before = SourceWordLookup.assemble(word, keys, listOf(null, ma, hiku, null), caption = "Also matches")
+        val before = SourceWordLookup.assemble(word, keys, listOf(null, ma, hiku, null))
         assertEquals(listOf(ma), before.members)
-        assertEquals(listOf(captioned(hiku)), before.alternatives)
+        assertEquals(listOf(hiku), before.alternatives)
         assertEquals(listOf(kiKey, hajikuKey), before.pending)
 
-        val after = SourceWordLookup.mergeLoaded(before, listOf(member, hajiku), caption = "Also matches")
+        val after = SourceWordLookup.mergeLoaded(before, listOf(member, hajiku))
         assertEquals(listOf(member, ma), after.members)
-        assertEquals(listOf(captioned(hiku), captioned(hajiku)), after.alternatives)
+        assertEquals(listOf(hiku, hajiku), after.alternatives)
         assertEquals(emptyList<SecondaryKey>(), after.pending)
         assertEquals(keys, after.keys)
-        assertEquals(listOf(member, ma, captioned(hiku), captioned(hajiku)), after.secondaries())
+        assertEquals(listOf(member, ma, hiku, hajiku), after.secondaries())
         assertNull(SourceWordLookup.loadMoreFor(after, loading = false))
     }
 

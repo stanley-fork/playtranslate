@@ -154,7 +154,7 @@ class OverlayHost(
         // Service-added windows are software-rendered by default (the
         // manifest's hardwareAccelerated only covers activity windows).
         // Hardware acceleration is required for a WebView child
-        // ([com.playtranslate.ui.YomitanDefinitionsView] in the lens/popup)
+        // (a definitions document, [com.playtranslate.ui.DefinitionDocumentView], in the lens)
         // and harmless for canvas surfaces — the lens already pre-bakes its
         // one BlurMaskFilter into a bitmap for exactly this pipeline. The
         // flag is read at addView time only, so later wholesale

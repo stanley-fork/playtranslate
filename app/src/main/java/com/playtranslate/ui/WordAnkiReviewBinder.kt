@@ -2,7 +2,6 @@ package com.playtranslate.ui
 
 import android.content.Context
 import android.content.Intent
-import android.graphics.Color
 import android.graphics.Typeface
 import android.os.Bundle
 import android.util.TypedValue
@@ -49,7 +48,7 @@ import java.util.Locale
 
 /**
  * The word/sentence Anki review editor — headword header, multi-source
- * audio cell, curatable Definitions (styled + native), Tatoeba "More
+ * audio cell, curatable Definitions, Tatoeba "More
  * examples", screenshot, the Sentence/Word mode toggle, the deck section,
  * and both send paths with their card-HTML builders — as a host-agnostic
  * binder extracted from [WordAnkiReviewSheet]. The DialogFragment hosts it
@@ -105,7 +104,7 @@ class WordAnkiReviewBinder(
 
         /** Hold point before the resolve's completion bind — the workspace
          *  suspends until its enter animation settles so the definitions
-         *  rebuild (and its styled WebView) can't drop entrance frames; the
+         *  rebuild (and the page it loads) can't drop entrance frames; the
          *  sheet host holds nothing. Callers re-check [isAlive] after. */
         suspend fun awaitEnterSettled() {}
 
@@ -199,96 +198,14 @@ class WordAnkiReviewBinder(
     /** Structured glossaries + dict ids for the card's Definition field. */
     private var resolvedStyled: YomitanStyledData? = null
 
-    /** The on-screen Definitions panel's styled renderer — ONE instance
-     *  reused across [rebuildDefinitions] passes (a × tap must not churn
-     *  WebViews), destroyed in [release]. */
-    private var ankiStyledView: YomitanDefinitionsView? = null
+    /** The on-screen Definitions card: ONE definitions document, kept
+     *  across [rebuildDefinitions] passes (a ✕ is a patch or a new row set
+     *  of the same page), released in [release]. */
+    private var definitionsDoc: DefinitionDocument? = null
 
-    /** Render process died once — stay native for the editor's life. */
-    private var ankiStyledBroken = false
-
-    /**
-     * Styled imported block for the ON-SCREEN Definitions panel (same
-     * component as the lens/detail sheet). Returns false when the styled
-     * path shouldn't/can't run — the caller renders the native rows.
-     */
-    private fun addStyledImportedPanel(card: LinearLayout): Boolean {
-        val styledData = resolvedStyled ?: return false
-        if (styledData.structured.isEmpty() || ankiStyledBroken) return false
-        val groups = resolvedEntry?.importedSenses.orEmpty()
-        if (groups.isEmpty()) return false
-        val v = ankiStyledView ?: YomitanDefinitionsView(
-            ctx,
-            DefinitionsDocument.Tokens(
-                text = ctx.themeColor(R.attr.ptText),
-                textMuted = ctx.themeColor(R.attr.ptTextMuted),
-                textHint = ctx.themeColor(R.attr.ptTextHint),
-                accent = ctx.themeColor(R.attr.ptAccent),
-                panel = ctx.themeColor(R.attr.ptCard),
-                baseFontSizePx = 15f,
-            ),
-        ).also { created ->
-            if (!created.isUsable()) {
-                ankiStyledBroken = true
-                return false
-            }
-            val hPad = ctx.resources.getDimensionPixelSize(R.dimen.pt_row_h_padding)
-            created.setPadding(hPad, dpi(8), hPad, dpi(8))
-            created.onContentHeight = { h ->
-                val lp = created.layoutParams
-                    ?: LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, 1)
-                lp.height = h + created.paddingTop + created.paddingBottom
-                created.layoutParams = lp
-            }
-            created.onRendererGone = {
-                ankiStyledView = null
-                ankiStyledBroken = true
-                rebuildDefinitions() // native rows take the block's place
-            }
-            // Re-checks the × bit on arrival: the page's tap crosses the JS
-            // bridge and a post, so two fast taps on different rows can both
-            // land against the state before either rebuild and remove the
-            // card's last row. The native × has no such gap, since it
-            // rebuilds inside its own click.
-            created.onRemoveImported = { i ->
-                if (rowRemovalAllowed && removedImported.add(i)) rebuildDefinitions()
-            }
-            ankiStyledView = created
-        }
-        // Re-parent for this rebuild pass (removeAllViews orphaned it).
-        (v.parent as? android.view.ViewGroup)?.removeView(v)
-        card.addView(
-            v,
-            LinearLayout.LayoutParams(
-                LinearLayout.LayoutParams.MATCH_PARENT,
-                (v.layoutParams?.height ?: 1).coerceAtLeast(1),
-            ),
-        )
-        v.setContent(
-            DefinitionsDocument.contentHtml(
-                WordDefinitionData(
-                    word = "", reading = null, senses = emptyList(),
-                    freqScore = 0, isCommon = false,
-                    importedGroups = groups,
-                ),
-                styledData.structured,
-                localizePos = { it.joinToString(" · ") },
-                // Read synchronously inside contentHtml, so the live set
-                // needs no copy.
-                importedCuration = DefinitionsDocument.ImportedCuration(
-                    removed = removedImported,
-                    removable = rowRemovalAllowed,
-                    removeLabel = ctx.getString(R.string.anki_word_remove_content_description),
-                ),
-            ),
-            styledData.dictStyles,
-            styledData.sourceLanguage,
-        )
-        return true
-    }
-
-    private fun dpi(v: Int): Int =
-        (v * ctx.resources.displayMetrics.density).toInt()
+    /** The line that stands in the card while there is nothing to draw
+     *  (the lookup is running, or it found no definition). */
+    private var definitionsPlaceholder: View? = null
 
     /** Sense ords the user has removed via the row × — they're skipped
      *  in both the rendered Definitions card and the Anki HTML payload. */
@@ -299,8 +216,8 @@ class WordAnkiReviewBinder(
      *  order. */
     private val removedImported = mutableSetOf<Int>()
     /** Whether the last rebuild offered a ×, i.e. more than one row was
-     *  visible across imported and pack rows together. Re-read when a
-     *  WebView × lands, because that tap crosses the bridge asynchronously. */
+     *  visible across imported and pack rows together. Re-read when a ×
+     *  lands, because every tap crosses the page's bridge asynchronously. */
     private var rowRemovalAllowed = false
     /** (sense ord, example index) pairs removed via the per-example ×. */
     private val removedExamples = mutableSetOf<Pair<Int, Int>>()
@@ -326,8 +243,9 @@ class WordAnkiReviewBinder(
      *  see [WordAnkiReviewSheet]'s onDestroyView). The content view's own
      *  release runs with the same verdict. */
     fun release(releasePin: Boolean) {
-        ankiStyledView?.destroy()
-        ankiStyledView = null
+        definitionsDoc?.release()
+        definitionsDoc = null
+        definitionsPlaceholder = null
         definitionsCard = null
         moreExamplesGroup = null
         moreExamplesBody = null
@@ -711,7 +629,7 @@ class WordAnkiReviewBinder(
         if (resolvedEntry != null) {
             rebuildDefinitions()
         } else {
-            defCard.addView(buildLoadingDefinitionsRow(fallbackDefinition))
+            definitionsPlaceholder = buildLoadingDefinitionsRow(fallbackDefinition).also { defCard.addView(it) }
         }
 
         // ── Screenshot group (when present): follows the shared state. ──
@@ -790,7 +708,7 @@ class WordAnkiReviewBinder(
         android.util.Log.i(LOOKUP_TAG, "lookup start: '$word' reading=$readingHint lang=$sourceLangId")
         val defResult = withContext(Dispatchers.IO) { resolver.lookup(word, readingHint) }
         // Everything below touches the view tree (pitch line, definitions
-        // rebuild, the styled WebView) — hold it out of the entrance window.
+        // rebuild, the definitions page) — hold it out of the entrance window.
         host.awaitEnterSettled()
         val response = defResult?.response
         val entries = response?.entries.orEmpty()
@@ -912,19 +830,45 @@ class WordAnkiReviewBinder(
     }
 
     /**
-     * Rebuilds the Definitions card from the resolved entry, the current
+     * Redraws the Definitions card from the resolved entry, the current
      * removal sets and the latest cached example translations. Called both
      * on initial paint and after every × tap so the visible state stays
-     * in sync.
+     * in sync. The card is one definitions document: a change that keeps
+     * the same rows (an example gone, a translation landed) patches them,
+     * a sense gone is a new row set of the same page.
      */
     private fun rebuildDefinitions() {
         val entry = resolvedEntry ?: return
-        val flatSenses = resolvedFlatSenses
         val card = definitionsCard ?: return
-        card.removeAllViews()
+        val rows = definitionRows(entry)
+        val language = (SourceLangId.fromCode(args.getString(ARG_SOURCE_LANG)) ?: SourceLangId.JA)
+            .yomitanConsumingLang()
+        definitionsPlaceholder?.let { card.removeView(it) }
+        definitionsPlaceholder = null
+        if (rows.isEmpty()) {
+            // The word has no definition to show. (An imported-only word
+            // HAS definitions and never lands here.)
+            definitionsDoc?.setRows(emptyList(), language)
+            definitionsPlaceholder = buildLoadingDefinitionsRow("").also { card.addView(it) }
+            return
+        }
+        val doc = definitionsDoc ?: DefinitionDocument(
+            ctx, card, scope,
+            theme = { cardDocTheme(ctx, DEFINITIONS_BASE_PX) },
+            onAction = ::onDefinitionAction,
+        ).also { definitionsDoc = it }
+        doc.setRows(rows, language)
+    }
 
-        // The pack side is resolved first, so the × rule's count spans
-        // imported and pack rows before either renders.
+    /**
+     * The card's rows as they stand: the imported dictionaries' block, then
+     * a row per kept sense. Sets [rowRemovalAllowed], the one count over
+     * imported and pack rows together that decides whether any × is drawn:
+     * the last row standing, of either kind, can never be removed, so the
+     * card never goes empty.
+     */
+    private fun definitionRows(entry: DictionaryEntry): List<DefRow> {
+        val flatSenses = resolvedFlatSenses
         val defResult = resolvedDefResult
         val translatedDefs = when (defResult) {
             is DefinitionResult.MachineTranslated -> defResult.translatedDefinitions
@@ -956,239 +900,111 @@ class WordAnkiReviewBinder(
         val visiblePack = if (isTargetDriven) visibleTarget.size else visibleSenses.size
         rowRemovalAllowed = visibleImported + visiblePack > 1
 
+        val rows = mutableListOf<DefRow>()
         // Imported term-dictionary definitions lead, mirroring the detail
-        // sheet and what WordCardDefinition puts on the card. They curate
+        // page and what WordCardDefinition puts on the card. They curate
         // like pack senses, keyed by their flat index across the groups
-        // ([removedImported]); on the styled path the × lives in the
-        // document ([DefinitionsDocument.ImportedCuration]).
-        var importedRowCount = 0
+        // ([removedImported]).
         if (visibleImported > 0) {
-            if (addStyledImportedPanel(card)) {
-                importedRowCount = visibleImported
-            } else {
-                var flatIdx = 0
-                entry.importedSenses.forEach { group ->
-                    var labelled = false
-                    group.senses.forEach { sense ->
-                        val idx = flatIdx++
-                        if (idx in removedImported) return@forEach
-                        if (importedRowCount > 0) ankiInsetDivider(card, indentDp = 16)
-                        addAnkiSenseRow(
-                            parent = card,
-                            // The dictionary label rides the group's first
-                            // KEPT row, so removing the row that carried it
-                            // hands it on.
-                            posLabels = buildList {
-                                if (!labelled) add(group.source)
-                                if (sense.pos.isNotBlank()) add(sense.pos)
-                            },
-                            imported = true,
-                            glossList = listOf(sense.definition),
-                            senseNumber = null,
-                            miscText = null,
-                            // No examples, so this row's index never meets
-                            // removedExamples or the translation cache.
-                            examples = emptyList(),
-                            senseIndex = idx,
-                            removable = rowRemovalAllowed,
-                        )
-                        labelled = true
-                        importedRowCount++
-                    }
-                }
-            }
+            rows += DefRow.Imported(
+                IMPORTED_ROW_ID, entry.importedSenses, DefRow.SenseLook.SHEET,
+                DefRow.Curation(removedImported.toSet(), rowRemovalAllowed),
+            )
         }
-        val hasImportedRows = importedRowCount > 0
+
+        /** [senseIndex] is the sense's index in its own space (see above):
+         *  what its ✕ removes and what its examples are keyed under. */
+        fun senseRow(
+            senseIndex: Int,
+            number: Int?,
+            posLabels: List<String>,
+            glosses: List<String>,
+            misc: String?,
+            examples: List<Example>,
+        ) = DefRow.Sense(
+            id = SENSE_ROW_PREFIX + senseIndex,
+            number = number,
+            pos = if (posLabels.isEmpty()) "" else ctx.localizePos(posLabels).uppercase(Locale.ROOT),
+            gloss = glosses.joinToString("; "),
+            misc = misc,
+            examples = examples.withIndex()
+                .filter { (eIdx, _) -> (senseIndex to eIdx) !in removedExamples }
+                .map { (eIdx, ex) ->
+                    DefRow.Example(
+                        ex.text,
+                        // Prefer the ML-Kit-translated text when present;
+                        // otherwise fall back to the example's stored
+                        // translation. Target-driven mode has no cache entry
+                        // and relies on the stored target-pack
+                        // Example.translation; entry-driven mode uses the
+                        // cache once translateExamples lands.
+                        exampleTranslationCache[senseIndex to eIdx] ?: ex.translation,
+                        italic = false,
+                        removeIndex = eIdx,
+                    )
+                },
+            look = DefRow.SenseLook.SHEET,
+            removable = rowRemovalAllowed,
+        )
 
         if (isTargetDriven) {
-            val fallbackPos = com.playtranslate.model
-                .unambiguousFallbackPos(resolvedEntries)
-            val numVisible = visibleTarget.size
+            val fallbackPos = com.playtranslate.model.unambiguousFallbackPos(resolvedEntries)
             visibleTarget.forEachIndexed { displayIdx, (idx, target) ->
-                val senseNumber = if (numVisible > 1) displayIdx + 1 else null
-                if (displayIdx > 0 || hasImportedRows) {
-                    ankiInsetDivider(card, indentDp = if (senseNumber != null) 42 else 16)
-                }
-                val posLabels = target.pos.filter { it.isNotBlank() }
-                    .takeIf { it.isNotEmpty() }
-                    ?: fallbackPos
-                val visibleExamples = target.examples.withIndex()
-                    .filter { (eIdx, _) -> (idx to eIdx) !in removedExamples }
-                addAnkiSenseRow(
-                    parent = card,
-                    posLabels = posLabels,
-                    glossList = target.glosses,
-                    senseNumber = senseNumber,
-                    miscText = ctx.renderMiscText(target.misc),
-                    examples = visibleExamples,
+                rows += senseRow(
                     senseIndex = idx,
-                    removable = rowRemovalAllowed,
+                    number = if (visibleTarget.size > 1) displayIdx + 1 else null,
+                    posLabels = target.pos.filter { it.isNotBlank() }.takeIf { it.isNotEmpty() }
+                        ?: fallbackPos,
+                    glosses = target.glosses,
+                    misc = ctx.renderMiscText(target.misc),
+                    examples = target.examples,
                 )
             }
-            if (visibleTarget.isEmpty() && !hasImportedRows) {
-                card.addView(buildLoadingDefinitionsRow(""))
+        } else {
+            visibleSenses.forEachIndexed { displayIdx, (flatIdx, sense) ->
+                val target = targetByOrd?.get(flatIdx)
+                rows += senseRow(
+                    senseIndex = flatIdx,
+                    number = if (visibleSenses.size > 1) displayIdx + 1 else null,
+                    posLabels = (target?.pos ?: sense.partsOfSpeech).filter { it.isNotBlank() },
+                    glosses = target?.glosses
+                        ?: translatedDefs?.getOrNull(flatIdx)?.let { listOf(it) }
+                        ?: sense.targetDefinitions,
+                    misc = ctx.renderMiscText(sense.misc),
+                    examples = sense.examples,
+                )
             }
-            return
         }
-
-        val numVisibleSenses = visibleSenses.size
-
-        var displayCount = 0
-        visibleSenses.forEach { (flatIdx, sense) ->
-            val target = targetByOrd?.get(flatIdx)
-            val posLabels = (target?.pos ?: sense.partsOfSpeech).filter { it.isNotBlank() }
-            val glossList = target?.glosses
-                ?: translatedDefs?.getOrNull(flatIdx)?.let { listOf(it) }
-                ?: sense.targetDefinitions
-            val senseNumber = if (numVisibleSenses > 1) displayCount + 1 else null
-            if (displayCount > 0 || hasImportedRows) {
-                ankiInsetDivider(card, indentDp = if (senseNumber != null) 42 else 16)
-            }
-            val visibleExamples = sense.examples.withIndex()
-                .filter { (eIdx, _) -> (flatIdx to eIdx) !in removedExamples }
-            addAnkiSenseRow(
-                parent = card,
-                posLabels = posLabels,
-                glossList = glossList,
-                senseNumber = senseNumber,
-                miscText = ctx.renderMiscText(sense.misc),
-                examples = visibleExamples,
-                senseIndex = flatIdx,
-                removable = rowRemovalAllowed,
-            )
-            displayCount++
-        }
-
-        if (displayCount == 0 && !hasImportedRows) {
-            // An imported-only word (senses=0, imported>0) HAS definitions —
-            // appending the blank-fallback loading row here rendered a
-            // literal "Looking up words…" under (or INSTEAD of) real content.
-            card.addView(buildLoadingDefinitionsRow(""))
-        }
+        return rows
     }
 
-    /** Per-sense row: number column + POS eyebrow + gloss + misc +
-     *  accent-bar example blocks (each with its own × to remove that
-     *  example), plus a trailing × on the row that drops the entire
-     *  sense from the card. */
-    private fun addAnkiSenseRow(
-        parent: LinearLayout,
-        posLabels: List<String>,
-        /** Imported Yomitan rows pass a verbatim dictionary-name header in
-         *  [posLabels] — never localized. Pack rows localize their POS. */
-        imported: Boolean = false,
-        glossList: List<String>,
-        senseNumber: Int?,
-        miscText: String?,
-        examples: List<IndexedValue<Example>>,
-        senseIndex: Int,
-        removable: Boolean,
-    ) {
-        val density = ctx.resources.displayMetrics.density
-        val rowH = (16 * density).toInt()
-        val rowV = (14 * density).toInt()
-        val row = LinearLayout(ctx).apply {
-            orientation = LinearLayout.HORIZONTAL
-            setPadding(rowH, rowV, rowH, rowV)
-            layoutParams = LinearLayout.LayoutParams(
-                LinearLayout.LayoutParams.MATCH_PARENT,
-                LinearLayout.LayoutParams.WRAP_CONTENT
-            )
-        }
-        if (senseNumber != null) {
-            row.addView(TextView(ctx).apply {
-                text = String.format(Locale.getDefault(), "%d", senseNumber)
-                textSize = 12f
-                typeface = Typeface.create(Typeface.MONOSPACE, Typeface.BOLD)
-                setTextColor(ctx.themeColor(R.attr.ptAccent))
-                minWidth = (16 * density).toInt()
-                layoutParams = LinearLayout.LayoutParams(
-                    LinearLayout.LayoutParams.WRAP_CONTENT,
-                    LinearLayout.LayoutParams.WRAP_CONTENT,
-                ).also {
-                    it.marginEnd = (10 * density).toInt()
-                    it.topMargin = (2 * density).toInt()
+    /**
+     * A × in the Definitions card. Every one arrives after the tap (it
+     * crosses the page's bridge and a post), so two fast taps on different
+     * rows can both be drawn against the state before either redraw: a row
+     * removal re-checks [rowRemovalAllowed] here, or the second could take
+     * the card's last row. The sets make a repeated tap a no-op.
+     */
+    private fun onDefinitionAction(row: DefRow, action: String) {
+        val item = DefAction.removedItem(action)
+        val changed = when (row) {
+            is DefRow.Imported -> item != null && rowRemovalAllowed && removedImported.add(item)
+            is DefRow.Sense -> {
+                val senseIndex = row.id.removePrefix(SENSE_ROW_PREFIX).toIntOrNull() ?: return
+                when {
+                    item != null -> removedExamples.add(senseIndex to item)
+                    action == DefAction.REMOVE -> rowRemovalAllowed && removedSenses.add(senseIndex)
+                    else -> false
                 }
-            })
-        }
-        val col = LinearLayout(ctx).apply {
-            orientation = LinearLayout.VERTICAL
-            layoutParams = LinearLayout.LayoutParams(
-                0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f
-            )
-        }
-        if (posLabels.isNotEmpty()) {
-            col.addView(TextView(ctx).apply {
-                text = (if (imported) posLabels.joinToString(" · ") else ctx.localizePos(posLabels))
-                    .uppercase(Locale.ROOT)
-                textSize = 10f
-                letterSpacing = 0.12f
-                typeface = Typeface.create("sans-serif-medium", Typeface.NORMAL)
-                setTextColor(ctx.themeColor(R.attr.ptTextMuted))
-                isAllCaps = true
-                layoutParams = LinearLayout.LayoutParams(
-                    LinearLayout.LayoutParams.MATCH_PARENT,
-                    LinearLayout.LayoutParams.WRAP_CONTENT,
-                )
-            })
-        }
-        col.addView(TextView(ctx).apply {
-            text = glossList.joinToString("; ")
-            textSize = 16f
-            typeface = Typeface.create("sans-serif-medium", Typeface.NORMAL)
-            setTextColor(ctx.themeColor(R.attr.ptText))
-            layoutParams = LinearLayout.LayoutParams(
-                LinearLayout.LayoutParams.MATCH_PARENT,
-                LinearLayout.LayoutParams.WRAP_CONTENT,
-            ).also { if (posLabels.isNotEmpty()) it.topMargin = (6 * density).toInt() }
-        })
-        if (miscText != null) {
-            col.addView(TextView(ctx).apply {
-                text = miscText
-                textSize = 12f
-                setTextColor(ctx.themeColor(R.attr.ptTextHint))
-                setTypeface(null, Typeface.ITALIC)
-                layoutParams = LinearLayout.LayoutParams(
-                    LinearLayout.LayoutParams.MATCH_PARENT,
-                    LinearLayout.LayoutParams.WRAP_CONTENT,
-                ).also { it.topMargin = (4 * density).toInt() }
-            })
-        }
-        examples.forEachIndexed { displayIdx, indexedEx ->
-            val originalIdx = indexedEx.index
-            val ex = indexedEx.value
-            // Prefer the ML-Kit-translated text when present; otherwise
-            // fall back to the example's stored translation. Target-driven
-            // mode has no cache entry and relies on the stored target-pack
-            // Example.translation; entry-driven mode uses the cache once
-            // translateExamples lands.
-            val cached = exampleTranslationCache[senseIndex to originalIdx]
-                ?: ex.translation
-            val block = buildAnkiExampleBlock(ctx, ex.text, cached) {
-                removedExamples.add(senseIndex to originalIdx)
-                rebuildDefinitions()
             }
-            val topGap = if (displayIdx == 0) (10 * density).toInt() else (2 * density).toInt()
-            (block.layoutParams as LinearLayout.LayoutParams).topMargin = topGap
-            col.addView(block)
+            else -> false
         }
-        row.addView(col)
-        // Trailing ×, only while more than one row is visible across the
-        // imported and pack rows together ([rowRemovalAllowed]): one count
-        // over both kinds, so the last row standing, of either kind, can
-        // never be removed and the card never goes empty.
-        if (removable) {
-            row.addView(buildPlainRemoveGlyph(ctx, leadingMargin = 8) {
-                (if (imported) removedImported else removedSenses).add(senseIndex)
-                rebuildDefinitions()
-            })
-        }
-        parent.addView(row)
+        if (changed) rebuildDefinitions()
     }
 
-    /** Plain "✕" used by the in-card row removers (sense, example,
-     *  Tatoeba). Pads to keep the hit target reasonable; no styled
-     *  background so it stays subordinate to the content. */
+    /** Plain "✕" of a More examples row. Pads to keep the hit target
+     *  reasonable; no background of its own, so it stays subordinate to
+     *  the content. */
     private fun buildPlainRemoveGlyph(
         ctx: Context,
         leadingMargin: Int = 0,
@@ -1210,62 +1026,6 @@ class WordAnkiReviewBinder(
             ).also { it.marginStart = (leadingMargin * density).toInt() }
             setOnClickListener { onRemove() }
         }
-    }
-
-    private fun buildAnkiExampleBlock(
-        ctx: Context, text: String, initialTranslation: String,
-        onRemove: () -> Unit,
-    ): View {
-        val density = ctx.resources.displayMetrics.density
-        val accent = ctx.themeColor(R.attr.ptAccent)
-        val accentRing = Color.argb(
-            (0.35f * 255).toInt(),
-            Color.red(accent), Color.green(accent), Color.blue(accent),
-        )
-        val block = LinearLayout(ctx).apply {
-            orientation = LinearLayout.HORIZONTAL
-            layoutParams = LinearLayout.LayoutParams(
-                LinearLayout.LayoutParams.MATCH_PARENT,
-                LinearLayout.LayoutParams.WRAP_CONTENT,
-            ).also { it.topMargin = (8 * density).toInt() }
-        }
-        block.addView(View(ctx).apply {
-            setBackgroundColor(accentRing)
-            layoutParams = LinearLayout.LayoutParams(
-                (2 * density).toInt(), LinearLayout.LayoutParams.MATCH_PARENT,
-            )
-        })
-        val inner = LinearLayout(ctx).apply {
-            orientation = LinearLayout.VERTICAL
-            layoutParams = LinearLayout.LayoutParams(
-                LinearLayout.LayoutParams.MATCH_PARENT,
-                LinearLayout.LayoutParams.WRAP_CONTENT,
-            ).also { it.marginStart = (12 * density).toInt() }
-        }
-        inner.addView(TextView(ctx).apply {
-            this.text = text
-            textSize = 14f
-            typeface = Typeface.create("sans-serif-medium", Typeface.NORMAL)
-            setTextColor(ctx.themeColor(R.attr.ptText))
-            setLineSpacing(0f, 1.5f)
-        })
-        val translationTv = TextView(ctx).apply {
-            this.text = initialTranslation
-            visibility = if (initialTranslation.isNotBlank()) View.VISIBLE else View.GONE
-            textSize = 13f
-            setTextColor(ctx.themeColor(R.attr.ptTextMuted))
-            setLineSpacing(0f, 1.45f)
-            layoutParams = LinearLayout.LayoutParams(
-                LinearLayout.LayoutParams.MATCH_PARENT,
-                LinearLayout.LayoutParams.WRAP_CONTENT,
-            ).also { it.topMargin = (2 * density).toInt() }
-        }
-        inner.addView(translationTv)
-        block.addView(inner)
-        // Per-example × — strips just this example from the card
-        // without dropping the surrounding sense.
-        block.addView(buildPlainRemoveGlyph(ctx, leadingMargin = 4, onRemove))
-        return block
     }
 
     // ── Tatoeba "More examples" ─────────────────────────────────────────
@@ -1749,6 +1509,16 @@ class WordAnkiReviewBinder(
          *  placeholder's replacement rides this coroutine, and every way
          *  it can fail is otherwise silent. */
         private const val LOOKUP_TAG = "WordSheetLookup"
+
+        /** The imported block's body text in the Definitions card, in sp;
+         *  the sense rows carry their own sizes. */
+        private const val DEFINITIONS_BASE_PX = 15f
+        private const val IMPORTED_ROW_ID = "imported"
+
+        /** A sense row's id is this and the sense's index in its own space
+         *  (the target sense's in target-driven mode, the flat one's
+         *  otherwise): what [onDefinitionAction] reads back. */
+        private const val SENSE_ROW_PREFIX = "s"
 
         private const val STATE_CONTENT_ARGS = "word_anki_content_args"
 

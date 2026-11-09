@@ -754,7 +754,7 @@ class AnkiCardTypeMapperTest {
 
         assertEquals(
             WordCardDefinition.fromSenses("猫", listOf(imported), fallback = "cat (Jitendex)")
-                .panelHtml(inlineStyler, YomitanStyledData(glossaries, css, "ja"), "Definitions") { null },
+                .panelHtml(inlineStyler, YomitanStyledData(glossaries, css), "Definitions") { null },
             outputs.definition,
         )
         assertTrue(outputs.definition, outputs.definition.contains("data-dictionary=\"d1\""))

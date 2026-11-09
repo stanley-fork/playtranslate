@@ -30,8 +30,8 @@ import kotlin.math.ceil
  * The row is the ONLY writer of its action views' visibility. An
  * unavailable action goes GONE as soon as its model says so; the fold
  * ([HeaderFit]) runs in [onMeasure], before the LinearLayout measures, so it
- * plans against the width being laid out. Every write there is change-only
- * (the [WordResultCell] precedent): a pass that plans the fold it already
+ * plans against the width being laid out. Every write there is change-only:
+ * a pass that plans the fold it already
  * shows writes nothing, so a settled row never re-requests layout. The
  * label is capped only when the plan cuts it; otherwise it measures itself,
  * so a rounding difference between the plan's width and the TextView's own

@@ -115,7 +115,6 @@ object AnkiCardOutputBuilder {
         val styled = YomitanStyledData(
             structured = structuredGlossaries,
             dictStyles = dictStyles,
-            sourceLanguage = cardData.sourceLangId.yomitanConsumingLang(),
         ).takeIf { structuredGlossaries.isNotEmpty() }
         val definition = firstHighlighted?.let { w ->
             WordCardDefinition.fromSenses(w.word, w.senses, fallback = w.meaning)

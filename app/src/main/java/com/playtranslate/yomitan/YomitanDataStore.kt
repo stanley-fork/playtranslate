@@ -175,7 +175,8 @@ object YomitanDataStore {
          *  contributes its group (see [TermMerge.merge]). */
         val termsSingleDictionary: Boolean,
         /** Whether any enabled TERMS dict retained structured glossaries
-         *  (`term_sc` rows) — the styled renderer's warm-up gate. */
+         *  (`term_sc` rows); with the styling toggle, what makes their
+         *  own markup the one drawn. */
         val hasStructuredTerms: Boolean,
         /** Enabled TERMS dicts' styles.css text keyed by dict id — parsed
          *  and scoped by the renderer, cached here so a lookup never

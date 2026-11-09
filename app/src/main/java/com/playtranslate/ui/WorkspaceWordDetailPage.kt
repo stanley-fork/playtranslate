@@ -138,24 +138,14 @@ class WorkspaceWordDetailPage(
     }
 
     /** Every clickable view is a controller target (speak chips, readings,
-     *  the Anki pill, member cells, the Tatoeba row) — collected per
-     *  keypress. The styled-definitions WebView is excluded: A on it would
-     *  be a dead press. The Anki pill holds (long-press = one-tap). */
+     *  the Anki pill, the Tatoeba row), and so is every row and button of
+     *  the page's definitions documents (the Words and Other matches rows):
+     *  collected per keypress by the workspace's one walker. The Anki pill
+     *  holds (long-press = one-tap). */
     override fun navActions(): List<NavAction> {
         val root = pageView ?: return emptyList()
         val ankiPill = root.findViewById<View>(R.id.btnWordAddToAnki)
-        val out = ArrayList<NavAction>()
-        fun walk(v: View) {
-            if (v is YomitanDefinitionsView) return
-            if (v.isClickable && v.isShown) {
-                out.add(NavAction(v, holdActivates = v === ankiPill))
-            }
-            if (v is ViewGroup) {
-                for (i in 0 until v.childCount) walk(v.getChildAt(i))
-            }
-        }
-        walk(root)
-        return out
+        return collectWorkspaceNavActions(root) { it === ankiPill }
     }
 
     override fun scrollView(): ViewGroup? =

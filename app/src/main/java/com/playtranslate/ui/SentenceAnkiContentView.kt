@@ -5,7 +5,6 @@ import android.annotation.SuppressLint
 import android.content.Context
 import android.content.Intent
 import android.graphics.Rect
-import android.graphics.Typeface
 import android.os.Bundle
 import android.text.Editable
 import android.text.InputType
@@ -15,7 +14,6 @@ import android.util.TypedValue
 import android.view.Gravity
 import android.view.LayoutInflater
 import android.view.MotionEvent
-import android.view.TouchDelegate
 import android.view.View
 import android.view.ViewGroup
 import android.view.ViewParent
@@ -27,7 +25,7 @@ import android.widget.ImageView
 import android.widget.LinearLayout
 import android.widget.TextView
 import android.widget.Toast
-import androidx.appcompat.content.res.AppCompatResources
+import androidx.annotation.VisibleForTesting
 import androidx.core.view.doOnLayout
 import androidx.core.widget.NestedScrollView
 import com.playtranslate.CaptureService
@@ -37,13 +35,13 @@ import com.playtranslate.R
 import com.playtranslate.audio.Attribution
 import com.playtranslate.audio.AudioRequest
 import com.playtranslate.audio.AudioSelection
+import com.playtranslate.audio.AudioSelections
 import com.playtranslate.audio.GameAudioClip
 import com.playtranslate.audio.PlayOutcome
 import com.playtranslate.audio.sources.RecordingAudioSource
 import com.playtranslate.audio.vad.SpeechSnap
 import com.playtranslate.audio.vad.VoiceLineSnap
 import com.playtranslate.capture.GameAudioSnapshot
-import com.playtranslate.dictionary.Deinflector
 import com.playtranslate.language.ReadingOverride
 import com.playtranslate.language.SourceLangId
 import com.playtranslate.themeColor
@@ -119,10 +117,11 @@ class SentenceAnkiContentView(
          *  the Screenshot group follows. */
         fun openScreenshotCrop(state: AnkiScreenshotState)
 
-        /** Hold point before the styled-payload apply — the workspace
-         *  suspends until its enter animation settles so the word rows'
-         *  styled WebViews (one per structured word) can't drop entrance
-         *  frames. Default: no hold. Callers re-check [isAlive] after. */
+        /** Hold point before the word rows are drawn — the workspace
+         *  suspends until its enter animation settles so the rows' page
+         *  (the first one of a process blocks the main thread while it
+         *  loads) can't drop entrance frames. Default: no hold. Callers
+         *  re-check [isAlive] after. */
         suspend fun awaitEnterSettled() {}
     }
 
@@ -141,16 +140,20 @@ class SentenceAnkiContentView(
      *  them ([withCardTarget]) and handing the result back to [applyWords]. */
     fun wordEntries(): List<SentenceAnkiHtmlBuilder.WordEntry> = words.toList()
 
-    /** Styled payload for the word rows (structured glossaries + dict
-     *  CSS), fetched once after the words list is built; null = every row
-     *  keeps its one-line flat meaning. */
-    private var sheetStyled: YomitanStyledData? = null
+    /** The word rows: ONE definitions document in [wordsSlot], under the
+     *  card's helper row. Made with the first rows, released in [release]. */
+    private var wordsDoc: DefinitionDocument? = null
 
-    /** One styled renderer per structured word, cached across
-     *  [rebuildWordRows] passes (target toggles rebuild the whole list —
-     *  WebViews must not churn per tap). Destroyed when the word is hidden
-     *  (its stub has no body; [rebuildWordRows] frees it) and in [release]. */
-    private val wordStyledViews = mutableMapOf<String, YomitanDefinitionsView>()
+    /** False until the host's entrance has settled. The rows are a page,
+     *  and the first page of a process blocks the main thread while the
+     *  WebView loads, so they are not drawn inside the entrance. */
+    private var wordRowsAllowed = false
+
+    /** The id of each word's row, by its place in [words] as last drawn. */
+    private var wordRowIds: List<String> = emptyList()
+
+    /** The line that stands in for the rows while their lookup runs. */
+    private var wordsLoadingRow: View? = null
 
     /** [HiddenWordsStore.revision] the word rows were last built against;
      *  the collector in [buildInto] redraws only when it moves. */
@@ -163,44 +166,6 @@ class SentenceAnkiContentView(
      *  so hiding or showing a word never moves its row. */
     private var hiddenOrderApplied = false
 
-    /** Render process died once — every row stays native for the sheet's
-     *  life. */
-    private var wordStyledBroken = false
-
-    /** Bumps on every styled-payload refresh so a slow fetch for a
-     *  superseded words list can't install a stale payload. */
-    private var styledFetchGen = 0
-
-    /**
-     * (Re)fetches the styled payload for the CURRENT words list. Called on
-     * first build and again from [applyWords], because the deferred flows
-     * replace the whole list after the sheet opens. Assigns
-     * unconditionally — a new word set with nothing structured must CLEAR
-     * the previous sentence's payload, not inherit it — and reaps cached
-     * renderers for words no longer present.
-     */
-    private fun refreshStyledPayload() {
-        if (!host.isAlive) return
-        val gen = ++styledFetchGen
-        val appCtx = ctx.applicationContext
-        val styledLang = (SourceLangId.fromCode(args.getString(ARG_SOURCE_LANG))
-            ?: SourceLangId.JA).yomitanConsumingLang()
-        scope.launch {
-            val payload = fetchStyledForSenses(appCtx, styledLang, words.flatMap { it.senses })
-            // The apply below can construct one WebView per structured word
-            // (rebuildWordRows → wordStyledBlock) — hold it out of the
-            // workspace's entrance window. Gen re-check follows the await.
-            host.awaitEnterSettled()
-            if (!host.isAlive || gen != styledFetchGen) return@launch
-            val hadOrHas = sheetStyled != null || payload != null
-            sheetStyled = payload
-            val current = words.mapTo(mutableSetOf()) { it.word }
-            wordStyledViews.keys.filter { it !in current }.toList().forEach { w ->
-                wordStyledViews.remove(w)?.destroy()
-            }
-            if (hadOrHas) rebuildWordRows()
-        }
-    }
     /** Whether the sentence-audio switch is on. Read by the host sheet
      *  at send time; false when the toggle wasn't built. */
     val sentenceAudioEnabled: Boolean
@@ -210,6 +175,7 @@ class SentenceAnkiContentView(
     private lateinit var etOriginal: EditText
     private lateinit var etTranslation: EditText
     private lateinit var wordsCard: LinearLayout
+    private lateinit var wordsSlot: LinearLayout
     private lateinit var wordsHeaderTitle: TextView
     private var screenshotGroup: AnkiScreenshotGroup? = null
     private var sentenceAudioHandle: AnkiAudioToggleHandle? = null
@@ -270,10 +236,17 @@ class SentenceAnkiContentView(
      *  defaults to whatever the user picked last. */
     private val wordAudioEnabled = mutableMapOf<String, Boolean>()
 
-    /** Per-word handle map — lets us release preview chips cleanly before
-     *  each [rebuildWordRows] (otherwise an in-flight preview on an audio
-     *  row that's about to be removed keeps playing for a beat). */
-    private val wordAudioHandles = mutableMapOf<String, AnkiAudioToggleHandle>()
+    /** A target word's preview, made on its first tap and kept while the
+     *  word has an audio row; [rebuildWordRows] stops and drops the preview
+     *  of a word that lost its row. */
+    private val wordPlayers = mutableMapOf<String, AnkiAudioPreviewPlayer>()
+
+    /** The name on each target's audio-source pill and the selection it was
+     *  read for (the read suspends; [ensureWordSourceLabels] asks once per
+     *  selection, and the pill keeps the old name until the new one lands). */
+    private val wordSourceLabels = mutableMapOf<String, SourceLabel>()
+
+    private class SourceLabel(val selection: AudioSelection, val text: String)
 
     /** Audio source/voice for the sentence audio cell. [AudioSelection.Auto]
      *  (default) resolves Commons-first → TTS at preview/send time; an
@@ -330,7 +303,8 @@ class SentenceAnkiContentView(
             }
             is PickTarget.Word -> {
                 wordSelections[target.word] = selection
-                wordAudioHandles[target.word]?.refreshPillLabel(scope, lang, selection)
+                // The redraw asks for the new source's name.
+                if (::wordsCard.isInitialized) rebuildWordRows()
             }
         }
     }
@@ -645,9 +619,9 @@ class SentenceAnkiContentView(
      * restore that never happens is the orphan sweep's job.
      */
     fun release(deleteSnapshotFile: Boolean) {
-        // Native WebView teardown for every styled word row.
-        wordStyledViews.values.forEach { it.destroy() }
-        wordStyledViews.clear()
+        wordsDoc?.release()
+        wordsDoc = null
+        wordsLoadingRow = null
         stopInlinePlayback()
         gameAudioFlashAnimator?.cancel()
         gameAudioFlashAnimator = null
@@ -664,8 +638,15 @@ class SentenceAnkiContentView(
         screenshotGroup = null
         sentenceAudioHandle?.release()
         sentenceAudioHandle = null
-        wordAudioHandles.values.forEach { it.release() }
-        wordAudioHandles.clear()
+        stopWordPlayers()
+    }
+
+    /** Stops every word preview. The map empties first, so a player's last
+     *  state change redraws nothing. */
+    private fun stopWordPlayers() {
+        val players = wordPlayers.values.toList()
+        wordPlayers.clear()
+        players.forEach { it.stop() }
     }
 
     /** Build the card into [view] (the inflated
@@ -736,11 +717,14 @@ class SentenceAnkiContentView(
         val translation = args.getString(ARG_TRANSLATION) ?: ""
         buildContent(original, translation)
 
-        // Styled word definitions for whatever words exist right now. The
-        // deferred-fill flows (ARG_WORDS_LOADING open, sentence re-commit)
-        // re-run this from applyWords — a one-shot here would race the
-        // empty list and stay flat for the dialog's life (Codex catch).
-        refreshStyledPayload()
+        // The word rows are drawn once the host's entrance has settled (the
+        // workspace's; a sheet host holds nothing and they draw now).
+        scope.launch {
+            host.awaitEnterSettled()
+            if (!host.isAlive || !::wordsCard.isInitialized) return@launch
+            wordRowsAllowed = true
+            rebuildWordRows()
+        }
 
         // Hidden-word changes from anywhere — this card's own eye taps, the
         // results list on the other screen, a store load that lands after
@@ -1272,6 +1256,17 @@ class SentenceAnkiContentView(
             .findViewById(R.id.tvGroupTitle)
         wordsCard = ankiGroupCard(root)
         addWordsHelperRow(wordsCard)
+        // A rebuild into a new card starts a new page.
+        wordsDoc?.release()
+        wordsDoc = null
+        wordsLoadingRow = null
+        wordsSlot = LinearLayout(ctx).apply { orientation = LinearLayout.VERTICAL }
+        wordsCard.addView(
+            wordsSlot,
+            LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT,
+            ),
+        )
         rebuildWordRows()
 
         // Screenshot — the group follows the shared state: a removal in
@@ -1364,19 +1359,13 @@ class SentenceAnkiContentView(
 
     // ── Word rows ────────────────────────────────────────────────────────
 
+    /**
+     * Redraws the word rows from the card's state: the list, the targets,
+     * the hidden set, each target's audio. Everything that changes a row
+     * ends here; the document patches the rows whose value changed, so a
+     * target toggle, a hide or a preview's spinner never rebuilds the list.
+     */
     private fun rebuildWordRows() {
-        // Release any in-flight preview audio on audio rows we're about to
-        // remove — without this, a chip mid-playback would keep playing
-        // for a beat after its row vanishes.
-        wordAudioHandles.values.forEach { it.release() }
-        wordAudioHandles.clear()
-
-        // Strip everything after the helper row + its divider, then
-        // re-emit current word rows. Helper row is at index 0; divider
-        // at index 1; word rows live from index 2 onward.
-        while (wordsCard.childCount > 2) {
-            wordsCard.removeViewAt(wordsCard.childCount - 1)
-        }
         val lang = SourceLangId.fromCode(args.getString(ARG_SOURCE_LANG))
             ?: SourceLangId.JA
         // Revision BEFORE snapshot: the store swaps the set and THEN bumps
@@ -1398,30 +1387,219 @@ class SentenceAnkiContentView(
             words.clear()
             words.addAll(sorted)
         }
-        if (words.isEmpty() && wordsLoading) {
-            wordsCard.addView(buildWordsLoadingRow())
-        } else {
-            words.forEachIndexed { i, entry ->
-                if (i > 0) ankiInsetDivider(wordsCard, indentDp = 16)
+
+        val loading = words.isEmpty() && wordsLoading
+        if (loading && wordsLoadingRow == null) {
+            wordsLoadingRow = buildWordsLoadingRow().also { wordsSlot.addView(it, 0) }
+        } else if (!loading) {
+            wordsLoadingRow?.let { wordsSlot.removeView(it) }
+            wordsLoadingRow = null
+        }
+
+        // A word that is no longer a target has no audio row: without this,
+        // its preview would keep playing for a beat after the row is gone.
+        wordPlayers.keys.filter { it !in selectedWords }.forEach { wordPlayers.remove(it)?.stop() }
+
+        if (wordRowsAllowed) {
+            wordRowIds = wordRowIdsOf(words)
+            val rows = words.mapIndexed { i, entry ->
                 // A TARGET is never a stub, hidden in the store or not: the
                 // user is making a card for it (a lens target, a row they
                 // tapped), the send funnel exempts it, and the send un-hides
                 // it once the card lands. Un-targeting a store-hidden word
                 // returns it to its stub.
-                val isHidden = entry.word in hidden && entry.word !in selectedWords
-                wordsCard.addView(buildWordRow(entry, isHidden))
+                wordRow(wordRowIds[i], entry, hidden = entry.word in hidden && entry.word !in selectedWords)
+            }
+            // No page is loaded for a list that has no rows yet.
+            if (rows.isNotEmpty() || wordsDoc != null) {
+                val doc = wordsDoc ?: DefinitionDocument(
+                    ctx, wordsSlot, scope,
+                    theme = { cardDocTheme(ctx, WORD_DEFINITIONS_PX) },
+                    onAction = ::onWordRowAction,
+                ).also { wordsDoc = it }
+                doc.setRows(rows, lang.yomitanConsumingLang())
             }
         }
-        // A stubbed word's styled renderer sits on no row now; free it (it is
-        // re-created on demand if the word is shown again).
-        wordStyledViews.keys.filter { it in hidden && it !in selectedWords }
-            .forEach { wordStyledViews.remove(it)?.destroy() }
         // Live count in the group header: the words that will be on the card.
         // As written; the header style capitalizes it in the UI's language.
         wordsHeaderTitle.text = ctx.getString(
             R.string.anki_group_words_count,
             words.count { it.word !in hidden || it.word in selectedWords },
         )
+        ensureWordSourceLabels(lang)
+    }
+
+    /** [entry] as its row: a stub when [hidden], else the full row, with its
+     *  audio row while it is a target. */
+    private fun wordRow(id: String, entry: SentenceAnkiHtmlBuilder.WordEntry, hidden: Boolean): DefRow.SheetWord {
+        val target = entry.word in selectedWords
+        return DefRow.SheetWord(
+            id = id,
+            word = entry.word,
+            reading = entry.reading,
+            pitch = entry.pitch,
+            stars = if (entry.freqScore > 0) SentenceAnkiHtmlBuilder.starsString(entry.freqScore) else "",
+            target = target,
+            hidden = hidden,
+            meaning = entry.meaning,
+            importedGroups = importedGroupsFromSenses(entry.senses.filter { it.imported }),
+            audio = if (target && !hidden) wordAudio(entry.word) else null,
+        )
+    }
+
+    /**
+     * A target's audio row as it stands. The switch and the source live in
+     * [wordAudioEnabled] and [wordSelections], seeded when the word first
+     * becomes a target, so every redraw shows the user's choices.
+     */
+    private fun wordAudio(word: String): DefRow.Audio {
+        val on = wordAudioEnabled.getOrPut(word) { Prefs(ctx).ankiWordAudioEnabled }
+        // Per-word selection defaults to Auto (Commons-first → TTS).
+        wordSelections.getOrPut(word) { AudioSelection.Auto }
+        return DefRow.Audio(
+            on = on,
+            play = when (wordPlayers[word]?.state) {
+                AnkiAudioPreviewPlayer.State.LOADING -> DefRow.Play.LOADING
+                AnkiAudioPreviewPlayer.State.PLAYING -> DefRow.Play.PLAYING
+                else -> DefRow.Play.IDLE
+            },
+            source = wordSourceLabels[word]?.text.orEmpty(),
+        )
+    }
+
+    /** Reads the pill's label for every target whose selection it was not
+     *  read for yet, and redraws when one lands. */
+    private fun ensureWordSourceLabels(lang: SourceLangId) {
+        for (word in selectedWords.toList()) {
+            val selection = wordSelections[word] ?: continue
+            val had = wordSourceLabels[word]
+            if (had?.selection == selection) continue
+            // Marked as asked for, under the name the pill shows meanwhile.
+            wordSourceLabels[word] = SourceLabel(selection, had?.text.orEmpty())
+            scope.launch {
+                val label = AudioSelections.label(ctx, selection, lang)
+                if (!host.isAlive || !::wordsCard.isInitialized) return@launch
+                val now = wordSourceLabels[word]
+                if (now?.selection != selection || now.text == label) return@launch
+                wordSourceLabels[word] = SourceLabel(selection, label)
+                rebuildWordRows()
+            }
+        }
+    }
+
+    /** [word]'s preview, made on first use. It redraws the row on every
+     *  state change for as long as it is the word's player. */
+    private fun wordPlayer(entry: SentenceAnkiHtmlBuilder.WordEntry): AnkiAudioPreviewPlayer {
+        wordPlayers[entry.word]?.let { return it }
+        val lang = SourceLangId.fromCode(args.getString(ARG_SOURCE_LANG)) ?: SourceLangId.JA
+        val word = entry.word
+        val reading = entry.reading
+        var player: AnkiAudioPreviewPlayer? = null
+        player = AnkiAudioPreviewPlayer(
+            ctx, scope, lang,
+            // Preview the kana reading (JA) so the audition matches the
+            // audio the card will carry (see ttsTextForWord).
+            previewText = { ttsTextForWord(word, reading.ifBlank { null }, lang) },
+            selectionProvider = { wordSelections[word] ?: AudioSelection.Auto },
+            requestProvider = { AudioRequest.word(word, reading.ifBlank { null }, lang) },
+            onState = {
+                if (wordPlayers[word] === player && host.isAlive && ::wordsCard.isInitialized) rebuildWordRows()
+            },
+        )
+        wordPlayers[word] = player
+        return player
+    }
+
+    /**
+     * A tap in the word rows, as the page reports it. It arrives after the
+     * tap (it crosses the page's bridge), so each branch reads the card's
+     * state as it is now, and [row] is the row as it is now drawn.
+     */
+    private fun onWordRowAction(row: DefRow, action: String) {
+        val shown = row as? DefRow.SheetWord ?: return
+        val entry = words.getOrNull(wordRowIds.indexOf(row.id)) ?: return
+        val word = entry.word
+        when (action) {
+            // The row toggles target. A stub's body is inert: a hidden word
+            // is never highlighted on the card.
+            DefAction.TARGET -> if (!shown.hidden) {
+                if (!selectedWords.remove(word)) selectedWords.add(word)
+                rebuildWordRows()
+            }
+            DefAction.TRAILING -> if (shown.hidden) showWord(entry) else hideWord(entry)
+            // The audio row is its switch.
+            DefAction.AUDIO -> if (word in selectedWords) {
+                val checked = wordAudioEnabled[word] != true
+                wordAudioEnabled[word] = checked
+                // Mirror the existing sentence-audio pref semantics: the
+                // last value the user picks becomes the default for the
+                // next card.
+                Prefs(ctx).ankiWordAudioEnabled = checked
+                // Turning the switch off also stops the preview.
+                val playing = wordPlayers[word]?.takeIf { it.state != AnkiAudioPreviewPlayer.State.IDLE }
+                if (!checked && playing != null) playing.stop() else rebuildWordRows()
+            }
+            DefAction.SPEAK -> if (word in selectedWords) wordPlayer(entry).toggle()
+            DefAction.SOURCE -> if (word in selectedWords) {
+                launchAudioPicker(PickTarget.Word(word), wordSelections[word] ?: AudioSelection.Auto)
+            }
+        }
+    }
+
+    /**
+     * The eye on a full row: hide the word, everywhere and for good (where
+     * the per-card ✕ used to be: hiding is persisted across cards and
+     * sentences, and the row stays as a stub the user can tap back).
+     */
+    private fun hideWord(entry: SentenceAnkiHtmlBuilder.WordEntry) {
+        // Hiding un-targets: a hidden word is never highlighted on the
+        // card, and its audio state goes with the target. Untap-to-
+        // deselect (the row's own tap) leaves the audio slots in place;
+        // only hiding drops them. Each removal is captured so a failed
+        // write can put the row back exactly as it was: the toast promises
+        // nothing changed, and that must hold for the card's own state, not
+        // only the store's.
+        val wasTarget = selectedWords.remove(entry.word)
+        val audioEnabled = wordAudioEnabled.remove(entry.word)
+        val audioSelection = wordSelections.remove(entry.word)
+        wordSourceLabels.remove(entry.word)
+        // Redraw now for the un-target. The store's revision redraws
+        // again when the write lands, but a word ALREADY hidden in the
+        // store (a target the sheet was showing in full) makes that
+        // write a no-op with no bump, so this rebuild is the only one.
+        rebuildWordRows()
+        val lang = SourceLangId.fromCode(args.getString(ARG_SOURCE_LANG)) ?: SourceLangId.JA
+        scope.launch {
+            if (!HiddenWordsStore.setHidden(ctx, lang, entry.word, entry.reading, hidden = true)) {
+                if (wasTarget) selectedWords.add(entry.word)
+                audioEnabled?.let { wordAudioEnabled[entry.word] = it }
+                audioSelection?.let { wordSelections[entry.word] = it }
+                if (host.isAlive && ::wordsCard.isInitialized) rebuildWordRows()
+                toastHiddenWordSaveFailed()
+            }
+        }
+    }
+
+    /** The eye-off on a stub: show the word again. The store's revision
+     *  redraws the row when the write lands. */
+    private fun showWord(entry: SentenceAnkiHtmlBuilder.WordEntry) {
+        val lang = SourceLangId.fromCode(args.getString(ARG_SOURCE_LANG)) ?: SourceLangId.JA
+        scope.launch {
+            if (!HiddenWordsStore.setHidden(ctx, lang, entry.word, entry.reading, hidden = false)) {
+                toastHiddenWordSaveFailed()
+            }
+        }
+    }
+
+    /** The word rows as last drawn, top to bottom. */
+    @get:VisibleForTesting
+    internal val shownWordRows: List<DefRow.SheetWord>
+        get() = wordsDoc?.shownRows.orEmpty().filterIsInstance<DefRow.SheetWord>()
+
+    /** A tap the page would report on [word]'s row. */
+    @VisibleForTesting
+    internal fun tapWordRowForTest(word: String, action: String) {
+        shownWordRows.firstOrNull { it.word == word }?.let { onWordRowAction(it, action) }
     }
 
     private fun buildWordsLoadingRow(): View {
@@ -1439,348 +1617,6 @@ class SentenceAnkiContentView(
         }
     }
 
-    /**
-     * The full styled definitions for one word row (the word creation
-     * page's treatment), replacing the one-line flat meaning when the word
-     * has retained structured senses. One cached WebView per structured
-     * word, reparented across rebuilds; null = keep the flat line.
-     */
-    private fun wordStyledBlock(entry: SentenceAnkiHtmlBuilder.WordEntry): View? {
-        val st = sheetStyled ?: return null
-        if (wordStyledBroken) return null
-        val imported = entry.senses.filter { it.imported }
-        if (imported.none { it.scRowid != null && st.structured.containsKey(it.scRowid) }) return null
-        val density = ctx.resources.displayMetrics.density
-        val v = wordStyledViews[entry.word] ?: run {
-            val created = YomitanDefinitionsView(
-                ctx,
-                DefinitionsDocument.Tokens(
-                    text = ctx.themeColor(R.attr.ptText),
-                    textMuted = ctx.themeColor(R.attr.ptTextMuted),
-                    textHint = ctx.themeColor(R.attr.ptTextHint),
-                    accent = ctx.themeColor(R.attr.ptAccent),
-                    panel = ctx.themeColor(R.attr.ptCard),
-                    baseFontSizePx = 13f,
-                ),
-            )
-            if (!created.isUsable()) {
-                wordStyledBroken = true
-                return null
-            }
-            // The row's tap toggles target state; without this the WebView
-            // eats every tap landing on the definitions block and the row
-            // click never fires. Link taps lose to the row here, by design.
-            created.passThroughTouches = true
-            created.onContentHeight = { h ->
-                created.layoutParams?.let { lp ->
-                    lp.height = h
-                    created.layoutParams = lp
-                }
-            }
-            created.onRendererGone = {
-                // That instance destroyed itself; drop the rest and stay
-                // native for the sheet's life.
-                wordStyledViews.remove(entry.word)
-                wordStyledViews.values.forEach { it.destroy() }
-                wordStyledViews.clear()
-                wordStyledBroken = true
-                rebuildWordRows()
-            }
-            wordStyledViews[entry.word] = created
-            created
-        }
-        (v.parent as? ViewGroup)?.removeView(v)
-        v.layoutParams = LinearLayout.LayoutParams(
-            LinearLayout.LayoutParams.MATCH_PARENT,
-            (v.layoutParams?.height ?: 1).coerceAtLeast(1),
-        ).also { it.topMargin = (3 * density).toInt() }
-        v.setContent(
-            DefinitionsDocument.contentHtml(
-                WordDefinitionData(
-                    word = entry.word, reading = null, senses = emptyList(),
-                    freqScore = 0, isCommon = false,
-                    importedGroups = importedGroupsFromSenses(imported),
-                ),
-                st.structured,
-                localizePos = { it.joinToString(" · ") },
-            ),
-            st.dictStyles,
-            st.sourceLanguage,
-        )
-        return v
-    }
-
-    /**
-     * A shown word's row: one cell holding the title line (the word, its
-     * reading and frequency, and the eye that hides it), then, while the
-     * word is a target, its audio row ([addWordAudioRow]), then the
-     * definition. The audio row is a child of the cell rather than a
-     * sibling row after it, so the target's accent wash covers it with the
-     * rest of the cell and it comes and goes with the word on each rebuild.
-     * A tap on the cell toggles target; the audio row takes its own taps
-     * for its switch, and the eye its own for hiding.
-     */
-    private fun buildWordRow(entry: SentenceAnkiHtmlBuilder.WordEntry, hidden: Boolean): View {
-        if (hidden) return buildHiddenWordRow(entry)
-        val density = ctx.resources.displayMetrics.density
-        val isTarget = entry.word in selectedWords
-        // Vertical padding only: the title line and the definition carry the
-        // row's side insets, so the audio row can span the cell with its own
-        // (the geometry of the sentence's audio row in the Original group).
-        val cell = LinearLayout(ctx).apply {
-            orientation = LinearLayout.VERTICAL
-            setPadding(0, (12 * density).toInt(), 0, (12 * density).toInt())
-            // Target rows pick up the accent tint as a peripheral signal —
-            // no "Target" label, just a quiet accent wash + word colour
-            // change so the user can see what'll be highlighted on the
-            // generated card.
-            setBackgroundColor(if (isTarget) ctx.themeColor(R.attr.ptAccentTint) else 0)
-            isClickable = true
-            isFocusable = true
-            setOnClickListener {
-                if (isTarget) selectedWords.remove(entry.word)
-                else selectedWords.add(entry.word)
-                rebuildWordRows()
-            }
-            layoutParams = LinearLayout.LayoutParams(
-                LinearLayout.LayoutParams.MATCH_PARENT,
-                LinearLayout.LayoutParams.WRAP_CONTENT
-            )
-        }
-
-        // Same side padding as the hidden stub's row, so hiding or showing
-        // the word moves neither the word nor the eye sideways.
-        val titleLine = LinearLayout(ctx).apply {
-            orientation = LinearLayout.HORIZONTAL
-            gravity = Gravity.CENTER_VERTICAL
-            setPadding((16 * density).toInt(), 0, (12 * density).toInt(), 0)
-        }
-
-        val topLine = LinearLayout(ctx).apply {
-            orientation = LinearLayout.HORIZONTAL
-            gravity = Gravity.CENTER_VERTICAL
-            layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f)
-        }
-        topLine.addView(TextView(ctx).apply {
-            text = entry.word
-            textSize = 16f
-            setTypeface(typeface, Typeface.BOLD)
-            setTextColor(ctx.themeColor(if (isTarget) R.attr.ptAccent else R.attr.ptText))
-        })
-        // Reading hint — annotated with its pitch-accent contour when known,
-        // the same display the word-detail header and result cells use. Kana-
-        // only words carry no separate reading but may still have pitch, so the
-        // kana is repeated as the contour surface (mirrors WordResultCell).
-        val pitchKana = entry.reading.takeIf { it.isNotBlank() }
-            ?: entry.word.takeIf { entry.pitch.isNotEmpty() && entry.word.all(Deinflector::isKana) }
-        if (pitchKana != null) {
-            topLine.addView(TextView(ctx).apply {
-                if (entry.pitch.isNotEmpty()) {
-                    text = buildPitchAnnotatedReading(pitchKana, entry.pitch)
-                    // Headroom for the overline band; the horizontal row's
-                    // baseline alignment lifts this padding above the shared
-                    // baseline so the word and reading stay aligned.
-                    // PitchAccentSpan leaves FontMetrics untouched by contract.
-                    setPadding(0, (8 * density).toInt(), 0, 0)
-                    // Optical nudge up 2dp: a pure render offset (no layout
-                    // reflow), tightening the accented reading against the word.
-                    // The overline keeps its slack inside the padding band.
-                    translationY = -2f * density
-                } else {
-                    text = pitchKana
-                }
-                textSize = 12f
-                setTextColor(ctx.themeColor(R.attr.ptTextHint))
-                layoutParams = LinearLayout.LayoutParams(
-                    LinearLayout.LayoutParams.WRAP_CONTENT,
-                    LinearLayout.LayoutParams.WRAP_CONTENT
-                ).also { it.marginStart = (8 * density).toInt() }
-            })
-        }
-        if (entry.freqScore > 0) {
-            topLine.addView(TextView(ctx).apply {
-                text = SentenceAnkiHtmlBuilder.starsString(entry.freqScore)
-                textSize = 11f
-                setTextColor(ctx.themeColor(R.attr.ptTextHint))
-                layoutParams = LinearLayout.LayoutParams(
-                    LinearLayout.LayoutParams.WRAP_CONTENT,
-                    LinearLayout.LayoutParams.WRAP_CONTENT
-                ).also { it.marginStart = (8 * density).toInt() }
-            })
-        }
-        titleLine.addView(topLine)
-
-        // The eye that hides the word (where the per-card ✕ used to be:
-        // hiding is persisted across cards and sentences, and the row stays
-        // as a stub the user can tap back). TOP against the title line's
-        // CENTER_VERTICAL default: a long word that wraps would otherwise
-        // leave the eye between its lines instead of level with the first.
-        val eye = hiddenToggleGlyph(
-            R.drawable.ic_visibility,
-            R.string.hidden_word_hide_content_description,
-            gravity = Gravity.TOP,
-        ) {
-            // Hiding un-targets: a hidden word is never highlighted on the
-            // card, and its audio state goes with the target. Untap-to-
-            // deselect (the row's main click listener) leaves the audio
-            // slots in place; only hiding drops them. Each removal is
-            // captured so a failed write can put the row back exactly as
-            // it was: the toast promises nothing changed, and that must
-            // hold for the card's own state, not only the store's.
-            val wasTarget = selectedWords.remove(entry.word)
-            val audioEnabled = wordAudioEnabled.remove(entry.word)
-            val audioSelection = wordSelections.remove(entry.word)
-            // Redraw now for the un-target. The store's revision redraws
-            // again when the write lands, but a word ALREADY hidden in the
-            // store (a target the sheet was showing in full) makes that
-            // write a no-op with no bump, so this rebuild is the only one.
-            rebuildWordRows()
-            val lang = SourceLangId.fromCode(args.getString(ARG_SOURCE_LANG)) ?: SourceLangId.JA
-            scope.launch {
-                if (!HiddenWordsStore.setHidden(ctx, lang, entry.word, entry.reading, hidden = true)) {
-                    if (wasTarget) selectedWords.add(entry.word)
-                    audioEnabled?.let { wordAudioEnabled[entry.word] = it }
-                    audioSelection?.let { wordSelections[entry.word] = it }
-                    if (host.isAlive && ::wordsCard.isInitialized) rebuildWordRows()
-                    toastHiddenWordSaveFailed()
-                }
-            }
-        }
-        titleLine.addView(eye)
-        cell.addView(titleLine)
-
-        if (isTarget) addWordAudioRow(cell, entry)
-
-        val definition = wordStyledBlock(entry)
-            ?: entry.meaning.takeIf { it.isNotBlank() }?.let { meaning ->
-                TextView(ctx).apply {
-                    text = meaning.lines().firstOrNull { it.isNotBlank() } ?: meaning
-                    textSize = 13f
-                    setTextColor(ctx.themeColor(R.attr.ptTextMuted))
-                    layoutParams = LinearLayout.LayoutParams(
-                        LinearLayout.LayoutParams.MATCH_PARENT,
-                        LinearLayout.LayoutParams.WRAP_CONTENT
-                    ).also { it.topMargin = (3 * density).toInt() }
-                }
-            }
-        if (definition != null) {
-            // The title line's side padding, and clear of the eye's column
-            // on the end side, where the definition sat when it stood beside
-            // the eye: the eye's widened hit square ([expandTouchTarget])
-            // reaches under the title line, and definition text inside it
-            // would turn a tap meant for the target toggle into a hide.
-            cell.addView(LinearLayout(ctx).apply {
-                orientation = LinearLayout.VERTICAL
-                setPadding((16 * density).toInt(), 0, (12 * density).toInt(), 0)
-                layoutParams = LinearLayout.LayoutParams(
-                    LinearLayout.LayoutParams.MATCH_PARENT,
-                    LinearLayout.LayoutParams.WRAP_CONTENT
-                ).also { it.marginEnd = eye.layoutParams.width }
-                addView(definition)
-            })
-        }
-
-        // Grow the tap area to the 48dp minimum around the unchanged 20dp
-        // glyph. A TouchDelegate rather than padding: padding would widen the
-        // eye's column, and the title and the definition would give that
-        // width back by reflowing. On the cell, not the title line: the
-        // square reaches past the line's top and bottom, and a delegate only
-        // sees touches that land inside its own view.
-        expandTouchTarget(cell, eye, (48 * density).toInt())
-        return cell
-    }
-
-    /**
-     * A target's audio row, appended to its [cell] under the title line: the
-     * preview chip, the audio-source pill, "Include audio", and the switch
-     * that puts the word's audio on the card. The title doesn't repeat the
-     * word, which the title line right above already shows. The switch and
-     * the source live in [wordAudioEnabled] and [wordSelections], seeded when
-     * the word first becomes a target, so every rebuild redraws the user's
-     * choices; the handle goes in [wordAudioHandles] so the next rebuild can
-     * stop a preview still playing.
-     */
-    private fun addWordAudioRow(cell: LinearLayout, entry: SentenceAnkiHtmlBuilder.WordEntry) {
-        val prefs = Prefs(ctx)
-        val lang = SourceLangId.fromCode(args.getString(ARG_SOURCE_LANG))
-            ?: SourceLangId.JA
-        val word = entry.word
-        val reading = entry.reading
-        val seeded = wordAudioEnabled.getOrPut(word) { prefs.ankiWordAudioEnabled }
-        // Per-word selection defaults to Auto (Commons-first → TTS).
-        wordSelections.getOrPut(word) { AudioSelection.Auto }
-        wordAudioHandles[word] = addCompactAudioToggleRow(
-            ctx, scope,
-            parent = cell,
-            lang = lang,
-            label = ctx.getString(R.string.anki_word_audio_row_title),
-            // Preview the kana reading (JA) so the audition matches
-            // the audio the card will carry (see ttsTextForWord).
-            previewText = { ttsTextForWord(word, reading.ifBlank { null }, lang) },
-            initialChecked = seeded,
-            onCheckedChange = { checked ->
-                wordAudioEnabled[word] = checked
-                // Mirror the existing sentence-audio pref
-                // semantics: the last value the user picks
-                // becomes the default for the next card.
-                prefs.ankiWordAudioEnabled = checked
-            },
-            onVoicePillTap = {
-                launchAudioPicker(
-                    PickTarget.Word(word), wordSelections[word] ?: AudioSelection.Auto,
-                )
-            },
-            selection = { wordSelections[word] ?: AudioSelection.Auto },
-            audioRequest = { AudioRequest.word(word, reading.ifBlank { null }, lang) },
-        )
-    }
-
-    /**
-     * The minimized row for a hidden word: the word alone in the muted
-     * colour over the [hiddenWordBandColor] band (the page background at
-     * 50%, so the row reads as sunk into the card), with an eye-off that
-     * shows it again. The body is inert (no target toggle: a hidden word is
-     * never highlighted on the card, and the send funnel strips a stale
-     * selection). Same side padding and glyph column as the full row, so
-     * toggling moves nothing sideways.
-     */
-    private fun buildHiddenWordRow(entry: SentenceAnkiHtmlBuilder.WordEntry): View {
-        val density = ctx.resources.displayMetrics.density
-        val row = LinearLayout(ctx).apply {
-            orientation = LinearLayout.HORIZONTAL
-            gravity = Gravity.CENTER_VERTICAL
-            setBackgroundColor(hiddenWordBandColor(ctx))
-            setPadding((16 * density).toInt(), (8 * density).toInt(),
-                (12 * density).toInt(), (8 * density).toInt())
-            layoutParams = LinearLayout.LayoutParams(
-                LinearLayout.LayoutParams.MATCH_PARENT,
-                LinearLayout.LayoutParams.WRAP_CONTENT,
-            )
-        }
-        row.addView(TextView(ctx).apply {
-            text = entry.word
-            textSize = 16f
-            setTypeface(typeface, Typeface.BOLD)
-            setTextColor(ctx.themeColor(R.attr.ptTextMuted))
-            layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f)
-        })
-        val eye = hiddenToggleGlyph(
-            R.drawable.ic_visibility_off,
-            R.string.hidden_word_show_content_description,
-            gravity = Gravity.CENTER_VERTICAL,
-        ) {
-            val lang = SourceLangId.fromCode(args.getString(ARG_SOURCE_LANG)) ?: SourceLangId.JA
-            scope.launch {
-                if (!HiddenWordsStore.setHidden(ctx, lang, entry.word, entry.reading, hidden = false)) {
-                    toastHiddenWordSaveFailed()
-                }
-            }
-        }
-        row.addView(eye)
-        expandTouchTarget(row, eye, (48 * density).toInt())
-        return row
-    }
-
     /** The store could not persist a hide/show tap (disk full, unopenable
      *  file); the rows did not change, so the user must hear why. */
     private fun toastHiddenWordSaveFailed() {
@@ -1788,64 +1624,6 @@ class SentenceAnkiContentView(
         Toast.makeText(ctx, R.string.hidden_word_save_failed, Toast.LENGTH_SHORT).show()
     }
 
-    /** The eye / eye-off glyph on a word row: a 20dp icon with 10dp side
-     *  padding (a 40x20 view). Like the ✕ it replaced, the 48dp hit area
-     *  comes from [expandTouchTarget], not padding, so the weight-1 word
-     *  beside it keeps its width. */
-    private fun hiddenToggleGlyph(
-        iconRes: Int,
-        contentDescriptionRes: Int,
-        gravity: Int,
-        onTap: () -> Unit,
-    ): ImageView {
-        val density = ctx.resources.displayMetrics.density
-        return ImageView(ctx).apply {
-            setImageDrawable(AppCompatResources.getDrawable(ctx, iconRes))
-            setColorFilter(ctx.themeColor(R.attr.ptTextMuted))
-            contentDescription = ctx.getString(contentDescriptionRes)
-            isClickable = true
-            isFocusable = true
-            setPadding((10 * density).toInt(), 0, (10 * density).toInt(), 0)
-            layoutParams = LinearLayout.LayoutParams(
-                (40 * density).toInt(), (20 * density).toInt(),
-            ).also { it.gravity = gravity }
-            setOnClickListener { onTap() }
-        }
-    }
-
-    /**
-     * Routes taps landing in a [minPx]-square rect centred on [child] to
-     * [child], leaving its own bounds — and so the whole row's layout —
-     * untouched. [child] may sit at any depth under [parent] (a shown word
-     * keeps its eye in the title line); the rect is mapped into [parent]'s
-     * coordinates. The delegate only receives what [parent]'s children
-     * leave, so the part of the square over a clickable child (a target's
-     * audio row) stays that child's. Recomputed on every layout pass of
-     * [parent]: rows are rebuilt often and the sheet can be resized under
-     * them, and a stale rect would hand taps to the wrong word.
-     */
-    private fun expandTouchTarget(parent: ViewGroup, child: View, minPx: Int) {
-        parent.addOnLayoutChangeListener { _, _, _, _, _, _, _, _, _ ->
-            val hit = Rect(0, 0, child.width, child.height)
-            parent.offsetDescendantRectToMyCoords(child, hit)
-            hit.inset(
-                -((minPx - hit.width()) / 2).coerceAtLeast(0),
-                -((minPx - hit.height()) / 2).coerceAtLeast(0),
-            )
-            parent.touchDelegate = TouchDelegate(hit, child)
-        }
-    }
-
-    // ── Async fill-in API ────────────────────────────────────────────
-
-    /** Marks [translationUserTouched] the first time the user types anything
-     *  we didn't write ourselves. [translationSuppressNextEdit] is flipped to
-     *  true *immediately before* any programmatic write inside
-     *  [applyTranslation], so the watcher swallows exactly that callback and
-     *  treats the next callback (real user input) as touched. Note: the
-     *  initial setText in [buildEditField] runs before this watcher attaches,
-     *  so there is no callback to suppress at attach time — pre-arming here
-     *  would silently consume the user's first real keystroke. */
     private fun attachTranslationTouchWatcher(field: EditText) {
         field.addTextChangedListener(object : TextWatcher {
             override fun beforeTextChanged(s: CharSequence?, start: Int, count: Int, after: Int) {}
@@ -1893,14 +1671,13 @@ class SentenceAnkiContentView(
 
         // Words: every per-word piece of state is keyed by surface form,
         // so a new sentence invalidates all of it — selections, per-word
-        // audio toggles, per-word voice picks, and any in-flight preview
-        // chips. Releasing the handles before clearing the map stops
-        // any audio that was mid-play on a row about to be removed.
+        // audio toggles, per-word voice picks, and any in-flight preview,
+        // which stops with the row it was playing for.
         selectedWords.clear()
         wordAudioEnabled.clear()
-        wordAudioHandles.values.forEach { it.release() }
-        wordAudioHandles.clear()
+        stopWordPlayers()
         wordSelections.clear()
+        wordSourceLabels.clear()
         words.clear()
         // It described the rows just cleared; the new sentence's fill brings
         // its own.
@@ -1997,15 +1774,28 @@ class SentenceAnkiContentView(
         // words…" forever).
         args.putBoolean(ARG_WORDS_LOADING, false)
         rebuildWordRows()
-        // The list just changed wholesale — the styled payload must follow
-        // it (and the previous sentence's payload must not linger).
-        refreshStyledPayload()
     }
 
     companion object {
         /** A game-audio snapshot shorter than this isn't a usable voice line;
          *  the cell stays on the TTS floor rather than offer an untrimmable clip. */
         private const val MIN_GAME_AUDIO_MS = 500L
+
+        /** The body text of a word row's imported definitions, in sp; the
+         *  rest of a row carries its own sizes. */
+        private const val WORD_DEFINITIONS_PX = 13f
+
+        /** A row id per word: the word and its reading, which every redraw
+         *  of one list repeats (so it patches), with a counter for a list
+         *  that holds the same pair twice. */
+        internal fun wordRowIdsOf(words: List<SentenceAnkiHtmlBuilder.WordEntry>): List<String> {
+            val seen = HashMap<String, Int>()
+            return words.map { w ->
+                val key = w.word + "\u0001" + w.reading
+                val n = seen.merge(key, 1, Int::plus)!!
+                if (n == 1) key else "$key\u0001$n"
+            }
+        }
 
         /** Default trim window for a fresh game-audio selection — the last few
          *  seconds of the snapshot, where the just-heard line sits. */

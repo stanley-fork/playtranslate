@@ -6,11 +6,10 @@ import com.playtranslate.model.ImportedSenseGroup
 import com.playtranslate.model.ReadingRow
 
 /**
- * The dictionary payload rendered by [WordDefinitionsView] — the meta row
- * (Common / frequency / part-of-speech / Anki deck), an optional warning
- * label, and the numbered senses. Shared by the magnifying lens
- * ([MagnifierLens]) and the translation-result word cell ([WordResultCell])
- * so the two surfaces render definitions from one renderer.
+ * A word's dictionary payload as a definitions document draws it: the meta
+ * row (Common / frequency / part-of-speech / Anki deck) and the numbered
+ * senses. Shared by the magnifying lens ([MagnifierLens]) and the word
+ * lists, whose rows ([DefRowHtml]) render it through one renderer.
  *
  * Promoted out of `MagnifierLens.LensDefinitionData` (where it lived as a
  * nested type) so neither surface depends on the other.
@@ -25,24 +24,26 @@ data class WordDefinitionData(
      *  deck pill in the meta row when non-empty. */
     val ankiDecks: List<String> = emptyList(),
     /** Pitch-accent downstep variants for [reading], empty when unknown.
-     *  [WordResultCell] draws the contour over its reading when non-empty. */
+     *  The word-list row draws the contour over its reading when non-empty. */
     val pitch: List<Int> = emptyList(),
     /** Per-dictionary frequency chips from imported Yomitan frequency
      *  dictionaries, in the user's section order. */
     val frequencies: List<FrequencyTag> = emptyList(),
     /** Every reading in common-use order (shared ordering with the word detail
-     *  page), occurrence flagged. [WordResultCell] lists these below the title
+     *  page), occurrence flagged. The word-list row lists these below the title
      *  when there's more than one or the inline reading won't fit. */
     val readingRows: List<ReadingRow> = emptyList(),
     /** The imported groups BEHIND the flattened imported rows in [senses] —
-     *  same data, structured form, for the styled WebView surfaces
-     *  ([YomitanDefinitionsView]). Flat surfaces ignore this. In-process
+     *  same data, structured form, which is what a definitions document
+     *  draws ([DefRowHtml]). In-process
      *  only: [WordDefinitionData] never rides an intent. */
     val importedGroups: List<ImportedSenseGroup> = emptyList(),
-    /** Prefetched structured glossaries + dictionary CSS for
-     *  [importedGroups]; null = render flat (toggle off / nothing
-     *  structured retained). See [fetchYomitanStyledData]. */
-    val styled: YomitanStyledData? = null,
+    /** The dictionary store's language key [importedGroups] were looked up
+     *  under ([com.playtranslate.language.SourceLangId.yomitanConsumingLang]).
+     *  A definitions document fetches the groups' structured content with
+     *  it when it draws them, so it is the lookup's own language and never
+     *  a later read of the settings. Blank when there are no groups. */
+    val definitionLang: String = "",
     /** The conjugation lines for this word, one per distinct inflected form
      *  ([InflectionChain.format]): every form the lemma took in the passage
      *  on the results page's cell, the tapped or dragged form in the lens.

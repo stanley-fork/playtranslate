@@ -2,7 +2,7 @@
 <!-- Translation-history row: meta line (time · backend) with an inline
      action cluster — add-to-Anki / delete — then source and translation.
      Copy is a long-press on the row (no button). The cluster mirrors
-     WordResultCell's header buttons (36×40dp borderless slots, 16dp gaps,
+     the word-list row's header buttons (36×40dp borderless slots, 16dp gaps,
      22dp icons) so History and the word-definition cells share one action
      idiom; icons tint like the meta label. Divider hidden on the last row
      by the adapter. -->
@@ -74,7 +74,7 @@
             </FrameLayout>
 
             <!-- Non-interactive "opens detail" affordance — taps fall
-                 through to the row (WordResultCell's chevron idiom). -->
+                 through to the row (the word-list row's chevron idiom). -->
             <FrameLayout
                 android:layout_width="36dp"
                 android:layout_height="40dp"

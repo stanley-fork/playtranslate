@@ -22,8 +22,8 @@ import kotlin.math.max
  *
  * Reports the paint's own FontMetrics unchanged (unlike [FuriganaSpan],
  * which reserves extra ascent) so host rows don't reflow: hosts grant the
- * overline headroom via padding instead. See WordResultCell for the
- * layout-stability contract.
+ * overline headroom via padding instead, which is the layout-stability
+ * contract every host keeps.
  */
 class PitchAccentSpan(private val downstep: Int) : ReplacementSpan() {
 
@@ -109,7 +109,7 @@ internal fun drawPitchContour(
  * Reading text annotated with its pitch contour plus a smaller trailing
  * `[n]` suffix listing every downstep variant (`[0]·[3]`); the contour
  * itself draws the first (primary) variant. Shared by the word-detail
- * header and [WordResultCell]. Hosts must add top padding for the overline
+ * header and the lens's pill. Hosts must add top padding for the overline
  * band (~8-10dp at their text size).
  */
 fun buildPitchAnnotatedReading(reading: String, pitch: List<Int>): CharSequence {

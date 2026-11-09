@@ -451,8 +451,8 @@ object SentenceAnkiHtmlBuilder {
      * available). `internal` so [AnkiCardOutputBuilder] and
      * [PtNoteBuilder] can pass their stylers.
      *
-     * Each word renders as a cell that ports [WordDefinitionsView.bind]
-     * to HTML, so the card and the magnifying lens read alike:
+     * Each word renders as a cell in the shape of the lens's row, so the
+     * card and the magnifying lens read alike:
      * head row (word · reading/pitch · audio) → meta row (Common pill ·
      * ★ run · frequency chips) → senses with a POS header only when the
      * POS changes from the previous sense. Target words get the
@@ -529,7 +529,7 @@ object SentenceAnkiHtmlBuilder {
             sb.append("<span ${styler("gl-w-word", titleSize)}>")
                 .append(htmlEscape(entry.word)).append("</span>")
             // Kana for the pitch contour: the reading, or (kana-only entries)
-            // the all-kana word — mirrors the word card / WordResultCell. The
+            // the all-kana word — mirrors the word card / the word-list row. The
             // kana-only branch is gated on renderPitch so the structured
             // WORDS_TABLE path is unchanged; the all-kana guard keeps the
             // contour off kanji.
@@ -578,7 +578,7 @@ object SentenceAnkiHtmlBuilder {
             }
 
             // Senses: numbered rows, POS header only on change (the lens's
-            // rule — WordDefinitionsView keeps the same previousPos state).
+            // rule: [DefinitionsDocument.contentHtml] keeps the same state).
             // Caps were rejected by design review: every sense renders.
             if (entry.senses.isNotEmpty()) {
                 var previousPos: List<String>? = null

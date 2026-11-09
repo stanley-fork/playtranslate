@@ -2,17 +2,11 @@ package com.playtranslate.ui
 
 import android.content.Context
 import android.content.Intent
-import android.graphics.Rect
-import android.graphics.drawable.ColorDrawable
 import android.os.Bundle
 import android.os.Looper
-import android.os.SystemClock
 import android.view.LayoutInflater
-import android.view.MotionEvent
 import android.view.View
 import android.view.ViewGroup
-import android.widget.CompoundButton
-import android.widget.ImageView
 import android.widget.LinearLayout
 import android.widget.TextView
 import androidx.fragment.app.Fragment
@@ -24,7 +18,6 @@ import com.playtranslate.R
 import com.playtranslate.audio.AudioSelection
 import com.playtranslate.capture.GameAudioSnapshot
 import com.playtranslate.language.SourceLangId
-import com.playtranslate.themeColor
 import com.playtranslate.vocab.HiddenWordsStore
 import kotlinx.coroutines.runBlocking
 import org.junit.After
@@ -57,13 +50,18 @@ import org.robolectric.shadows.ShadowToast
  * exempt) while toggles never move a row; and a set that loads after the
  * card was built orders the list exactly once.
  *
- * Also pins the TARGET row's cell (T1-T4): its audio row, titled "Include
- * audio", sits inside the cell between the title line and the definition,
- * under the cell's highlight and spanning its width; a tap on the audio row
- * flips its switch, never the target; and the eye's widened hit square,
- * installed on the cell for a glyph that now sits in the title line, is
- * centred on the glyph's place in the cell and leaves what it overlaps of
- * the audio row to the row.
+ * Also pins the TARGET row (T1, T2): it carries its audio row and a word
+ * that is no target has none; a tap on the audio row flips its switch,
+ * never the target.
+ *
+ * The rows are one definitions document, so the test reads the rows the
+ * card last drew ([SentenceAnkiContentView.shownWordRows]) and taps as the
+ * page reports a tap ([SentenceAnkiContentView.tapWordRowForTest]). What
+ * only a real engine can show, the row's markup order aside
+ * ([DefRowHtmlTest]), is in the instrumented DefinitionDocumentSmokeTest:
+ * the stub's band, the audio row's place under the highlight, and the
+ * eye's widened tap area, which is centred on the glyph and leaves what it
+ * overlaps of the audio row to the row.
  *
  * Host shell copied from [SentenceAnkiSnapshotLifecycleTest].
  */
@@ -154,8 +152,8 @@ class SentenceAnkiHiddenRowsTest {
         val fragment = open(targetWord = "猫")
         val row = rowOf(fragment, "猫")
         assertFalse(isStub(row))
-        assertNotNull(textIn(row, "ねこ"))
-        assertNotNull("audio row offered for the target", audioRowTitle(fragment, "猫"))
+        assertEquals("ねこ", row.reading)
+        assertNotNull("audio row offered for the target", row.audio)
         assertTrue("猫" in fragment.content!!.selectedWords)
         assertEquals(headerText(2), wordsHeader(fragment).text.toString())
         assertEquals(listOf("猫", "食べる"), rowOrder(fragment))
@@ -164,11 +162,11 @@ class SentenceAnkiHiddenRowsTest {
         // The eye on that row un-targets and stubs it. The store already has
         // it hidden, so that write is a no-op with no revision bump: the
         // redraw must come from the tap itself.
-        eyeOf(row).performClick()
+        tapEye(fragment, "猫")
         settle()
         assertTrue(isStub(rowOf(fragment, "猫")))
         assertFalse("猫" in fragment.content!!.selectedWords)
-        assertNull(audioRowTitle(fragment, "猫"))
+        assertNull(rowOf(fragment, "猫").audio)
         assertEquals(headerText(1), wordsHeader(fragment).text.toString())
         assertEquals(listOf("猫", "食べる"), rowOrder(fragment))
     }
@@ -182,8 +180,8 @@ class SentenceAnkiHiddenRowsTest {
         // Give the target a non-default audio state, so a mere re-seed from
         // the pref after the failure would be visibly different from a
         // restore: switch it off, then put the pref back to on.
-        audioSwitch(fragment, "猫").performClick()
-        assertFalse(audioSwitch(fragment, "猫").isChecked)
+        tap(fragment, "猫", DefAction.AUDIO)
+        assertFalse(audioOn(fragment, "猫"))
         Prefs(ctx).ankiWordAudioEnabled = true
 
         // Break the disk after the load: a directory at the store path.
@@ -191,7 +189,7 @@ class SentenceAnkiHiddenRowsTest {
         assertTrue(file.delete())
         assertTrue(file.mkdirs())
         try {
-            eyeOf(rowOf(fragment, "猫")).performClick()
+            tapEye(fragment, "猫")
             settle()
 
             // Nothing changed: still targeted, full row, the audio row back
@@ -199,7 +197,7 @@ class SentenceAnkiHiddenRowsTest {
             val row = rowOf(fragment, "猫")
             assertFalse(isStub(row))
             assertTrue("猫" in fragment.content!!.selectedWords)
-            assertFalse(audioSwitch(fragment, "猫").isChecked)
+            assertFalse(audioOn(fragment, "猫"))
             assertEquals(headerText(2), wordsHeader(fragment).text.toString())
             assertFalse("猫" in HiddenWordsStore.snapshot(ctx, SourceLangId.JA))
             assertEquals(
@@ -221,7 +219,7 @@ class SentenceAnkiHiddenRowsTest {
         // The row body toggles target; un-targeting a store-hidden word
         // returns it to its stub (synchronous rebuild, no store write).
         val before = HiddenWordsStore.revision.value
-        rowOf(fragment, "猫").performClick()
+        tap(fragment, "猫", DefAction.TARGET)
         assertTrue(isStub(rowOf(fragment, "猫")))
         assertFalse("猫" in fragment.content!!.selectedWords)
         assertEquals(before, HiddenWordsStore.revision.value)
@@ -235,26 +233,18 @@ class SentenceAnkiHiddenRowsTest {
         HiddenWordsStore.setHidden(ctx, SourceLangId.JA, "食べる", "たべる", hidden = true)
         val fragment = open()
         assertEquals(listOf("猫", "食べる"), rowOrder(fragment))
-        val stub = rowOf(fragment, "食べる")
-        assertTrue(isStub(stub))
-        assertNull(textIn(stub, "たべる"))
-        assertNull(textIn(stub, "to eat"))
-        // The band is the row's own background (the card colour would show
-        // through a mere view alpha). Expected from the THEMED context: the
-        // token resolves through the activity's theme, not the app's.
-        assertEquals(
-            hiddenWordBandColor(fragment.requireContext()),
-            (stub.background as ColorDrawable).color,
-        )
+        // A stub: the word alone (its markup draws neither the reading nor
+        // the definition, see DefRowHtmlTest).
+        assertTrue(isStub(rowOf(fragment, "食べる")))
 
         // Hiding the (now first) visible word leaves it first.
-        eyeOf(rowOf(fragment, "猫")).performClick()
+        tapEye(fragment, "猫")
         settle()
         assertEquals(listOf("猫", "食べる"), rowOrder(fragment))
         assertTrue(isStub(rowOf(fragment, "猫")))
 
         // Showing the second word leaves it second.
-        eyeOf(rowOf(fragment, "食べる")).performClick()
+        tapEye(fragment, "食べる")
         settle()
         assertEquals(listOf("猫", "食べる"), rowOrder(fragment))
         assertFalse(isStub(rowOf(fragment, "食べる")))
@@ -274,7 +264,7 @@ class SentenceAnkiHiddenRowsTest {
         assertEquals(listOf("猫", "食べる"), rowOrder(fragment))
         assertTrue(isStub(rowOf(fragment, "食べる")))
         // And a toggle after that still holds position.
-        eyeOf(rowOf(fragment, "猫")).performClick()
+        tapEye(fragment, "猫")
         settle()
         assertEquals(listOf("猫", "食べる"), rowOrder(fragment))
     }
@@ -285,17 +275,17 @@ class SentenceAnkiHiddenRowsTest {
     fun eyeOnTargetedRow_hidesPersistedAndUntargets(): Unit = runBlocking {
         Prefs(ctx).ankiWordAudioEnabled = true
         val fragment = open(targetWord = "猫")
-        assertNotNull("audio row present while targeted", audioRowTitle(fragment, "猫"))
+        assertNotNull("audio row present while targeted", rowOf(fragment, "猫").audio)
         assertEquals(headerText(2), wordsHeader(fragment).text.toString())
 
-        eyeOf(rowOf(fragment, "猫")).performClick()
+        tapEye(fragment, "猫")
         settle()
 
         assertTrue("猫" in HiddenWordsStore.snapshot(ctx, SourceLangId.JA))
         assertFalse("猫" in fragment.content!!.selectedWords)
         val row = rowOf(fragment, "猫")
         assertTrue(isStub(row))
-        assertNull(audioRowTitle(fragment, "猫"))
+        assertNull(row.audio)
         assertEquals(headerText(1), wordsHeader(fragment).text.toString())
         // The other language is untouched.
         assertFalse("猫" in HiddenWordsStore.snapshot(ctx, SourceLangId.ZH))
@@ -309,14 +299,14 @@ class SentenceAnkiHiddenRowsTest {
         val fragment = open()
         assertTrue(isStub(rowOf(fragment, "猫")))
 
-        eyeOf(rowOf(fragment, "猫")).performClick()
+        tapEye(fragment, "猫")
         settle()
 
         assertFalse("猫" in HiddenWordsStore.snapshot(ctx, SourceLangId.JA))
         val row = rowOf(fragment, "猫")
         assertFalse(isStub(row))
-        assertNotNull(textIn(row, "ねこ"))
-        assertNotNull(textIn(row, "cat"))
+        assertEquals("ねこ", row.reading)
+        assertEquals("cat", row.meaning)
         assertEquals(headerText(2), wordsHeader(fragment).text.toString())
     }
 
@@ -354,41 +344,18 @@ class SentenceAnkiHiddenRowsTest {
     // ─── T1 ───────────────────────────────────────────────────────────
 
     @Test
-    fun targetRow_holdsItsAudioRowBetweenTitleAndDefinition_underTheHighlight(): Unit = runBlocking {
+    fun targetRow_carriesItsAudioRow_andNoOtherRowDoes(): Unit = runBlocking {
         Prefs(ctx).ankiWordAudioEnabled = true
         val fragment = open(targetWord = "猫")
-        layOut(fragment)
-        val cell = rowOf(fragment, "猫")
-        val headword = textIn(cell, "猫") ?: error("no headword")
-        val definition = textIn(cell, "cat") ?: error("no definition")
-        val title = audioRowTitle(fragment, "猫") ?: error("no audio row")
-        val audio = audioRow(fragment, "猫")
-
-        // The audio row names its action; the headword right above it names
-        // the word, so the row no longer repeats it.
-        assertEquals(ctx.getString(R.string.anki_word_audio_row_title), title.text.toString())
-        // One cell, top to bottom: the title line (headword and eye), the
-        // audio row, the definition.
-        assertEquals(0, childHolding(cell, headword))
-        assertEquals(0, childHolding(cell, eyeOf(cell)))
-        assertEquals(1, childHolding(cell, title))
-        assertEquals(2, childHolding(cell, definition))
-        // The highlight is the cell's own background, and the audio row lays
-        // no fill over it (its background is the ripple, clear at rest).
-        assertEquals(
-            fragment.requireContext().themeColor(R.attr.ptAccentTint),
-            (cell.background as ColorDrawable).color,
-        )
-        assertFalse(audio.background is ColorDrawable)
-        // The audio row spans the cell, as the sentence's audio row spans
-        // its card; the definition stays clear of the eye's column.
-        val audioBounds = boundsIn(cell, audio)
-        assertEquals(0, audioBounds.left)
-        assertEquals(cell.width, audioBounds.right)
-        assertTrue(boundsIn(cell, definition).right <= boundsIn(cell, eyeOf(cell)).left)
-
+        val row = rowOf(fragment, "猫")
+        // The target draws the highlight and holds its audio row, seeded
+        // from the pref; its definition is still the row's own.
+        assertTrue(row.target)
+        assertEquals(DefRow.Audio(on = true, play = DefRow.Play.IDLE, source = row.audio!!.source), row.audio)
+        assertEquals("cat", row.meaning)
         // A word that isn't a target has no audio row.
-        assertNull(audioRowTitle(fragment, "食べる"))
+        assertFalse(rowOf(fragment, "食べる").target)
+        assertNull(rowOf(fragment, "食べる").audio)
     }
 
     // ─── T2 ───────────────────────────────────────────────────────────
@@ -397,75 +364,13 @@ class SentenceAnkiHiddenRowsTest {
     fun audioRowTap_flipsItsSwitch_notTheTarget(): Unit = runBlocking {
         Prefs(ctx).ankiWordAudioEnabled = true
         val fragment = open(targetWord = "猫")
-        layOut(fragment)
-        val cell = rowOf(fragment, "猫")
-        assertTrue(audioSwitch(fragment, "猫").isChecked)
+        assertTrue(audioOn(fragment, "猫"))
 
-        // Through the cell's own touch pass: the audio row takes the tap, so
-        // the cell's target toggle never sees it.
-        val audio = boundsIn(cell, audioRow(fragment, "猫"))
-        tap(cell, audio.centerX(), audio.centerY())
+        tap(fragment, "猫", DefAction.AUDIO)
 
-        assertFalse(audioSwitch(fragment, "猫").isChecked)
+        assertFalse(audioOn(fragment, "猫"))
         assertFalse(Prefs(ctx).ankiWordAudioEnabled)
         assertTrue("猫" in fragment.content!!.selectedWords)
-    }
-
-    // ─── T3 ───────────────────────────────────────────────────────────
-
-    @Test
-    fun eyeHitSquare_isCentredOnTheGlyphWhereItSitsInTheCell(): Unit = runBlocking {
-        val fragment = open()
-        layOut(fragment)
-        val cell = rowOf(fragment, "食べる")
-        val eye = boundsIn(cell, eyeOf(cell))
-        // The glyph sits in the title line, which starts at the cell's top
-        // padding. Squared around the glyph's title-line-relative bounds (the
-        // mapping a direct child needed), the rect would end that offset
-        // higher; 4dp inside the bottom edge of the square around its place
-        // in the CELL is outside that one whenever the offset beats 4dp.
-        val titleTop = boundsIn(cell, cell.getChildAt(0)).top
-        assertTrue(titleTop > dp(4))
-        val y = eye.centerY() + dp(24) - dp(4)
-
-        tap(cell, eye.centerX(), y)
-        settle()
-
-        assertTrue(isStub(rowOf(fragment, "食べる")))
-        assertTrue("食べる" in HiddenWordsStore.snapshot(ctx, SourceLangId.JA))
-    }
-
-    // ─── T4 ───────────────────────────────────────────────────────────
-
-    @Test
-    fun eyeHitSquareOverTheAudioRow_staysTheAudioRows(): Unit = runBlocking {
-        Prefs(ctx).ankiWordAudioEnabled = true
-        val fragment = open(targetWord = "猫")
-        // Robolectric's stand-in text metrics make the title line about 40dp
-        // tall; a 16sp line is about 21dp on a device, which puts the audio
-        // row's top inside the eye's square. Pin that height so the overlap
-        // exists here too.
-        val cell = rowOf(fragment, "猫")
-        cell.getChildAt(0).apply {
-            layoutParams.height = dp(21)
-            requestLayout()
-        }
-        layOut(fragment)
-        val eye = boundsIn(cell, eyeOf(cell))
-        val audio = boundsIn(cell, audioRow(fragment, "猫"))
-        // Inside the eye's square AND on the audio row, right under the eye.
-        val y = audio.top + dp(4)
-        assertTrue(y < eye.centerY() + dp(24))
-
-        tap(cell, eye.centerX(), y)
-        settle()
-
-        // The audio row keeps what it covers: its switch flips, the word
-        // stays shown and targeted.
-        assertFalse(audioSwitch(fragment, "猫").isChecked)
-        assertFalse(isStub(rowOf(fragment, "猫")))
-        assertTrue("猫" in fragment.content!!.selectedWords)
-        assertFalse("猫" in HiddenWordsStore.snapshot(ctx, SourceLangId.JA))
     }
 
     // ─── Harness ──────────────────────────────────────────────────────
@@ -505,99 +410,27 @@ class SentenceAnkiHiddenRowsTest {
         }
     }
 
-    /** The word rows top to bottom: each eye glyph's ancestor that sits
-     *  directly in the Words group card. A shown word's row is a cell that
-     *  holds the eye in its title line; a stub holds it directly. */
-    private fun rows(fragment: HostFragment): List<ViewGroup> =
-        fragment.requireView().descendants()
-            .filter { isEye(it) }
-            .map { eye ->
-                generateSequence(eye) { it.parent as? View }
-                    .first { it.parent is PtGroupCard } as ViewGroup
-            }
-            .toList()
+    /** The row the card last drew for [word]. */
+    private fun rowOf(fragment: HostFragment, word: String): DefRow.SheetWord =
+        fragment.content!!.shownWordRows.first { it.word == word }
 
-    /** The word row for [word]: the one holding a TextView reading exactly
-     *  [word] (its headword). */
-    private fun rowOf(fragment: HostFragment, word: String): ViewGroup =
-        rows(fragment).first { row -> textIn(row, word) != null }
-
-    /** The word rows top to bottom, each named by its first TextView (the
-     *  headword leads both the full row and the stub). */
+    /** The word rows top to bottom. */
     private fun rowOrder(fragment: HostFragment): List<String> =
-        rows(fragment).map { row ->
-            row.descendants().filterIsInstance<TextView>().first().text.toString()
-        }
+        fragment.content!!.shownWordRows.map { it.word }
 
-    private fun isEye(v: View): Boolean =
-        v is ImageView && (v.contentDescription == hideCd || v.contentDescription == showCd)
+    private fun isStub(row: DefRow.SheetWord): Boolean = row.hidden
 
-    private fun eyeOf(row: ViewGroup): ImageView =
-        row.descendants().first { isEye(it) } as ImageView
-
-    private fun isStub(row: ViewGroup): Boolean = eyeOf(row).contentDescription == showCd
-
-    private fun textIn(root: View, text: String): TextView? =
-        root.descendants().filterIsInstance<TextView>().firstOrNull { it.text?.toString() == text }
-
-    /** The audio row's title inside [word]'s row, or null when the row has
-     *  no audio row (its layout carries R.id.tvRowTitle; the rest of a word
-     *  row doesn't). */
-    private fun audioRowTitle(fragment: HostFragment, word: String): TextView? =
-        rowOf(fragment, word).descendants()
-            .filterIsInstance<TextView>()
-            .firstOrNull { it.id == R.id.tvRowTitle }
-
-    /** The audio row itself: the nearest ancestor of its title that holds
-     *  the switch. */
-    private fun audioRow(fragment: HostFragment, word: String): ViewGroup {
-        val title = audioRowTitle(fragment, word) ?: error("no audio row for $word")
-        return generateSequence(title.parent as? View) { it.parent as? View }
-            .first { p -> p.descendants().any { it.id == R.id.switchRowToggle } } as ViewGroup
-    }
-
-    private fun audioSwitch(fragment: HostFragment, word: String): CompoundButton =
-        audioRow(fragment, word).descendants()
-            .filterIsInstance<CompoundButton>()
-            .first { it.id == R.id.switchRowToggle }
-
-    /** The direct child of [cell] that holds [descendant]. */
-    private fun childHolding(cell: ViewGroup, descendant: View): Int =
-        (0 until cell.childCount).first { i ->
-            cell.getChildAt(i).descendants().any { it === descendant }
-        }
-
-    /** Measures and lays the card out at [widthDp] so the rows have bounds
-     *  and the eye's hit square is installed, independent of whether the
-     *  test window ran its own layout pass. */
-    private fun layOut(fragment: HostFragment, widthDp: Int = 400) {
-        val root = fragment.requireView()
-        val w = (widthDp * ctx.resources.displayMetrics.density).toInt()
-        root.measure(
-            View.MeasureSpec.makeMeasureSpec(w, View.MeasureSpec.EXACTLY),
-            View.MeasureSpec.makeMeasureSpec(0, View.MeasureSpec.UNSPECIFIED),
-        )
-        root.layout(0, 0, w, root.measuredHeight)
-    }
-
-    /** [view]'s bounds in [ancestor]'s coordinates. */
-    private fun boundsIn(ancestor: ViewGroup, view: View): Rect =
-        Rect(0, 0, view.width, view.height).also { ancestor.offsetDescendantRectToMyCoords(view, it) }
-
-    /** A finger tap at ([x], [y]) in [target]'s coordinates, dispatched the
-     *  way the parent's touch pass would hand it over, then the posted click
-     *  run. */
-    private fun tap(target: View, x: Int, y: Int) {
-        val t = SystemClock.uptimeMillis()
-        for (action in intArrayOf(MotionEvent.ACTION_DOWN, MotionEvent.ACTION_UP)) {
-            val ev = MotionEvent.obtain(t, t, action, x.toFloat(), y.toFloat(), 0)
-            target.dispatchTouchEvent(ev)
-            ev.recycle()
-        }
+    /** A tap on [word]'s row as the page reports it, then the posted work. */
+    private fun tap(fragment: HostFragment, word: String, action: String) {
+        fragment.content!!.tapWordRowForTest(word, action)
         shadowOf(Looper.getMainLooper()).idle()
     }
 
-    private fun dp(v: Int): Int = (v * ctx.resources.displayMetrics.density).toInt()
+    /** The eye of [word]'s row: hide on a full row, show on a stub. */
+    private fun tapEye(fragment: HostFragment, word: String) = tap(fragment, word, DefAction.TRAILING)
+
+    private fun audioOn(fragment: HostFragment, word: String): Boolean =
+        rowOf(fragment, word).audio?.on ?: error("no audio row for $word")
 
     /** The header's text as set; its style capitalizes it on screen. */
     private fun headerText(count: Int): String =

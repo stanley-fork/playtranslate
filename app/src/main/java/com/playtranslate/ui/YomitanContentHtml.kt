@@ -6,10 +6,10 @@ import com.google.gson.JsonObject
 import com.google.gson.JsonParser
 
 /**
- * Pure structured-content → HTML converter for the styled definition
- * surfaces ([YomitanDefinitionsView]). Input is one term entry's glossary
- * array JSON as retained at ingest (`term_sc`); output is markup for the
- * shell document's content swap.
+ * Pure structured-content → HTML converter for the definitions page
+ * ([DefinitionsDocument.contentHtml]). Input is one term entry's glossary
+ * array JSON as retained at ingest (`term_sc`); output is markup for a
+ * row of the page.
  *
  * Safety model (mirrors Yomitan's render-side second whitelist): a closed
  * `when` over the format's 20 tags — anything else renders nothing — and a

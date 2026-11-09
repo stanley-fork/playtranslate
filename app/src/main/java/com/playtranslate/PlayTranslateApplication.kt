@@ -50,6 +50,10 @@ class PlayTranslateApplication : Application() {
         // Robolectric a fork's later tests would read through an earlier
         // test's torn-down environment.
         DisplayWindowContexts.reset()
+        // The definition shells belong to the process that made them, for
+        // the same reason: a no-op in production (none exists yet), and
+        // under Robolectric no test inherits another's spare or its holders.
+        com.playtranslate.ui.DefinitionShells.reset()
         CrashHandler.install(this)
         // Translation-waterfall forensics (failure ring + connectivity
         // summary for the log-export header). Before the registry init so

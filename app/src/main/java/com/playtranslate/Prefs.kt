@@ -607,6 +607,30 @@ class Prefs internal constructor(
      * double-checked locking. With it, "every stored value is plaintext" holds
      * whenever the marker is absent, so no ciphertext detection is needed.
      */
+    /**
+     * Writes [hideWordsSection] once, while it has no stored value: collapsed
+     * on a new install, visible on an install that already ran. Most people
+     * use the app only to translate, and a collapsed Words card looks up no
+     * rows and draws no definitions, so a new install starts without it and
+     * its eye brings it back for good.
+     *
+     * A new install is one whose prefs file is still empty. An install that
+     * has run before always holds something (every construction ends with the
+     * secrets marker written), and prefs are in no backup, so a restore is a
+     * new install too. That test only holds while this is the FIRST write of
+     * a construction, which is why [migrateLegacyPrefs] calls it first, and
+     * why it is locked: a second thread constructing [Prefs] meanwhile would
+     * otherwise find this thread's own writes and take the install for an
+     * existing one.
+     */
+    private fun seedWordsSectionDefault() {
+        if (sp.contains(KEY_HIDE_WORDS_SECTION)) return
+        synchronized(WORDS_DEFAULT_LOCK) {
+            if (sp.contains(KEY_HIDE_WORDS_SECTION)) return
+            sp.edit { putBoolean(KEY_HIDE_WORDS_SECTION, sp.all.isEmpty()) }
+        }
+    }
+
     private fun migrateSecretsToEncrypted() {
         if (sp.contains(KEY_SECRETS_ENCRYPTED_MIGRATED)) return
         synchronized(SECRET_MIGRATION_LOCK) {
@@ -1004,8 +1028,12 @@ class Prefs internal constructor(
         get() = sp.getBoolean(KEY_HIDE_ORIGINAL_SECTION, false)
         set(v) = sp.edit { putBoolean(KEY_HIDE_ORIGINAL_SECTION, v) }
 
+    /** Whether the results page's Words card is collapsed. A new install
+     *  starts collapsed and an install from before 2026-11 keeps the card as
+     *  it was; [seedWordsSectionDefault] writes that once, so the default
+     *  here is only the new install's value restated. */
     var hideWordsSection: Boolean
-        get() = sp.getBoolean(KEY_HIDE_WORDS_SECTION, false)
+        get() = sp.getBoolean(KEY_HIDE_WORDS_SECTION, true)
         set(v) = sp.edit { putBoolean(KEY_HIDE_WORDS_SECTION, v) }
 
     var showFuriganaInline: Boolean
@@ -1266,6 +1294,10 @@ class Prefs internal constructor(
      * acceptable cost given the internal audience.
      */
     fun migrateLegacyPrefs() {
+        // First, before anything below writes to the file: it tells a new
+        // install from an existing one by whether the file is still empty.
+        seedWordsSectionDefault()
+
         // Encrypt any legacy plaintext API keys before anything reads them.
         migrateSecretsToEncrypted()
 
@@ -1979,6 +2011,10 @@ class Prefs internal constructor(
          *  once even if two threads construct [Prefs] concurrently on the first
          *  launch after upgrade (see [migrateSecretsToEncrypted]). */
         private val SECRET_MIGRATION_LOCK = Any()
+
+        /** Serializes [seedWordsSectionDefault] across threads constructing
+         *  [Prefs] at once. */
+        private val WORDS_DEFAULT_LOCK = Any()
 
         /** [readSecret]'s memo: each slot's last decryption, with the
          *  ciphertext and the codec it came from. Process-wide, since [Prefs]

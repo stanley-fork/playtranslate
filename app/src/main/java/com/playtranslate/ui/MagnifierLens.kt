@@ -24,7 +24,12 @@ import android.view.Gravity
 import android.view.InputDevice
 import android.view.KeyEvent
 import android.view.MotionEvent
+import android.view.ViewConfiguration
 import android.view.ViewTreeObserver
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.cancelChildren
 import android.view.View
 import android.view.ViewGroup
 import android.view.WindowInsets
@@ -66,76 +71,63 @@ import kotlin.math.sign
  *  - A rounded card (16dp radius, BWI_PANEL #15181B, 1dp white-16% border)
  *    holds the zoom / loading / definitions body.
  *  - A coral pill (accent-themed) overhangs the card's top edge by half its
- *    height. It carries the word, a hairline divider, and the reading. It
- *    has no chevron of its own: the "tap to drill into Details" cue is a
- *    chevron on each body cell — the lone word's body, or every section of
- *    a split — so a plain word and a compound read the same way.
- *  - Two "calm" chip buttons (32dp visible disk, 48dp hit halo) flank the
- *    pill — Speak on the left, Anki on the right. They are no-ops in this
- *    commit; the wiring will land in a follow-up.
+ *    height. It carries the word, a hairline divider, and the reading while
+ *    the lens is a magnifier or is loading. Once a definition row shows,
+ *    the row names the word and the pill is hidden, and the space it took
+ *    (the overhang above the card, the padding under it) goes back to the
+ *    definitions.
  *  - A 10dp triangular arrow drops from the card's bottom edge (or rises
  *    from the top when the lens flips below the finger).
  *
  * Render modes:
  *  - **ZOOM** (drag): zoomed pixels + crosshair fill the card body. The pill
- *    keeps showing the currently-detected token. Chips hidden.
+ *    keeps showing the currently-detected token.
  *  - **LOADING**: spinner + "Looking up…" in the body while OCR/lookup
- *    resolve. Pill shows the word being resolved. Chips hidden.
- *  - **DEFINITIONS** (drag-preview AND sticky): the body shows the
- *    dictionary view (existing rows). Pill shows the looked-up word.
- *    Chips appear only once the lens becomes interactive via
- *    [makeInteractive] — that signals the post-release sticky state where
- *    quick actions are appropriate.
+ *    resolve. Pill shows the word being resolved.
+ *  - **DEFINITIONS** (drag-preview AND sticky): the body is ONE word list
+ *    ([WordRowList], the list the Words card and the dictionary search
+ *    draw) whose rows are the lens's sections: the looked-up word alone, or
+ *    with a related unit (word + containing phrase on the space-delimited
+ *    surfaces, fused expression + member words and other entries on JA, the
+ *    longer unit on top), each the app's one word row with its own Speak
+ *    and Add-to-Anki buttons, then the "Load more" row when sections are
+ *    held back.
  *
  * Tap routing:
- *  - In sticky mode, tapping anywhere on the card OR the pill fires
- *    [onOpenTap] (opens the detail page). The body's chevron is purely a
- *    visual cue ([setDefinitions]' `opens` withholds it when the caller
- *    has nothing to open into); it never routes taps itself.
- *  - Split mode ([setSplitDefinitions] — a tapped unit with a related
- *    unit: word + containing phrase on the space-delimited surfaces,
- *    fused expression + member word on JA): the body is two sections,
- *    the longer unit on top, each its OWN tap target ([onOpenTap] for
- *    the tapped/primary unit, [onSecondaryOpenTap] for the related one)
- *    with its own chevron; the card-wide open detector stands down over
- *    the body. The pill still fires [onOpenTap] — it carries the tapped
- *    unit's identity.
- *  - Chip taps are absorbed (no-op) — they do NOT fall through to the
- *    card-wide open handler.
- *  - The arrow strip and the (currently hidden) pill chrome region outside
- *    the card are non-interactive.
+ *  - The page is the authority on what a tap in the body hit: a link
+ *    navigates (handed to the browser), a button is its row's action
+ *    ([onSpeak], [onAnkiTap], a held Anki button [onAnkiLongPress]),
+ *    anything else is its row's tap, [onOpenTap] for the tapped/primary
+ *    unit's row, [onSecondaryOpenTap] for a related one's, [onLoadMoreTap]
+ *    for the "Load more" row. A row's chevron is purely a visual cue (a
+ *    section's `opens` withholds it, and the tap, when the caller has
+ *    nothing to open into).
+ *  - While the lens is loading, a tap on the card or the pill fires
+ *    [onOpenTap].
+ *  - The arrow strip and the pill's overhang outside the card are
+ *    non-interactive.
  */
-/** Text-size factor the lens passes to [WordDefinitionsView]. The shared
- *  renderer's base sizes are tuned for the full-width result cell; the lens
- *  is a small floating card, so it renders the same body scaled down to keep
- *  its compact footprint (definitions land near the lens's former ~13sp). */
+/** Text-size factor of the lens's definitions. The renderer's base sizes
+ *  are tuned for the full-width result row; the lens is a small floating
+ *  card, so it renders the same body scaled down to keep its compact
+ *  footprint (definitions land near 13sp). */
 private const val LENS_DEFINITIONS_SCALE = 0.8f
 
-/** How long a flat→styled bind holds BOTH bodies for the styled render
- *  before falling back to flat ([LensView.holdBodyForStyled]): under the
- *  "feels instant" threshold, and a warm WebView pipeline beats it
- *  essentially always — so the same content rendering twice (flat, then
- *  restyled: the visible "hop") is never seen on a device fast enough to
- *  ever avoid it. */
-private const val STYLED_HOLD_DEADLINE_MS = 150L
-
-/** How long a styled→styled in-place rebind waits for the new word's
- *  painted-height report before dropping to flat. Longer than the hold:
- *  the previous content is still on screen, so nothing is missing while
- *  it waits. */
-private const val STYLED_INPLACE_DEADLINE_MS = 250L
+/** The document id of the lens's "Load more" row. */
+private const val MORE_ROW_ID = "more"
 
 /** One section of the lens's split (phrase + word) definitions body — see
  *  [MagnifierLens.setSplitDefinitions]. [opens] renders the section's
  *  trailing chevron and makes the whole section a tap target for its
  *  open-detail callback; pass false on surfaces (or entries) with nothing
- *  to open into. [caption], when set, is a muted line drawn above the
- *  section's header ("Also matches" over an alternative entry). */
+ *  to open into. */
 data class LensSection(
     val data: WordDefinitionData,
     val label: String?,
     val opens: Boolean,
-    val caption: String? = null,
+    /** Whether the section's row offers Add to Anki
+     *  ([MagnifierLens.onAnkiTap], [MagnifierLens.onAnkiLongPress]). */
+    val anki: Boolean = false,
 )
 
 /** The lens's "Load more (n)" row ([MagnifierLens.setSplitDefinitions]):
@@ -164,8 +156,8 @@ sealed class LensScroll {
 /**
  * Clamped card-body height for the post-release grow-to-fit. The card grows
  * away from the anchored (arrow/finger) edge — UP when not flipped, DOWN when
- * flipped — but never past the safe screen edge: the outer chrome (pill/chip
- * [overhang]) must stay within [[safeTop], [safeBottom]]. Never shrinks below
+ * flipped — but never past the safe screen edge: the outer chrome (the pill's
+ * [overhang], while it shows) must stay within [[safeTop], [safeBottom]]. Never shrinks below
  * [baseCardH]; a card already pinned against its edge can't grow and stays at
  * base. The window itself is pre-sized to full height, so this returns only
  * the card height — no window placement (the card grows inside a fixed window).
@@ -193,31 +185,12 @@ internal fun computeGrownCardHeight(
 }
 
 /**
- * Widest the pill capsule may render inside a [viewW]-wide lens host.
- *
- * The chips are seated off the pill's own edges ([computeChipLaneMargins]), so
- * every pixel the pill takes past this cap pushes them a pixel further past the
- * host's frame — where the FrameLayout clips them away, visible disk and touch
- * target together. At exactly this width the two chips land flush with the
- * host's left and right edges: the resting placement they are laid out at
- * before the reveal slides them out from under the pill.
- *
- * @param chipLane horizontal space one chip needs beside the pill — its
- *   hit-halo pad, its visible disk, and the resting gap to the pill's edge.
+ * Widest the pill capsule may render on a [cardW]-wide card: the card less
+ * [sideInset] on each side, so a long word's capsule stops short of the
+ * card's rounded corners instead of hanging past them.
  */
-internal fun computeMaxPillWidth(viewW: Int, chipLane: Int): Int =
-    (viewW - 2 * chipLane).coerceAtLeast(0)
-
-/**
- * Left and right margins that seat the chips one [chipLane] outside a
- * [pillWidth]-wide pill centered in a [viewW]-wide host. Both come out ≥ 0
- * exactly when [pillWidth] is within [computeMaxPillWidth].
- */
-internal fun computeChipLaneMargins(viewW: Int, pillWidth: Int, chipLane: Int): Pair<Int, Int> {
-    val pillLeft = (viewW - pillWidth) / 2
-    val pillRight = pillLeft + pillWidth
-    return (pillLeft - chipLane) to (viewW - pillRight - chipLane)
-}
+internal fun computeMaxPillWidth(cardW: Int, sideInset: Int): Int =
+    (cardW - 2 * sideInset).coerceAtLeast(0)
 
 /**
  * Split what [maxPillWidth] leaves after [fixedChromeWidth] — paddings,
@@ -227,8 +200,7 @@ internal fun computeChipLaneMargins(viewW: Int, pillWidth: Int, chipLane: Int): 
  * The reading takes only what it needs, but never more than half the budget:
  * the headline is the word being looked up, and a long reading must not starve
  * it. Both numbers are handed to their views as maxWidths, so their sum plus
- * the chrome is what bounds the capsule's WRAP_CONTENT width — and that bound
- * is what keeps the chip lanes intact.
+ * the chrome is what bounds the capsule's WRAP_CONTENT width.
  */
 internal fun computePillTextAllotment(
     maxPillWidth: Int,
@@ -245,9 +217,9 @@ class MagnifierLens(
     internal val wm: WindowManager,
     private val displayId: Int,
     private val overlayHost: OverlayHost? = null,
-    /** When false, the post-release Anki chip stays hidden — used by the
-     *  over-game capture panel, whose lens is display + speak only. */
-    private val showAnkiChip: Boolean = true,
+    /** Whether the rows carry the "already in Anki" deck pill, asked for
+     *  once the definitions are up ([WordRowList.Host.deckBadges]). */
+    private val deckBadges: Boolean = true,
     /** When false, the sticky lens never takes window focus, a controller
      *  attached or not: the owner keeps the controller (tap-to-lookup, whose
      *  boxes' cursor A and B drive while its card is up), and the card's own
@@ -258,7 +230,7 @@ class MagnifierLens(
     private fun dp(v: Float) = (v * density).toInt()
 
     private val lensH = dp(120f)
-    /** Card has rounded corners; the body, pill, and chips overlay it. */
+    /** Card has rounded corners; the body and the pill overlay it. */
     private val cardCornerR = dp(16f).toFloat()
 
     /** Distance in px between finger center and the near edge of the lens body. */
@@ -270,18 +242,10 @@ class MagnifierLens(
     /** Pill is 40dp tall, centered on the card's top edge so half overhangs
      *  above the card. */
     private val pillHeightPx = dp(40f)
-    private val chipVisDiameterPx = dp(36f)
-    private val chipHitSizePx = dp(52f)
-    /** Distance from the chip hit-button edge to the visible disk edge. */
-    private val chipHaloPadPx = (chipHitSizePx - chipVisDiameterPx) / 2
-    /** Visible chip disk insets 4dp from the card horizontal edge. The host
-     *  view is wider than the card by exactly this amount on each side so
-     *  the chip's hit halo can extend the full 48dp without clipping. */
-    private val chipHaloXPx = dp(4f)
-    /** Pixels reserved above (or below, when flipped) the card so the chip's
-     *  48dp hit halo can render fully. The chip is vertically centered on
-     *  the card's edge — half its height (24dp) overhangs the card. */
-    private val pillChipOverhangPx = chipHitSizePx / 2
+    /** Pixels the pill needs above (or below, when flipped) the card: it is
+     *  centered on the card's edge, so half its height overhangs. Reserved
+     *  only while the pill shows. */
+    private val pillOverhangPx = pillHeightPx / 2
 
     private val zoom = 2f
     /** Tolerance for the lens overrunning the top of the screen before we
@@ -296,16 +260,12 @@ class MagnifierLens(
     private val growBufferPx = dp(8f)
 
     private var lensView: LensView? = null
-    /** A caller announced styled dictionaries are live: every window this
-     *  lens builds should construct its styled renderer eagerly so the
-     *  shell loads during the drag, not at first bind ([LensView.
-     *  prewarmStyledRenderer]). Sticky for the lens's lifetime — set from
-     *  an async styling check that races window construction, so
-     *  [ensureWindow] honors it at build and [prewarmStyledRenderer]
-     *  covers the already-built case. Worst case after a mid-session
-     *  styling-off is one idle parked WebView per window, destroyed with
-     *  it. */
-    private var styledPrewarmRequested = false
+    /** A lookup through this lens is under way ([prepareDefinitions]):
+     *  every window it builds starts loading its definitions page at once.
+     *  Sticky for the lens's lifetime, because the request can race window
+     *  construction: [ensureWindow] honors it at build and
+     *  [prepareDefinitions] covers the already-built case. */
+    private var definitionsWanted = false
     /** Full-screen host that owns the window; [lensView] is its single child,
      *  slid horizontally inside it. The window is the whole display so a tap
      *  anywhere off the card is caught and consumed (dismiss without leaking
@@ -371,14 +331,19 @@ class MagnifierLens(
      *  never while the row is loading. The host resolves the held-back
      *  sections and rebinds the split with them. */
     var onLoadMoreTap: (() -> Unit)? = null
-    /** Fires when the right chip (Anki) is tapped in sticky mode. */
-    var onAnkiTap: (() -> Unit)? = null
-    /** Fires when the right chip (Anki) is long-pressed in sticky mode.
-     *  Used by the one-tap feature to open the editable review sheet
-     *  while a short tap performs the headless send. */
-    var onAnkiLongPress: (() -> Unit)? = null
-    /** Fires when the left chip (Speak) is tapped in sticky mode. */
-    var onSpeakTap: (() -> Unit)? = null
+    /** Fires when a row's Anki button is tapped in sticky mode: null for
+     *  the tapped unit's row, else the secondary's index
+     *  ([setSplitDefinitions]). Only rows whose section sets
+     *  [LensSection.anki] have the button. */
+    var onAnkiTap: ((secondary: Int?) -> Unit)? = null
+    /** Fires when a row's Anki button is HELD (a finger, or the
+     *  controller's activate key), for the same row as [onAnkiTap]: the
+     *  headless one-tap, where the tap opens the editable review. */
+    var onAnkiLongPress: ((secondary: Int?) -> Unit)? = null
+    /** Speaks a row's word and returns when it is done (the row draws its
+     *  spinner meanwhile): null for the tapped unit's row, else the
+     *  secondary's index. */
+    var onSpeak: (suspend (secondary: Int?) -> Unit)? = null
 
     /** True when there's no [overlayHost] — the lens attaches directly to the
      *  activity window (TYPE_APPLICATION_PANEL) instead of going through a
@@ -387,16 +352,13 @@ class MagnifierLens(
 
     val isInteractive: Boolean get() = lensView?.isInteractive == true
 
-    /** Styled dictionaries are live for this session: build each window's
-     *  styled renderer eagerly so its shell page loads during the drag
-     *  instead of at the first styled bind — the shell load is what makes
-     *  a fresh renderer lose [LensView.setDefinitions]'s grace hold and
-     *  flash flat-then-styled on every lookup. Call whenever styling is
-     *  known active (e.g. drag start, beside [YomitanDefinitionsView.
-     *  warmUp]); sticky for this lens's lifetime. */
-    fun prewarmStyledRenderer() {
-        styledPrewarmRequested = true
-        lensView?.prewarmStyledRenderer()
+    /** A lookup is under way (a drag has started): load the definitions
+     *  page while the user moves toward a word, so the first definition does
+     *  not wait for it. This is the first moment a lens touches the WebView;
+     *  nothing loads for a lens that only magnifies. */
+    fun prepareDefinitions() {
+        definitionsWanted = true
+        lensView?.prepareDefinitions()
     }
 
     /** True while the sticky lens HOLDS WINDOW FOCUS for controller input —
@@ -435,24 +397,21 @@ class MagnifierLens(
         lensView?.setLabel(word, reading)
     }
 
-    /** Single-unit definitions body. [opens] draws the body's floating
-     *  chevron — the same open cue every split section carries — and is
-     *  false only when the caller has nothing to open into (no entry, so
-     *  no [onOpenTap]); it is a cue, not a gate, so tap routing is
-     *  unchanged either way. Pass null [data] to return to the zoom body. */
-    fun setDefinitions(data: WordDefinitionData?, label: String?, opens: Boolean = true) {
-        lensView?.setDefinitions(data, label, opens)
-        // Re-fit when an already-interactive lens gets new content (the Anki
-        // deck-badge back-fill re-binds after makeInteractive). Pre-release
-        // and dwell-preview binds aren't interactive, so they stay at base
-        // height until makeInteractive runs the first fit.
+    /** Single-unit definitions body: one row, [section]'s. Its
+     *  [LensSection.opens] draws the row's chevron and is false only when
+     *  the caller has nothing to open into (no entry, so no [onOpenTap]).
+     *  Pass null to return to the zoom body. */
+    fun setDefinitions(section: LensSection?) {
+        lensView?.setDefinitions(section)
+        // Re-fit when an already-interactive lens gets new content.
+        // Pre-release and dwell-preview binds aren't interactive, so they
+        // stay at base height until makeInteractive runs the first fit.
         if (isInteractive) fitHeightToContent()
     }
 
     /** Split definitions body: the [primary] section plus one or more
      *  [secondaries], dividers between, each headed by its own headword and
-     *  (when it opens) a trailing chevron, an alternative entry's header
-     *  under its [LensSection.caption]. [primary] is the TAPPED unit:
+     *  (when it opens) a trailing chevron. [primary] is the TAPPED unit:
      *  the pill keeps its identity and [onOpenTap] is its open action;
      *  each secondary routes to [onSecondaryOpenTap] with its list index.
      *  [secondariesOnTop] places the LONGER unit above: true on the
@@ -475,8 +434,8 @@ class MagnifierLens(
      *  clamped against the grown viewport; the grow's frames are draw-only
      *  (translation and clip, see [LensView.setGrowFrame]) and never touch
      *  the scroll offset, so the grow does not undo it. A later relayout
-     *  keeps the offset in pixels: a section above the viewport that swaps
-     *  to its styled renderer afterwards changes height and shifts what
+     *  keeps the offset in pixels: a section above the viewport whose
+     *  height changes afterwards (an image taking its box) shifts what
      *  the viewport shows. */
     fun setSplitDefinitions(
         primary: LensSection,
@@ -496,11 +455,55 @@ class MagnifierLens(
         lensView?.setLoadMoreLoading(loading)
     }
 
+    /** The "Load more" row's text as bound; null when the lens has none. */
     @VisibleForTesting
-    internal fun loadMoreRowForTest(): TextView? = lensView?.loadMoreRow
+    internal fun loadMoreTextForTest(): String? = lensView?.loadMoreTextOrNull()
 
+    /** The ids of the rows a controller can reach, top to bottom. */
     @VisibleForTesting
-    internal fun navSectionsForTest(): List<View> = lensView?.navSections().orEmpty()
+    internal fun navRowsForTest(): List<String> = lensView?.navRows().orEmpty()
+
+    /** Stands in for the page under a JVM test: a layout report with every
+     *  row [rowHeightCssPx] tall ([DefinitionDocument.layoutForTest]). */
+    @VisibleForTesting
+    internal fun layoutRowsForTest(rowHeightCssPx: Int) {
+        lensView?.layoutRowsForTest(rowHeightCssPx)
+    }
+
+    /** The rows the lens has bound, in visual order. */
+    @VisibleForTesting
+    internal fun shownRowsForTest(): List<DefRow> = lensView?.shownRowsForTest().orEmpty()
+
+    /** The target the controller cursor is on, as its row id and action;
+     *  null when it is on no row. */
+    @VisibleForTesting
+    internal fun cursorForTest(): Pair<String, String>? = lensView?.cursorForTest()
+
+    /** The scrolling body's top and bottom padding, in px. */
+    @VisibleForTesting
+    internal fun bodyPadsForTest(): Pair<Int, Int>? = lensView?.bodyPadsForTest()
+
+    /** The top of row [id] in the scrolling body, in px. */
+    @VisibleForTesting
+    internal fun rowTopForTest(id: String): Int? = lensView?.rowTopForTest(id)
+
+    /** The tap the page would report on [act] of row [id]: the row itself
+     *  by default (the footer's own action for the "Load more" row). */
+    @VisibleForTesting
+    internal fun tapRowForTest(
+        id: String,
+        act: String = if (id == WordRowList.FOOTER_ID) DefAction.MORE else DefAction.OPEN,
+    ) {
+        lensView?.tapRowForTest(id, act)
+    }
+
+    /** Whether the pill is drawn (it is hidden while definition rows show). */
+    @VisibleForTesting
+    internal fun pillShownForTest(): Boolean = lensView?.pillShownForTest() == true
+
+    /** The lens window's root, where key events enter. */
+    @VisibleForTesting
+    internal fun rootViewForTest(): View? = lensView?.rootView
 
     @VisibleForTesting
     internal fun scrollYForTest(): Int = lensView?.definitionsScroll?.scrollY ?: 0
@@ -523,11 +526,6 @@ class MagnifierLens(
         lensView?.setPillLoading(loading)
     }
 
-    /** Show or hide the loading spinner on the Speak chip. */
-    fun setSpeakChipLoading(loading: Boolean) {
-        lensView?.setSpeakChipLoading(loading)
-    }
-
     /** Promote the shown lens to sticky. Returns false when there is no lens
      *  to promote (its window never attached, or a rebuild lost it): the
      *  owner's session has no lens to end from later and ends itself
@@ -537,7 +535,7 @@ class MagnifierLens(
         val root = lensRoot ?: return false
         val p = params ?: return false
         // The interactive card needs window focus only for key/stick
-        // navigation (dpad + A over the pill/chips, stick scroll, B/Escape
+        // navigation (dpad + A over the rows and their buttons, stick scroll, B/Escape
         // dismiss). With no gamepad or hardware keyboard attached there is
         // nothing to navigate WITH, so stay non-focusable: focus taking is
         // never free (it steals key input from the app beneath). Touch and
@@ -589,17 +587,19 @@ class MagnifierLens(
         if (hook != null) hook(rawX, rawY) else dismiss()
     }
 
-    /** Controller-opened lens: ring the pill from the start, so the next A
-     *  drills straight into the detail screen. A touch-opened lens selects on
-     *  the first controller input instead (the sheet's first-press rule). */
-    fun focusPillForController() {
-        lensView?.focusPill()
+    /** Controller-opened lens: the cursor starts on its first target (the
+     *  word's row, once it shows), so the next A drills straight into the
+     *  detail screen. A touch-opened lens selects on the first controller
+     *  input instead (the sheet's first-press rule). */
+    fun focusForController() {
+        lensView?.focusStart()
     }
 
-    /** Grow the card to fit newly-bound definitions on an ALREADY-interactive
-     *  lens — the Anki deck-badge re-bind after [makeInteractive]. Grows the
-     *  card inside the fixed full-height window; no-op for dwell-preview binds
-     *  (not yet interactive), so the card stays at base height until release. */
+    /** Grow the card to fit its definitions on an ALREADY-interactive lens:
+     *  a bind after [makeInteractive], and every layout the page reports (a
+     *  page cannot be measured before it has drawn). Grows the card inside
+     *  the fixed full-height window; no-op for dwell-preview binds (not yet
+     *  interactive), so the card stays at base height until release. */
     fun fitHeightToContent() {
         val view = lensView ?: return
         if (!view.isInteractive) return
@@ -618,7 +618,9 @@ class MagnifierLens(
             baseCardH = lensH,
             safeTop = safeTop,
             safeBottom = safeBottom,
-            overhang = pillChipOverhangPx,
+            // Nothing overhangs a card whose pill is hidden (its rows name
+            // the word): the card may grow to the safe edge itself.
+            overhang = if (view.pillShows) pillOverhangPx else 0,
         )
     }
 
@@ -650,10 +652,9 @@ class MagnifierLens(
     }
 
     /** Where the sticky arrow's tip sits inside the lens column: over the
-     *  finger, kept inside the card region (lens-local coords), not the
-     *  chip-halo padding. */
+     *  finger, kept inside the card (lens-local coords). */
     private fun arrowRelX(): Int =
-        (lastFingerX - lastLensX).coerceIn(chipHaloXPx + arrowSizePx, chipHaloXPx + lastCardW - arrowSizePx)
+        (lastFingerX - lastLensX).coerceIn(arrowSizePx, lastCardW - arrowSizePx)
 
     /** Slide the lens column to the finger's x, inboard of what the window
      *  hears ([columnRange]); a sticky card takes its arrow along. The one
@@ -670,7 +671,7 @@ class MagnifierLens(
         val root = lensRoot ?: return
         val view = lensView ?: return
         val p = params ?: return
-        val viewW = lastCardW + 2 * chipHaloXPx
+        val viewW = lastCardW
         lastLensX = (lastFingerX - viewW / 2).coerceIn(columnRange(root, p.width, viewW))
         root.setLensX(lastLensX)
         if (view.isInteractive) view.setArrowVisible(true, arrowRelX())
@@ -769,15 +770,15 @@ class MagnifierLens(
         p.flags = zoomWindowFlags()
         try { wm.updateViewLayout(root, p) } catch (_: Exception) {}
         view.detachInteractiveListeners()
-        view.setDefinitions(null, null, opens = false)
+        view.setDefinitions(null)
         view.setLabel(null, null)
         view.setSourceBitmap(null)
         view.setArrowVisible(false, 0)
     }
 
     /** Card width — the visible rounded panel — under the existing
-     *  responsive rule: `min(screenW × 0.85, 380dp)`. The host view is
-     *  wider by 2 × [chipHaloXPx] so the chip hit halos can render. */
+     *  responsive rule: `min(screenW × 0.85, 380dp)`. The lens column is
+     *  exactly the card. */
     private fun cardWidth(screenW: Int): Int =
         (screenW * 0.85f).toInt().coerceAtMost(dp(380f))
 
@@ -796,7 +797,7 @@ class MagnifierLens(
      * tolerate a small overhang past the screen top because the user's
      * finger is on-screen and they can see what happens; in activity-window
      * mode there's a status bar to worry about, so we require the lens
-     * window — including the pill/chip overhang — to fully fit before
+     * window — including the pill's overhang — to fully fit before
      * staying above.
      */
     fun show(
@@ -827,8 +828,7 @@ class MagnifierLens(
         cachedThemeKey = themeKey
 
         val cardW = cardWidth(screenW)
-        val viewW = cardW + 2 * chipHaloXPx
-        ensureWindow(cardW, viewW, screenW, screenH)
+        ensureWindow(cardW, screenW, screenH)
         val view = lensView
         val root = lensRoot
         if (view == null || root == null) {
@@ -850,12 +850,11 @@ class MagnifierLens(
 
         val aboveY = fingerY - verticalMarginPx - lensH
         // Activity-window callers (tap-on-word in the result screen) need the
-        // pill/chip overhang to fully clear the screen top — there's a status
+        // pill's overhang to fully clear the screen top — there's a status
         // bar in the way. Drag callers can tolerate a small overhang past the
-        // screen top (the user is actively pointing at the screen and the
-        // chip's exact position isn't load-bearing).
+        // screen top (the user is actively pointing at the screen).
         val flipThreshold =
-            if (useActivityWindow) pillChipOverhangPx else -topOverhangTolerancePx
+            if (useActivityWindow) pillOverhangPx else -topOverhangTolerancePx
         val flipped = aboveY < flipThreshold + flipBiasPx
         view.setSourcePoint(fingerX.toFloat(), fingerY.toFloat(), screenW, screenH)
         view.setLensFlipped(flipped)
@@ -919,12 +918,12 @@ class MagnifierLens(
         // view (holding it) forever. resetToZoom() detaches separately; a
         // second detach here is idempotent.
         lensView?.detachInteractiveListeners()
-        // The styled renderer's native WebView must be destroy()ed, not
-        // just dropped with the window: a removed-but-undestroyed WebView
-        // holds renderer resources and its context graph until GC, so
-        // repeated lens open/dismiss churn accumulates the most expensive
-        // object in the app (Codex adversarial catch).
-        lensView?.releaseStyledView()
+        // The definitions page's WebView must be destroy()ed, not just
+        // dropped with the window: a removed-but-undestroyed WebView holds
+        // renderer resources and its context graph until GC, so repeated
+        // lens open/dismiss churn would accumulate the most expensive
+        // object in the app.
+        lensView?.releaseDefinitions()
         heightAnimator?.cancel()
         heightAnimator = null
         lensCardHeight = lensH
@@ -959,7 +958,7 @@ class MagnifierLens(
         }
     }
 
-    private fun ensureWindow(cardW: Int, viewW: Int, screenW: Int, windowH: Int) {
+    private fun ensureWindow(cardW: Int, screenW: Int, windowH: Int) {
         if (lensView != null) return
         // Build the themed context fresh on each window construction so
         // it reflects the user's current mode + accent. Caching this at
@@ -970,28 +969,23 @@ class MagnifierLens(
         val view = LensView(
             ctx = themedCtx,
             cardW = cardW,
-            viewW = viewW,
             lensH = lensH,
-            chipHaloXPx = chipHaloXPx,
-            pillChipOverhangPx = pillChipOverhangPx,
+            pillOverhangPx = pillOverhangPx,
             cardCornerR = cardCornerR,
             zoom = zoom,
             arrowSizePx = arrowSizePx,
             pillHeightPx = pillHeightPx,
-            chipVisDiameterPx = chipVisDiameterPx,
-            chipHitSizePx = chipHitSizePx,
-            chipHaloPadPx = chipHaloPadPx,
             density = density,
             onOpenTap = { onOpenTap?.invoke() },
             onSecondaryOpenTap = { i -> onSecondaryOpenTap?.invoke(i) },
             onLoadMoreTap = { onLoadMoreTap?.invoke() },
-            onAnkiTap = { onAnkiTap?.invoke() },
-            onAnkiLongPress = { onAnkiLongPress?.invoke() },
-            onSpeakTap = { onSpeakTap?.invoke() },
-            showAnkiChip = showAnkiChip,
-            onStyledHeightChanged = { fitHeightToContent() },
+            onAnkiTap = { i -> onAnkiTap?.invoke(i) },
+            onAnkiLongPress = { i -> onAnkiLongPress?.invoke(i) },
+            onSpeak = { i -> onSpeak?.invoke(i) },
+            deckBadges = deckBadges,
+            onBodyHeightChanged = { fitHeightToContent() },
         )
-        val root = LensRoot(themedCtx, view, viewW)
+        val root = LensRoot(themedCtx, view, cardW)
         root.onInsetsChanged = {
             placeColumn()
             refitToBounds()
@@ -1027,7 +1021,7 @@ class MagnifierLens(
         lensView = view
         lensRoot = root
         params = lp
-        if (styledPrewarmRequested) view.prewarmStyledRenderer()
+        if (definitionsWanted) view.prepareDefinitions()
         // A bitmap attached before this view existed (deferred-reveal scene
         // flow) applies now; null is a harmless no-op-equivalent.
         view.setSourceBitmap(sourceBitmapForShow)
@@ -1175,43 +1169,39 @@ class MagnifierLens(
     /**
      * Card-width view for the redesigned lens. Sits inside [LensRoot] and is
      * slid horizontally to follow the finger; vertically the card is placed at
-     * the screen Y given by [bodyTopOffset] and grows there. The pill/chip halo
-     * overhangs one card edge and the arrow strip the other (top/bottom swap
-     * with the flip state).
+     * the screen Y given by [bodyTopOffset] and grows there. The pill, while
+     * it shows, overhangs one card edge and the arrow strip the other
+     * (top/bottom swap with the flip state).
      *
      * Card panel (background + border) is painted on canvas in [draw] so we
      * can clip the zoomed pixels and the inset shadow to the rounded-rect
-     * shape. Pill + chips are real child views overlaid on top.
+     * shape. The pill is a real child view overlaid on top.
      */
     private class LensView(
         ctx: Context,
         private val cardW: Int,
-        private val viewW: Int,
         private val lensH: Int,
-        private val chipHaloXPx: Int,
-        private val pillChipOverhangPx: Int,
+        private val pillOverhangPx: Int,
         private val cardCornerR: Float,
         private val zoom: Float,
         private val arrowSizePx: Int,
         private val pillHeightPx: Int,
-        private val chipVisDiameterPx: Int,
-        private val chipHitSizePx: Int,
-        private val chipHaloPadPx: Int,
         private val density: Float,
         private val onOpenTap: () -> Unit,
         private val onSecondaryOpenTap: (Int) -> Unit,
         private val onLoadMoreTap: () -> Unit,
-        private val onAnkiTap: () -> Unit,
-        private val onAnkiLongPress: () -> Unit,
-        private val onSpeakTap: () -> Unit,
-        private val showAnkiChip: Boolean,
-        /** The body the card should fit changed height — a styled paint
-         *  report, or a fallback to flat in a card fitted to a styled
-         *  panel (deadline, empty render, renderer death). The owner
-         *  re-runs its card-height fit, which is grow-only, so calling it
-         *  when the body already fits is a no-op (LensView is not an
-         *  inner class). */
-        private val onStyledHeightChanged: () -> Unit,
+        /** A row's Anki button, tapped and held: null for the tapped unit's
+         *  row, else the secondary's index. */
+        private val onAnkiTap: (Int?) -> Unit,
+        private val onAnkiLongPress: (Int?) -> Unit,
+        /** Speaks a row's word, returning when it is done. */
+        private val onSpeak: suspend (Int?) -> Unit,
+        private val deckBadges: Boolean,
+        /** The body the card should fit changed height (the definitions
+         *  page reported a layout). The owner re-runs its card-height fit,
+         *  which is grow-only, so calling it when the body already fits is
+         *  a no-op (LensView is not an inner class). */
+        private val onBodyHeightChanged: () -> Unit,
     ) : FrameLayout(ctx) {
         private fun dp(v: Float): Int = (density * v).toInt()
         /** sp → px through the display metrics, so the pill's fit measures text
@@ -1241,27 +1231,30 @@ class MagnifierLens(
         /** Override for the card's top edge within the view. Non-null only
          *  while the card grows inside a pre-sized window (the not-flipped
          *  case, where the card is bottom-anchored, so its top must ride up
-         *  as it grows rather than sitting at the fixed pill/chip overhang).
+         *  as it grows rather than sitting at the fixed pill overhang).
          *  Null restores the flip-default. */
         private var bodyTopOverride: Int? = null
         /** Y of the card's top edge within the view. */
         private val bodyTopOffset: Int
-            get() = bodyTopOverride ?: if (lensFlipped) arrowSizePx else pillChipOverhangPx
+            get() = bodyTopOverride ?: if (lensFlipped) arrowSizePx else pillOverhangPx
         private val cardBottomInView: Int get() = bodyTopOffset + cardHeightPx
         /** Y of the line the pill is centered on — the card edge opposite
          *  the arrow (top when not flipped, bottom when flipped). */
         private val pillAnchorY: Int
             get() = if (lensFlipped) cardBottomInView else bodyTopOffset
-        private val cardLeftInView: Int get() = chipHaloXPx
-        private val cardRightInView: Int get() = chipHaloXPx + cardW
-        /** Vertical extent of the lens chrome (card body + the pill/chip
-         *  overhang and arrow on its two edges) within the full-height window.
-         *  Taps outside this band — the transparent area above/below the lens —
-         *  dismiss in sticky mode. */
+        private val cardLeftInView: Int get() = 0
+        private val cardRightInView: Int get() = cardW
+        /** What the pill takes past the card's edge just now: half its
+         *  height while it shows, nothing once the rows name the word. */
+        private val pillOverhang: Int get() = if (pillShows) pillOverhangPx else 0
+        /** Vertical extent of the lens chrome (card body + the pill's
+         *  overhang and the arrow on its two edges) within the full-height
+         *  window. Taps outside this band — the transparent area above/below
+         *  the lens — dismiss in sticky mode. */
         private val contentTopInView: Int
-            get() = bodyTopOffset - if (lensFlipped) arrowSizePx else pillChipOverhangPx
+            get() = bodyTopOffset - if (lensFlipped) arrowSizePx else pillOverhang
         private val contentBottomInView: Int
-            get() = cardBottomInView + if (lensFlipped) pillChipOverhangPx else arrowSizePx
+            get() = cardBottomInView + if (lensFlipped) pillOverhang else arrowSizePx
 
         private var arrowVisible = false
         private var arrowOffsetX = 0
@@ -1282,9 +1275,6 @@ class MagnifierLens(
         // the outline wraps the arrow continuously with the panel.
         // The base is left unstroked — it sits on the card edge and
         // the card border carries through underneath.
-        private val chipBgColor = withAlpha(ctx.themeColor(R.attr.ptSurface), 240)  // 0.94
-        private val chipBorderColor = withAlpha(ctx.themeColor(R.attr.ptText), 56)  // 0.22
-        private val chipIconColor = withAlpha(ctx.themeColor(R.attr.ptText), 209)  // 0.82
         // Pill ink alphas mirror the spec (1.0 / 0.22 / 0.72 / 0.5) applied
         // over the accent-paired ink color so a non-coral accent still
         // gets readable ink on its pill.
@@ -1479,110 +1469,19 @@ class MagnifierLens(
             typeface = Typeface.DEFAULT_BOLD
         }
 
-        // -----------------------------------------------------------------
-        // Chips: Speak (left) and Anki (right) route through the lens's
-        // [onSpeakTap] / [onAnkiTap] callbacks — wired in [DragLookupController].
-        // -----------------------------------------------------------------
-        /** Gap between the chip's visible disk and the pill's outer edge
-         *  in the resting (post-reveal) layout. */
-        private val chipPillGapPx = dp(14f)
-        /** Horizontal space one chip claims beside the pill: the outer half of
-         *  its hit halo, its visible disk, and the gap to the pill. */
-        private val chipLanePx = chipHaloPadPx + chipVisDiameterPx + chipPillGapPx
-        /** Hard cap on the pill's width — what's left of the host view once
-         *  both chip lanes are reserved. [fitPillText] sizes and bounds the
-         *  pill's text against it, which is what keeps [revealChips] able to
-         *  seat both chips inside the frame however long the word is. */
-        private val pillMaxWidthPx = computeMaxPillWidth(viewW, chipLanePx)
-
-        // Speak chip's loading spinner — swapped in for the icon while a TTS
-        // request is in flight (see [setSpeakChipLoading]).
-        private val leftChipSpinner = ProgressBar(
-            context, null, android.R.attr.progressBarStyleSmall,
-        ).apply {
-            isIndeterminate = true
-            indeterminateTintList = ColorStateList.valueOf(chipIconColor)
-            layoutParams = LayoutParams(dp(16f), dp(16f), Gravity.CENTER)
-            visibility = GONE
-        }
-        private val leftChipIcon = makeChipIcon(R.drawable.ic_lens_speak)
-        private val leftChip = makeChip(
-            { onSpeakTap() },
-            null,
-            leftChipIcon, leftChipSpinner,
-        )
-        // Anki chip: tap fires onAnkiTap (which one-tap or sheet-open),
-        // long-press always fires onAnkiLongPress (which opens the
-        // editable review sheet) — wired to whichever callback the
-        // surrounding flow supplies.
-        private val rightChip = makeChip(
-            { onAnkiTap() },
-            { onAnkiLongPress() },
-            makeChipIcon(R.drawable.ic_card_stack_add),
-        )
-
-        /** Build a chip: a clickable disk with [content] views centered on it.
-         *  Content (icon, optional spinner) is supplied so the caller can keep
-         *  references for state swaps. [onLongClick], when non-null, fires
-         *  on long-press and consumes the gesture (returns true). */
-        private fun makeChip(
-            onClick: () -> Unit,
-            onLongClick: (() -> Unit)? = null,
-            vararg content: View,
-        ): FrameLayout {
-            val chip = FrameLayout(context).apply {
-                isClickable = true
-                setOnClickListener { onClick() }
-                if (onLongClick != null) {
-                    setOnLongClickListener {
-                        onLongClick()
-                        true
-                    }
-                }
-                visibility = GONE
-            }
-            val disk = View(context).apply {
-                background = GradientDrawable().apply {
-                    shape = GradientDrawable.OVAL
-                    setColor(chipBgColor)
-                    setStroke(density.toInt().coerceAtLeast(1), chipBorderColor)
-                }
-                layoutParams = LayoutParams(
-                    chipVisDiameterPx, chipVisDiameterPx,
-                    Gravity.CENTER,
-                )
-            }
-            chip.addView(disk)
-            content.forEach { chip.addView(it) }
-            return chip
-        }
-
-        private fun makeChipIcon(iconRes: Int): ImageView = ImageView(context).apply {
-            val d = AppCompatResources.getDrawable(context, iconRes)?.mutate()
-            if (d != null) {
-                DrawableCompat.setTint(d, chipIconColor)
-                setImageDrawable(d)
-            }
-            scaleType = ImageView.ScaleType.CENTER_INSIDE
-            layoutParams = LayoutParams(dp(16f), dp(16f), Gravity.CENTER)
-        }
-
-        /** Swap the Speak chip between its icon and a loading spinner, shown
-         *  while a TTS request is in flight. */
-        fun setSpeakChipLoading(loading: Boolean) {
-            leftChipIcon.visibility = if (loading) GONE else VISIBLE
-            leftChipSpinner.visibility = if (loading) VISIBLE else GONE
-        }
+        /** Hard cap on the pill's width ([computeMaxPillWidth]):
+         *  [fitPillText] sizes and bounds the pill's text against it. */
+        private val pillMaxWidthPx = computeMaxPillWidth(cardW, cardCornerR.toInt())
 
         // -----------------------------------------------------------------
         // Body: definitions ScrollView, occupies the full card area.
-        //   - Top padding clears the pill so the first row doesn't start
-        //     under it. With `clipToPadding = false`, scrolling reveals
-        //     the content sliding under the pill (the pill is drawn on
-        //     top of the ScrollView in the FrameLayout z-order).
-        //   - Horizontal padding sits on the inner `definitionsContent`
-        //     so the scrolling surface itself extends to the card's
-        //     left and right edges, while the rows stay inset.
+        //   - While the pill shows (the loading body), the padding on its
+        //     side clears it so the first line doesn't start under it.
+        //     Definition rows carry their own padding and are shown with
+        //     the pill hidden, so they get none ([bodyPads]): the space the
+        //     pill took is theirs.
+        //   - Horizontal padding is the rows' own, so the scrolling surface
+        //     itself extends to the card's left and right edges.
         // -----------------------------------------------------------------
         private val bodyHPaddingPx = dp(18f)
         private val bodyPillSidePadPx = dp(26f)
@@ -1592,81 +1491,94 @@ class MagnifierLens(
          *  the scrollbar / content edges, and scrolled glyphs clip
          *  short of the 1dp card border instead of overdrawing it. */
         private val bodyEdgeBufferPx = dp(2f)
-        private val definitionsContent = WordDefinitionsView(ctx).apply {
-            // Asymmetric horizontal padding: -6dp on the left, +2dp on
-            // the right, so the text sits optically centered against the
-            // right-side scrollbar gutter.
-            setPadding(bodyHPaddingPx - dp(6f), 0, bodyHPaddingPx + dp(2f), 0)
-            // This panel is itself ptSurface — the view's default ptSurface
-            // chip fill would vanish into it.
-            metaChipFill = panelBadgeBg
-            // No-entry words keep the lens up (instead of dismissing) with
-            // this placeholder body; the pill still shows the word. Covers
-            // both the drag lens and the in-app tap-word lens.
-            emptyPlaceholder = ctx.getString(R.string.word_detail_no_definitions)
-        }
-        /** Split (phrase + word) body — built per bind by
-         *  [setSplitDefinitions], visibility-swapped against the flat and
-         *  styled renderers. */
-        private val splitContent = LinearLayout(ctx).apply {
+        /** The LOADING body: a spinner and "Looking up…"
+         *  ([populateLoading]). Native, so it shows the instant a lookup
+         *  starts, whether or not a page is loaded yet. */
+        private val loadingContent = LinearLayout(ctx).apply {
             orientation = LinearLayout.VERTICAL
+            setPadding(bodyHPaddingPx - dp(6f), 0, bodyHPaddingPx + dp(2f), 0)
             visibility = GONE
         }
-        /** True while [splitContent] is the visible body. Drives the
-         *  height fit, the tap-eligibility carve-out (sections own their
-         *  taps), and the controller-nav candidate list. */
-        private var splitActive = false
-        /** The split body's tappable section roots in VISUAL order (top →
-         *  bottom) — the nav walk's candidates and activation targets
-         *  (activation is the section's own click, so the wiring lives in
-         *  one place). Non-opening sections aren't listed; the "Load more"
-         *  row, when bound, is listed last. */
-        private var splitSectionViews: List<View> = emptyList()
-        /** The split body's "Load more" row, built by [setSplitDefinitions]
-         *  when the bind carries a [LensLoadMore]; null otherwise. */
-        var loadMoreRow: TextView? = null
-            private set
-        /** The bound row's state: [setLoadMoreLoading] flips its loading
-         *  flag and [fireLoadMoreTap] reads it. */
-        private var loadMoreState: LensLoadMore? = null
 
-        /** The open-cue chevron every body cell carries — trailing a split
-         *  section's header, or floating over a headerless body. */
-        private val sectionChevronSize = dp(13f)
-        /** The single-unit body's open cue: floats over the body's top-right
-         *  at the CONTENT edge (the flat and styled renderers share that
-         *  inset), level with the first row, the same placement the
-         *  headerless top section of a split uses — so a lone word's cell
-         *  reads exactly like a compound's. Shown by [setDefinitions] when
-         *  the unit opens; hidden for the zoom body and for a split, whose
-         *  sections carry their own. Kept painted over a styled swap-in
-         *  ([ensureStyledView] brings it back to the front). */
-        private val singleChevronView = buildSectionChevron().apply { visibility = GONE }
+        /** Where the definitions document's view lives. */
+        private val documentSlot = FrameLayout(ctx)
 
-        /** The scroll's single child: the flat renderer plus the split
-         *  container plus (lazily) the styled WebView renderer,
-         *  visibility-swapped per bind. Keeping the ScrollView as the ONE
-         *  scroller preserves the stick-scroll repeater and the
-         *  clip/translation grow animation unchanged — the styled view is
-         *  always sized to its full content height and never scrolls itself
-         *  ([YomitanDefinitionsView]'s contract). */
+        /** One row of the lens: a section, and where it stands among them
+         *  (null for the tapped unit, else its index among the secondaries,
+         *  which is what the owners' callbacks take). */
+        private class LensItem(val section: LensSection, val secondary: Int?)
+
+        /** The definitions: ONE word list for whatever the lens shows of a
+         *  lookup (the word alone, or the word with its phrase, its member
+         *  words and its other entries, and the "Load more" footer). It is
+         *  the list the Words card and the dictionary search draw, so each
+         *  row is the app's word row with its own Speak and Anki buttons,
+         *  and the list owns a speaking row's spinner, the deck pills and
+         *  the dispatch of every tap. The list never scrolls itself:
+         *  [definitionsScroll] stays the one scroller, so the stick scroll
+         *  and the grow animation are untouched. Its jobs run on
+         *  [docScope], cancelled with the window ([releaseDefinitions]). */
+        private val docScope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
+        private val emptyText = ctx.getString(R.string.word_detail_no_definitions)
+        private val list = WordRowList<LensItem>(
+            ctx, documentSlot, docScope,
+            host = object : WordRowList.Host<LensItem> {
+                override val isAlive: Boolean get() = isAttachedToWindow
+                override val deckBadges: Boolean get() = this@LensView.deckBadges
+                override fun trailing(row: LensItem): DefRow.Trailing? =
+                    if (row.section.anki) DefRow.Trailing.ANKI else null
+                override fun trailingHolds(row: LensItem): Boolean = row.section.anki
+                override fun onOpen(row: LensItem) {
+                    if (row.secondary == null) fireOpenTap() else fireSecondaryOpenTap(row.secondary)
+                }
+                override fun onTrailing(row: LensItem, shown: DefRow.Trailing) = onAnkiTap(row.secondary)
+                override fun onTrailingHold(row: LensItem) = onAnkiLongPress(row.secondary)
+                override suspend fun speak(row: LensItem) = onSpeak(row.secondary)
+                override fun onFooter() = fireLoadMoreTap()
+            },
+            describe = { WordRowList.Entry(it.section.data, it.section.opens, it.section.label, emptyText) },
+            theme = {
+                DefinitionsDocument.DocTheme(
+                    DefinitionsDocument.Tokens(
+                        text = context.themeColor(R.attr.ptText),
+                        textMuted = context.themeColor(R.attr.ptTextMuted),
+                        textHint = context.themeColor(R.attr.ptTextHint),
+                        accent = accentColor,
+                        panel = context.themeColor(R.attr.ptSurface),
+                        baseFontSizePx = WordRowList.GLOSS_SP * LENS_DEFINITIONS_SCALE,
+                    ),
+                    divider = cardBorderColor,
+                    band = 0,
+                    link = context.themeColor(R.attr.ptTextLink),
+                )
+            },
+            // The lens is where the word is read: everything, links live.
+            full = true,
+            onLayout = ::onDocumentLayout,
+        )
+
+        /** What the list shows: the last bind's sections, kept so the
+         *  "Load more" footer can be redrawn ([setLoadMoreLoading]). */
+        private class Bind(
+            val primary: LensSection,
+            val secondaries: List<LensSection>,
+            val secondariesOnTop: Boolean,
+            val loadMore: LensLoadMore?,
+        )
+        private var bind: Bind? = null
+
+        /** A row to scroll to once the page has laid it out
+         *  ([LensScroll.Reveal]); null for none. */
+        private var pendingReveal: String? = null
+
+        /** The scroll's single child: the loading body and the document's
+         *  slot. Keeping the ScrollView as the ONE scroller preserves the
+         *  stick-scroll repeater and the clip/translation grow animation. */
         private val bodyContainer = FrameLayout(ctx).apply {
-            addView(definitionsContent)
+            addView(loadingContent)
             addView(
-                splitContent,
+                documentSlot,
                 LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.WRAP_CONTENT),
-            )
-            // Absolute RIGHT, matching the lens's canvas-aligned layout
-            // discipline (as the split sections' floating chevron).
-            addView(
-                singleChevronView,
-                LayoutParams(
-                    sectionChevronSize, sectionChevronSize,
-                    Gravity.TOP or Gravity.RIGHT,
-                ).apply {
-                    topMargin = dp(4f)
-                    rightMargin = bodyHPaddingPx + dp(2f)
-                },
             )
         }
         /** Not private: [MagnifierLens.scrollYForTest] and
@@ -1688,288 +1600,67 @@ class MagnifierLens(
             visibility = GONE
         }
 
-        // ── Styled (WebView) definitions state ────────────────────────
-        private var styledView: YomitanDefinitionsView? = null
-        /** Construction failed once (no WebView provider) — don't retry
-         *  per bind. */
-        private var styledUnavailable = false
-        /** A styled bind is in flight: flat content is showing and the
-         *  page hasn't reported its painted height yet. */
-        private var pendingStyledSwap = false
-        /** The styled view is the visible body (drives height fitting). */
-        var styledActive = false
-            private set
-        private var styledContentHeight = 0
-        /** Identity (headword + reading) of the last single-body bind fed
-         *  to the styled view — [setDefinitions] compares against it to
-         *  decide whether a bind may ride the in-place path. Only consulted
-         *  while [styledActive], which is set exclusively in the funnel
-         *  that also writes this, so it can never be stale when it
-         *  matters. */
-        private var styledBoundKey: Pair<String, String?>? = null
+        // ── The definitions document ──────────────────────────────────
 
-        // ── Split-section styled (WebView) renderers ──────────────────
-        /** Pool of per-SECTION styled renderers for the split body, handed
-         *  out in section order by [obtainSplitStyledView] and reused across
-         *  binds — WebView construction is the expensive part, content swaps
-         *  are cheap, and the drag lens rebinds on every dwell. Detached
-         *  from their section columns between binds; destroyed only with the
-         *  window ([releaseStyledView]) or on renderer death. Distinct from
-         *  [styledView] (the single-unit body's renderer) so the two modes
-         *  can't fight over one instance's height reports. */
-        private val splitStyledPool = mutableListOf<YomitanDefinitionsView>()
-        /** Next pool slot to hand out during the current split build. */
-        private var splitStyledCursor = 0
-        /** Bind generation for the split styled closures, bumped at every
-         *  [hideSplitBody]: a pooled view's late height report from a
-         *  superseded bind must not resurrect detached section views or
-         *  re-fit the card ([YomitanDefinitionsView]'s own render-seq guard
-         *  covers reports superseded by a NEW setContent, but not reports
-         *  from content that was simply torn down). */
-        private var splitBindSeq = 0
+        /** The user is about to look a word up through this lens (a drag
+         *  has started): load the page while they move toward it. */
+        fun prepareDefinitions() = list.prepare()
 
-        /** A styled renderer for the next split section: reuse the pool in
-         *  order, growing it on demand. Null when styled rendering is
-         *  unavailable (no WebView provider / a renderer died) — the
-         *  section then simply stays flat. */
-        private fun obtainSplitStyledView(): YomitanDefinitionsView? {
-            if (styledUnavailable) return null
-            splitStyledPool.getOrNull(splitStyledCursor)?.let { pooled ->
-                splitStyledCursor++
-                (pooled.parent as? ViewGroup)?.removeView(pooled)
-                return pooled
-            }
-            val v = YomitanDefinitionsView(context, lensStyledTokens())
-            if (!v.isUsable()) {
-                styledUnavailable = true
-                return null
-            }
-            // Symmetric insets, matching the split sections' flat bodies
-            // (not the single body's scrollbar-gutter asymmetry).
-            v.setPadding(bodyHPaddingPx - dp(6f), 0, bodyHPaddingPx - dp(6f), 0)
-            splitStyledPool.add(v)
-            splitStyledCursor++
-            return v
+        /** Window teardown ([removeOverlayInternal]): the page and its
+         *  shell go. A dropped but undestroyed WebView holds renderer
+         *  resources and its context graph until GC. Idempotent. */
+        fun releaseDefinitions() {
+            list.release()
+            docScope.coroutineContext.cancelChildren()
+            bind = null
+            pendingReveal = null
+            docCursor = null
+            shownDocCursor = null
         }
 
-        /** Builds the styled renderer AHEAD of the first styled bind so its
-         *  shell page loads while the user is still dragging toward a word
-         *  — the shell is the expensive part (~150ms on the Thor), and a
-         *  bind against a loaded shell is what lets [setDefinitions]'s
-         *  grace hold actually win. The view idles INVISIBLE at 1px until
-         *  a bind swaps content in; no-op when styled rendering is
-         *  unavailable or the view already exists. */
-        fun prewarmStyledRenderer() {
-            ensureStyledView()
-        }
-
-        private fun lensStyledTokens() = DefinitionsDocument.Tokens(
-            text = context.themeColor(R.attr.ptText),
-            textMuted = context.themeColor(R.attr.ptTextMuted),
-            textHint = context.themeColor(R.attr.ptTextHint),
-            accent = accentColor,
-            panel = context.themeColor(R.attr.ptSurface),
-            baseFontSizePx = 16.5f * LENS_DEFINITIONS_SCALE,
-        )
-
-        private fun ensureStyledView(): YomitanDefinitionsView? {
-            styledView?.let { return it }
-            if (styledUnavailable) return null
-            val v = YomitanDefinitionsView(context, lensStyledTokens())
-            if (!v.isUsable()) {
-                styledUnavailable = true
-                return null
+        /** The page laid the rows out: the loading body steps aside (it
+         *  stood until the definitions had pixels) and gives its padding
+         *  back, a pending reveal lands, the card re-fits and the cursor
+         *  follows its target. */
+        private fun onDocumentLayout() {
+            if (mode != Mode.DEFINITIONS) return
+            if (loadingContent.visibility != GONE) {
+                loadingContent.visibility = GONE
+                applyBodyPadding()
             }
-            // Same optical inset as the flat renderer.
-            v.setPadding(bodyHPaddingPx - dp(6f), 0, bodyHPaddingPx + dp(2f), 0)
-            // INVISIBLE at 1px, never GONE: a GONE view is never laid out,
-            // so the page's viewport would stay zero-width and the first
-            // swap would measure content wrapped at every character — the
-            // enormous bogus height that then sticks. INVISIBLE keeps the
-            // WebView laid out at the container's real width (JS still
-            // runs; only drawing is skipped) while contributing 1px to the
-            // container until the first real height arrives.
-            v.visibility = INVISIBLE
-            v.onContentHeight = { h -> onStyledContentHeight(h) }
-            v.onRendererGone = { onStyledRendererGone() }
-            // Non-link taps on the page open the detail view — the page's
-            // own hit testing decides, replacing the tap detector over this
-            // area (see [isTapEligible]). Same debounce as the detector
-            // path, so a gesture crossing both regions can't double-fire.
-            v.onBodyTap = { fireOpenTap() }
-            bodyContainer.addView(v, LayoutParams(LayoutParams.MATCH_PARENT, 1))
-            // The single body's open cue must stay painted over the page.
-            singleChevronView.bringToFront()
-            styledView = v
-            return v
-        }
-
-        /** Painted-height report from the page: size the styled view, and
-         *  if this bind was waiting to swap, reveal it now — flat (shown,
-         *  or held back by [holdBodyForStyled]) stands until the styled
-         *  render actually has pixels (no blank-panel gap). */
-        private fun onStyledContentHeight(h: Int) {
-            val sv = styledView ?: return
-            if (h <= 0) {
-                if (pendingStyledSwap) {
-                    // Empty render: styled is not coming for this bind.
-                    // Settle on the flat body — the flat-first path already
-                    // has it showing, but a held or in-place bind doesn't.
-                    pendingStyledSwap = false
-                    cancelStyledDeadline()
-                    styledActive = false
-                    parkStyledView()
-                    definitionsContent.visibility = VISIBLE
-                    // Refit for the flat body — see the deadline runnable.
-                    onStyledHeightChanged()
-                }
-                return
-            }
-            // Neither pending nor live: the bind this report belongs to was
-            // superseded WITHOUT a new setContent on this view (a split or
-            // loading rebind — [showFlatBody] parked it at 1px), so the
-            // component's render-generation guard can't catch it. Sizing the
-            // INVISIBLE view here would silently stretch the scroll range
-            // under whatever body is now showing.
-            if (!pendingStyledSwap && !styledActive) return
-            cancelStyledDeadline()
-            styledContentHeight = h
-            sv.layoutParams = (sv.layoutParams as? LayoutParams
-                ?: LayoutParams(LayoutParams.MATCH_PARENT, h)).apply { height = h }
-            if (pendingStyledSwap) {
-                pendingStyledSwap = false
-                styledActive = true
-                sv.visibility = VISIBLE
-                definitionsContent.visibility = GONE
-            }
-            if (styledActive) onStyledHeightChanged()
-        }
-
-        /** Full teardown of the styled renderer, for the window-removal
-         *  funnel ([removeOverlayInternal]). Safe to call with no styled
-         *  view; idempotent. */
-        fun releaseStyledView() {
-            styledView?.let {
-                it.destroy()
-                bodyContainer.removeView(it)
-            }
-            styledView = null
-            styledActive = false
-            pendingStyledSwap = false
-            cancelStyledDeadline()
-            splitStyledPool.forEach {
-                it.destroy()
-                (it.parent as? ViewGroup)?.removeView(it)
-            }
-            splitStyledPool.clear()
-        }
-
-        /** Render process death: drop the instance and stay flat — the
-         *  flat content of the current bind is already in the tree. */
-        private fun onStyledRendererGone() {
-            styledView?.let { bodyContainer.removeView(it) }
-            styledView = null
-            styledUnavailable = true
-            styledActive = false
-            pendingStyledSwap = false
-            cancelStyledDeadline()
-            definitionsContent.visibility = VISIBLE
-            // Pre-existing member of the same refit gap (predates the hop
-            // fix): renderer death mid-styled revealed flat in a card
-            // fitted to the dead styled panel. Same closure as the
-            // deadline runnable.
-            onStyledHeightChanged()
-        }
-
-        /** Back to the flat renderer as the visible body (loading, ZOOM,
-         *  or a bind with no styled payload). The split body is fully torn
-         *  down — unlike the styled view it has no deferred measurement to
-         *  keep warm, and stale section views must not stay controller-nav
-         *  candidates. */
-        private fun showFlatBody() {
-            cancelStyledDeadline()
-            styledActive = false
-            pendingStyledSwap = false
-            parkStyledView()
-            hideSplitBody()
-            definitionsContent.visibility = VISIBLE
-        }
-
-        /** The styled view drops to INVISIBLE at 1px — not GONE (it must
-         *  stay laid out at real width for the next swap's measurement),
-         *  and not its old height (an INVISIBLE view still counts toward
-         *  the container's wrap-content measure; a stale tall view would
-         *  leave the scroll full of blank space under the visible body). */
-        private fun parkStyledView() {
-            styledView?.let { sv ->
-                sv.visibility = INVISIBLE
-                (sv.layoutParams as? LayoutParams)?.let { lp ->
-                    if (lp.height != 1) {
-                        lp.height = 1
-                        sv.layoutParams = lp
+            pendingReveal?.let { id ->
+                list.rowTop(id)?.let { top ->
+                    pendingReveal = null
+                    // The report has just resized the document; the scroll
+                    // clamps to the content it has laid out, so the offset
+                    // lands after that layout (in the same pass, before it
+                    // draws). A newer bind makes this one's scroll moot.
+                    val forBind = bind
+                    if (definitionsScroll.isLayoutRequested) {
+                        definitionsScroll.doOnNextLayout {
+                            if (bind === forBind) definitionsScroll.scrollTo(0, top)
+                        }
+                    } else {
+                        definitionsScroll.scrollTo(0, top)
                     }
                 }
             }
-        }
-
-        /** Grace hold for a warm flat→styled bind ([setDefinitions]):
-         *  NEITHER body is visible while the styled render races the
-         *  deadline. Flat is bound and ready underneath — INVISIBLE, not
-         *  GONE, so the card still sizes to it and the reveal doesn't grow
-         *  from nothing. Every exit reveals exactly one body: the
-         *  painted-height report reveals styled; the deadline, an empty
-         *  render, and renderer death reveal flat. */
-        private fun holdBodyForStyled() {
-            styledActive = false
-            parkStyledView()
-            hideSplitBody()
-            definitionsContent.visibility = INVISIBLE
-        }
-
-        /** Bounds a pending styled swap that is NOT showing flat meanwhile
-         *  (a held first reveal, or an in-place styled→styled rebind): if
-         *  the page hasn't reported painted height by the deadline, reveal
-         *  flat now. The swap stays PENDING — a late report still upgrades
-         *  to styled, exactly the old flat-first contract, so a slow render
-         *  costs the hop but never the content. */
-        private var styledDeadline: Runnable? = null
-
-        private fun scheduleStyledDeadline(delayMs: Long) {
-            cancelStyledDeadline()
-            val r = Runnable {
-                styledDeadline = null
-                styledActive = false
-                parkStyledView()
-                definitionsContent.visibility = VISIBLE
-                // The card may have been fitted to the styled height (an
-                // in-place rebind measures the OLD styled panel at bind
-                // time); refit against what's actually showing now. Grow-
-                // only, so a flat body that already fits is a no-op.
-                onStyledHeightChanged()
+            onBodyHeightChanged()
+            shownDocCursor = null
+            if (focusWhenLaidOut) {
+                focusWhenLaidOut = false
+                if (isInteractive && !hasCursor()) focusStart()
             }
-            styledDeadline = r
-            postDelayed(r, delayMs)
+            syncNavRing()
         }
 
-        private fun cancelStyledDeadline() {
-            styledDeadline?.let { removeCallbacks(it) }
-            styledDeadline = null
-        }
-
-        private fun hideSplitBody() {
-            splitActive = false
-            splitBindSeq++
-            applySectionTint(null)
-            splitSectionViews = emptyList()
-            loadMoreRow = null
-            loadMoreState = null
-            // Pool views come OUT of the dying section columns (they're
-            // reused next split bind — never destroyed here); the columns
-            // themselves are discarded wholesale.
-            splitStyledPool.forEach { (it.parent as? ViewGroup)?.removeView(it) }
-            splitStyledCursor = 0
-            splitContent.removeAllViews()
-            splitContent.visibility = GONE
+        /** No rows: the list empties (its page is kept for the next
+         *  lookup) and nothing of the last bind stays reachable. */
+        private fun clearRows() {
+            bind = null
+            pendingReveal = null
+            docCursor = null
+            list.clear()
         }
 
         private val clipPath = Path()
@@ -2003,11 +1694,9 @@ class MagnifierLens(
             // to focusable views.
             background = null
             addView(definitionsScroll)
-            addView(leftChip)
-            addView(rightChip)
             addView(pillView)
             // Topmost; a plain non-clickable View, so lens touches fall
-            // through it to the pill/chips/card beneath.
+            // through it to the pill and the card beneath.
             addView(focusRing, LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.MATCH_PARENT))
             rebuildClipPath()
             updateChromeLayout()
@@ -2026,20 +1715,33 @@ class MagnifierLens(
             )
         }
 
-        /** Recompute layout params for the definitions scroll, pill, and
-         *  chips based on [lensFlipped]. The pill sits on the card edge
-         *  opposite the arrow; the chips share its vertical center; the
-         *  scroll's larger top/bottom pad always faces the pill so the
-         *  first content row clears it. */
+        /** The scroll's top and bottom padding. While the loading body
+         *  stands, the larger pad faces the pill (it flips with the lens) so
+         *  the first line clears the capsule. Definition rows get none: they
+         *  carry their own padding, and the pill is hidden while they show. */
+        private fun bodyPads(): Pair<Int, Int> = when {
+            mode == Mode.DEFINITIONS && loadingContent.visibility == GONE -> 0 to 0
+            lensFlipped -> bodyOuterSidePadPx to bodyPillSidePadPx
+            else -> bodyPillSidePadPx to bodyOuterSidePadPx
+        }
+
+        /** Applies [bodyPads]: on a flip and whenever the body changes
+         *  between the loading line and the rows. */
+        private fun applyBodyPadding() {
+            val (top, bottom) = bodyPads()
+            if (definitionsScroll.paddingTop != top || definitionsScroll.paddingBottom != bottom) {
+                definitionsScroll.setPadding(0, top, 0, bottom)
+            }
+        }
+
+        /** Recompute layout params for the definitions scroll and the pill
+         *  based on [lensFlipped]. The pill sits on the card edge opposite
+         *  the arrow. */
         private fun updateChromeLayout() {
             // Scroll view occupies the card region inset by
             // [bodyEdgeBufferPx] on every side — the inset keeps
-            // scrolled glyphs off the 1dp card border. Its top/bottom
-            // padding flips with the lens so the larger pad (which
-            // clears the pill) always faces the pill side.
-            val scrollTopPad = if (lensFlipped) bodyOuterSidePadPx else bodyPillSidePadPx
-            val scrollBottomPad = if (lensFlipped) bodyPillSidePadPx else bodyOuterSidePadPx
-            definitionsScroll.setPadding(0, scrollTopPad, 0, scrollBottomPad)
+            // scrolled glyphs off the 1dp card border.
+            applyBodyPadding()
             // Absolute LEFT + leftMargin throughout this method (never
             // START/marginStart): every offset here is a view-pixel coordinate
             // shared with the Canvas geometry — [cardLeftInView], the clip
@@ -2050,7 +1752,7 @@ class MagnifierLens(
                 cardW - 2 * bodyEdgeBufferPx, cardHeightPx - 2 * bodyEdgeBufferPx,
                 Gravity.LEFT or Gravity.TOP,
             ).apply {
-                leftMargin = chipHaloXPx + bodyEdgeBufferPx
+                leftMargin = bodyEdgeBufferPx
                 topMargin = bodyTopOffset + bodyEdgeBufferPx
             }
 
@@ -2060,30 +1762,17 @@ class MagnifierLens(
                 LayoutParams.WRAP_CONTENT, pillHeightPx,
                 Gravity.CENTER_HORIZONTAL or Gravity.TOP,
             ).apply { topMargin = pillTopMargin }
-
-            // Chips — vertically centered on the pill's vertical center
-            // (which is the card edge the pill is anchored to). Same
-            // formula in both flip states.
-            val chipTopMargin = pillAnchorY - chipHitSizePx / 2
-            leftChip.layoutParams = LayoutParams(
-                chipHitSizePx, chipHitSizePx,
-                Gravity.LEFT or Gravity.TOP,
-            ).apply { topMargin = chipTopMargin }
-            rightChip.layoutParams = LayoutParams(
-                chipHitSizePx, chipHitSizePx,
-                Gravity.RIGHT or Gravity.TOP,
-            ).apply { topMargin = chipTopMargin }
         }
 
         /** Apply only the [cardHeightPx]-dependent geometry: the scroll
-         *  viewport height and the pill/chip vertical anchor. Mutates the
+         *  viewport height and the pill's vertical anchor. Mutates the
          *  existing layout params in place rather than replacing them, so a
          *  concurrent pill-WIDTH tween ([animatePillStateTransition], which
          *  runs on the same release) isn't clobbered back to WRAP_CONTENT.
          *  The scroll's width/margins and the pill's width/gravity were set
          *  by the full [updateChromeLayout] (init + flip) and don't change
          *  with height; only the scroll height, and — when flipped — the
-         *  pill/chip top margins, move. */
+         *  pill's top margin, move. */
         private fun applyCardHeightGeometry(
             layoutHeightPx: Int = cardHeightPx,
             layoutTopPx: Int = bodyTopOffset,
@@ -2101,15 +1790,6 @@ class MagnifierLens(
             (pillView.layoutParams as? LayoutParams)?.let {
                 it.topMargin = pillAnchor - pillHeightPx / 2
                 pillView.layoutParams = it
-            }
-            val chipTopMargin = pillAnchor - chipHitSizePx / 2
-            (leftChip.layoutParams as? LayoutParams)?.let {
-                it.topMargin = chipTopMargin
-                leftChip.layoutParams = it
-            }
-            (rightChip.layoutParams as? LayoutParams)?.let {
-                it.topMargin = chipTopMargin
-                rightChip.layoutParams = it
             }
         }
 
@@ -2137,7 +1817,7 @@ class MagnifierLens(
         }
 
         /** Non-null while the release grow animates: (final card height, final
-         *  card top). [beginCardGrow] lays the scroll/pill/chips out ONCE at
+         *  card top). [beginCardGrow] lays the scroll and the pill out ONCE at
          *  that end-state; each frame is then draw-only — the card chrome reads
          *  [cardHeightPx]/[bodyTopOverride] at draw time, and the children ride
          *  translationY + clipBounds ([setGrowFrame]) instead of re-measuring
@@ -2169,13 +1849,11 @@ class MagnifierLens(
                 0, 0, definitionsScroll.width,
                 (heightPx - 2 * bodyEdgeBufferPx).coerceAtLeast(0),
             )
-            // Pill + chips are anchored to the card edge opposite the arrow —
-            // top when not flipped (rides with the content), bottom when
-            // flipped (rides the growing bottom edge).
+            // The pill is anchored to the card edge opposite the arrow — top
+            // when not flipped (rides with the content), bottom when flipped
+            // (rides the growing bottom edge).
             val pillShift = if (lensFlipped) (heightPx - finalH).toFloat() else scrollShift
             pillView.translationY = pillShift
-            leftChip.translationY = pillShift
-            rightChip.translationY = pillShift
             rebuildClipPath()
             invalidate()
         }
@@ -2196,8 +1874,6 @@ class MagnifierLens(
             definitionsScroll.translationY = 0f
             definitionsScroll.clipBounds = null
             pillView.translationY = 0f
-            leftChip.translationY = 0f
-            rightChip.translationY = 0f
         }
 
         /** Resize the card body, restoring the flip-default top position. */
@@ -2205,31 +1881,23 @@ class MagnifierLens(
 
         /** Card-body height that would show the full bound definitions
          *  without scrolling: the content's natural height at the scroll's
-         *  content width, plus the scroll's pill-side + outer vertical pads
-         *  (their sum is flip-invariant) and the 2px edge inset on top and
-         *  bottom. Measured against the currently bound [definitionsContent];
-         *  call only after [setDefinitions] has bound a word. */
+         *  content width, plus the scroll's vertical pads ([bodyPads], whose
+         *  sum is flip-invariant) and the 2px edge inset on top and
+         *  bottom. Call only after a bind. */
         fun desiredCardHeightForContent(): Int {
-            val chrome = bodyPillSidePadPx + bodyOuterSidePadPx + 2 * bodyEdgeBufferPx
-            if (splitActive) {
-                splitContent.measure(
-                    MeasureSpec.makeMeasureSpec(cardW - 2 * bodyEdgeBufferPx, MeasureSpec.EXACTLY),
-                    MeasureSpec.makeMeasureSpec(0, MeasureSpec.UNSPECIFIED),
-                )
-                return splitContent.measuredHeight + chrome
-            }
-            // Styled body: a WebView can't report a synchronous measured
-            // height — use the page's own painted-height report (which
-            // re-runs [MagnifierLens.fitHeightToContent] whenever it lands,
-            // so the card converges even though the number arrives late).
-            if (styledActive && styledContentHeight > 0) {
-                return styledContentHeight + chrome
-            }
-            definitionsContent.measure(
+            val (padTop, padBottom) = bodyPads()
+            val chrome = padTop + padBottom + 2 * bodyEdgeBufferPx
+            // The definitions: a page can't be measured synchronously, so
+            // this is its own reported height (the report re-runs
+            // [MagnifierLens.fitHeightToContent], so the card converges
+            // though the number arrives late). Measured through the slot,
+            // which also holds the notice when no page can draw.
+            val body = if (mode == Mode.DEFINITIONS && loadingContent.visibility == GONE) documentSlot else loadingContent
+            body.measure(
                 MeasureSpec.makeMeasureSpec(cardW - 2 * bodyEdgeBufferPx, MeasureSpec.EXACTLY),
                 MeasureSpec.makeMeasureSpec(0, MeasureSpec.UNSPECIFIED),
             )
-            return definitionsContent.measuredHeight + chrome
+            return body.measuredHeight + chrome
         }
 
         /** Debounce so the open handlers can't fire twice from a single
@@ -2253,7 +1921,7 @@ class MagnifierLens(
         /** The "Load more" row's click: inert while the host resolves the
          *  sections ([LensLoadMore.loading]), debounced with the opens. */
         private fun fireLoadMoreTap() {
-            if (loadMoreState?.loading == true) return
+            if (bind?.loadMore?.loading == true) return
             val now = SystemClock.uptimeMillis()
             if (now - lastOpenTapMs < 300L) return
             lastOpenTapMs = now
@@ -2268,7 +1936,7 @@ class MagnifierLens(
         })
 
         /** True when the current gesture's DOWN landed on a tap-eligible
-         *  region (card body OR pill, NOT on chips OR arrow strip). Gated
+         *  region (card body OR pill, NOT the arrow strip). Gated
          *  on DOWN so a stray UP elsewhere can't fire the open handler. */
         private var tapGestureActive = false
         /** Dismiss callback wired by [attachInteractiveListeners], with the
@@ -2319,57 +1987,31 @@ class MagnifierLens(
         }
 
         private fun isTapEligible(x: Float, y: Float): Boolean {
-            // Arrow strip: opposite side from the pill/chip chrome.
+            // Arrow strip: opposite side from the pill.
             val arrowTop = if (lensFlipped) 0f else cardBottomInView.toFloat()
             val arrowBottom = arrowTop + arrowSizePx
             if (y >= arrowTop && y < arrowBottom) return false
-            if (isInChipBounds(leftChip, x, y)) return false
-            if (isInChipBounds(rightChip, x, y)) return false
-            // The styled definitions area belongs to the WebView: the page
-            // reports what a tap actually hit — a link navigates and hands
-            // off to the browser, anything else comes back as a body tap
-            // (wired to [fireOpenTap] in [ensureStyledView]). Running the
-            // detector here too would race that handoff: the open tap
-            // lands first, tears the lens down, and destroys the WebView
-            // before the click ever processes.
-            if (isInStyledView(x, y)) return false
-            if (isInSplitBody(x, y)) return false
-            return true
-        }
-
-        /** In split mode the definitions area belongs to the section views —
-         *  each section is its own tap target and the space between (the
-         *  divider band) deliberately inert — so the card-wide open detector
-         *  must stand down there. The pill overhangs the scroll frame and
-         *  keeps the card-wide open (it carries the WORD's identity). */
-        private fun isInSplitBody(x: Float, y: Float): Boolean {
-            if (!splitActive) return false
-            if (x >= pillView.left && x < pillView.right &&
-                y >= pillView.top && y < pillView.bottom
+            // While definitions show, the body belongs to the document:
+            // the page reports what a tap actually hit (a link navigates
+            // and hands off to the browser, anything else comes back as its
+            // row's tap). Running the detector here too would race that
+            // handoff: the open tap lands first, tears the lens down, and
+            // destroys the WebView before the click ever processes.
+            if (isInDocument(x, y)) return false
+            // The pill is hidden while rows show (the first row names the
+            // word); its place is not a way to open the word.
+            if (mode == Mode.DEFINITIONS &&
+                x >= pillView.left && x < pillView.right && y >= pillView.top && y < pillView.bottom
             ) {
                 return false
             }
-            return x >= definitionsScroll.left && x < definitionsScroll.right &&
+            return true
+        }
+
+        private fun isInDocument(x: Float, y: Float): Boolean =
+            mode == Mode.DEFINITIONS &&
+                x >= definitionsScroll.left && x < definitionsScroll.right &&
                 y >= definitionsScroll.top && y < definitionsScroll.bottom
-        }
-
-        /** Whether a LensView-space point lands on the styled view (visible
-         *  and active only). getLocationInWindow on both ends absorbs the
-         *  definitions scroller's current scroll offset. */
-        private fun isInStyledView(x: Float, y: Float): Boolean {
-            val sv = styledView ?: return false
-            if (!styledActive || sv.visibility != VISIBLE) return false
-            val svLoc = IntArray(2).also { sv.getLocationInWindow(it) }
-            val myLoc = IntArray(2).also { getLocationInWindow(it) }
-            val lx = x + myLoc[0] - svLoc[0]
-            val ly = y + myLoc[1] - svLoc[1]
-            return lx >= 0 && lx < sv.width && ly >= 0 && ly < sv.height
-        }
-
-        private fun isInChipBounds(chip: View, x: Float, y: Float): Boolean {
-            if (chip.visibility != VISIBLE) return false
-            return x >= chip.left && x < chip.right && y >= chip.top && y < chip.bottom
-        }
 
         fun setSourceBitmap(bitmap: Bitmap?) {
             sourceBitmap = bitmap
@@ -2429,7 +2071,7 @@ class MagnifierLens(
             val knownPitch = pitch ?: if (w.orEmpty() == pillWord) pillPitch else emptyList()
             // Kana-only words have no separate reading (the kana IS the
             // word); reuse it in the reading slot so the accent contour has
-            // a home — mirrors WordResultCell. The all-kana guard is
+            // a home — mirrors the word-list row. The all-kana guard is
             // load-bearing: the contour maps morae onto whatever string it
             // draws over, so it must never cover kanji.
             val pitchKana = r ?: w?.takeIf { knownPitch.isNotEmpty() && it.all(Deinflector::isKana) }
@@ -2506,7 +2148,7 @@ class MagnifierLens(
                 // First state assignment after show()/teardown rebuild —
                 // just snap, no animation.
                 applyPillStateVisibility(newState, showReading)
-                pillView.visibility = VISIBLE
+                pillView.visibility = if (mode == Mode.DEFINITIONS) INVISIBLE else VISIBLE
             } else {
                 animatePillStateTransition(newState, showReading)
             }
@@ -2539,7 +2181,7 @@ class MagnifierLens(
             val oldWidth = if (pillView.width > 0) pillView.width else measurePillNaturalWidth()
             applyPillStateVisibility(newState, showReading)
             val newWidth = measurePillNaturalWidth()
-            pillView.visibility = VISIBLE
+            pillView.visibility = if (mode == Mode.DEFINITIONS) INVISIBLE else VISIBLE
             val params = pillView.layoutParams
             params.width = oldWidth
             pillView.layoutParams = params
@@ -2579,8 +2221,8 @@ class MagnifierLens(
 
         /**
          * Size and bound the pill's headline and reading so the capsule can
-         * never outgrow [pillMaxWidthPx] — the width past which [revealChips]
-         * has nowhere left to seat the chips but off the frame.
+         * never outgrow [pillMaxWidthPx], the width past which it would hang
+         * over the card's rounded corners.
          *
          * [word] and [reading] are the strings the two slots will draw, pitch
          * `[n]` suffix included (measured at full size though it renders at
@@ -2637,237 +2279,114 @@ class MagnifierLens(
             pillReadingView.maxWidth = readingAllot
         }
 
-        fun setDefinitions(data: WordDefinitionData?, label: String?, opens: Boolean) {
-            if (data == null) {
+        fun setDefinitions(section: LensSection?) {
+            if (section == null) {
                 if (mode == Mode.ZOOM) return
                 mode = Mode.ZOOM
-                showFlatBody()
-                singleChevronView.visibility = GONE
+                clearRows()
+                loadingContent.visibility = GONE
                 definitionsScroll.visibility = GONE
-                leftChip.visibility = GONE
-                rightChip.visibility = GONE
+                syncPill()
+                applyBodyPadding()
                 invalidate()
                 return
             }
-            mode = Mode.DEFINITIONS
-            setLabel(data.word, data.reading, data.pitch)
-            singleChevronView.visibility = if (opens) VISIBLE else GONE
-            // Drag lens keeps its compact layout — no misc line. The detail
-            // sheet reached on tap-through still shows misc (it re-resolves).
-            // The flat renderer binds UNCONDITIONALLY: it is the instant
-            // content of every lookup and the standing fallback the styled
-            // path degrades to (renderer death, empty render). Both bodies
-            // lead with the conjugation line of the looked-up form.
-            definitionsContent.bind(
-                data, label, LENS_DEFINITIONS_SCALE, showMisc = false, showInflections = true,
-            )
-            val styledData = data.styled
-            val sv = if (styledData != null && styledData.structured.isNotEmpty()) {
-                ensureStyledView()
-            } else {
-                null
-            }
-            if (sv == null) {
-                showFlatBody()
-            } else {
-                // Styled upgrade: the page reports painted height and the
-                // styled body swaps in ([onStyledContentHeight]). Which body
-                // shows UNTIL then decides whether the user watches the same
-                // content render twice (the flat→styled "hop"):
-                //  - styled already live with the SAME logical word
-                //    (headword + reading): keep it — ptSwap repaints the
-                //    visible page in place, no flat flash, and what stands
-                //    meanwhile is that same word (deck backfill,
-                //    dwell→release). The same-word gate is a lens-enforced
-                //    invariant, not a caller courtesy: a DIFFERENT word
-                //    riding in place would leave the pill naming the new
-                //    word over the old word's body until the swap paints
-                //    (Codex adversarial catch — today's callers all pass
-                //    through ZOOM/loading/dismiss between words, but
-                //    nothing in this method's contract said so).
-                //    (A live split is impossible here: split binds go
-                //    through [showFlatBody], dropping styledActive first.)
-                //  - flat→styled on a READY shell ([isPageReady] — this
-                //    view's page is loaded, so the swap is a JS round-trip):
-                //    hold both bodies ([holdBodyForStyled]) so the reveal is
-                //    styled-or-flat, never flat-then-styled. A styled bind
-                //    of a DIFFERENT word over a live styled body lands here
-                //    too (a live page is ready by definition): the old body
-                //    parks instantly, so mislabeled content never shows.
-                //    The capture flow prewarms the shell at drag start
-                //    ([prewarmStyledRenderer]) precisely so binds land here.
-                //  - shell still loading (a just-built view — measured
-                //    ~150ms on the Thor, dwarfing any sane hold):
-                //    flat-first as always.
-                // Every path keeps flat bound as the standing fallback;
-                // the non-flat-first paths are bounded by
-                // [scheduleStyledDeadline].
-                val bindKey = data.word to data.reading
-                val inPlace = styledActive && bindKey == styledBoundKey
-                styledBoundKey = bindKey
-                val hold = !inPlace && sv.isPageReady()
-                if (!inPlace) {
-                    if (hold) holdBodyForStyled() else showFlatBody()
-                }
-                pendingStyledSwap = true
-                sv.setContent(
-                    DefinitionsDocument.contentHtml(
-                        data,
-                        styledData!!.structured,
-                        localizePos = { context.localizePos(it) },
-                        showMisc = false,
-                        metaChips = styledMetaChips(context, data),
-                        label = label,
-                        inflectionLines = data.inflectedForms.map { InflectionChain.format(context, it) },
-                    ),
-                    styledData.dictStyles,
-                    styledData.sourceLanguage,
-                )
-                if (inPlace || hold) {
-                    scheduleStyledDeadline(
-                        if (inPlace) STYLED_INPLACE_DEADLINE_MS else STYLED_HOLD_DEADLINE_MS,
-                    )
-                }
-            }
-            definitionsScroll.scrollTo(0, 0)
-            definitionsScroll.visibility = VISIBLE
-            // Chip visibility is owned by [attachInteractiveListeners] —
-            // they only appear once the lens becomes sticky.
-            invalidate()
+            bindRows(Bind(section, emptyList(), secondariesOnTop = false, loadMore = null), LensScroll.Top)
         }
 
-        /** Split body — see [MagnifierLens.setSplitDefinitions]. The pill
-         *  keeps the PRIMARY (tapped) unit's identity; each section carries
-         *  its own headword header (the pill can't name them all) and, when
-         *  it opens, a trailing chevron + full-section tap target.
-         *  [secondariesOnTop] picks the visual order (the longer unit
-         *  renders on top on every surface). Every section binds flat
-         *  instantly and upgrades to its OWN styled renderer when its data
-         *  carries a structured payload ([attachSectionStyled]) — one
-         *  WebView per section, because a single shared page's body-tap
-         *  report couldn't attribute a tap to a section. */
+        /** See [MagnifierLens.setSplitDefinitions]. */
         fun setSplitDefinitions(
             primary: LensSection,
             secondaries: List<LensSection>,
             secondariesOnTop: Boolean,
             loadMore: LensLoadMore?,
             scroll: LensScroll,
-        ) {
+        ) = bindRows(Bind(primary, secondaries, secondariesOnTop, loadMore), scroll)
+
+        /**
+         * The one bind: [next]'s sections as rows of the list, in their
+         * visual order ([Bind.secondariesOnTop] puts the longer unit on top
+         * on every surface), then the "Load more" footer. Every section is
+         * a row with its own headword, the tapped unit's included: the pill,
+         * which named it while the lens was a magnifier, is hidden as soon
+         * as a row shows.
+         *
+         * A rebind of the same sections (the "Load more" footer's text, a
+         * deck pill the list filled in) reaches the page as the same row
+         * ids, so it patches the rows that changed and the body neither
+         * collapses nor jumps; a different lookup is a new row set.
+         */
+        private fun bindRows(next: Bind, scroll: LensScroll) {
+            val fromLoading = mode == Mode.LOADING
             mode = Mode.DEFINITIONS
-            setLabel(primary.data.word, primary.data.reading, primary.data.pitch)
-            // Read before the teardown below detaches the targets: the
-            // controller cursor's place among them, -1 when it is elsewhere.
-            val cursorIndex = splitSectionViews.indexOf(navCursor)
-            // Read before the teardown: the offset [LensScroll.Keep] restores.
-            val savedY = definitionsScroll.scrollY
-            // Styled steps aside; any prior split is torn down for rebuild.
-            showFlatBody()
-            definitionsContent.visibility = GONE
-            // Sections carry their own open cues.
-            singleChevronView.visibility = GONE
-            // The primary section rendering FIRST (the JA shape: expression
-            // on top) drops its header — the pill directly above already
-            // carries the same headword + reading, and repeating them costs
-            // a row. A bottom-rendered primary (Latin: word under the
-            // phrase) keeps its header for scannability. Each part carries
-            // its index into [secondaries], null for the primary.
-            val ordered: List<Triple<LensSection, Int?, Boolean>> = buildList {
-                val secs = secondaries.mapIndexed { i, s -> Triple(s, i, true) }
-                if (secondariesOnTop) {
-                    addAll(secs)
-                    add(Triple(primary, null, true))
-                } else {
-                    add(Triple(primary, null, false))
-                    addAll(secs)
-                }
-            }
-            val views = mutableListOf<View>()
-            // Every secondary's column, opening or not, in [secondaries]
-            // order (they are added as one run in that order).
-            val secondaryColumns = mutableListOf<View>()
-            ordered.forEachIndexed { i, (section, secondaryIndex, showHeader) ->
-                if (i > 0) splitContent.addView(buildSplitDivider())
-                val fire: () -> Unit =
-                    if (secondaryIndex == null) ::fireOpenTap else ({ fireSecondaryOpenTap(secondaryIndex) })
-                val col = addSplitSection(section, fire, showHeader)
-                if (section.opens) views += col
-                if (secondaryIndex != null) secondaryColumns += col
-            }
-            if (loadMore != null) {
-                splitContent.addView(buildSplitDivider())
-                views += addLoadMoreRow(loadMore)
-            }
-            splitSectionViews = views
-            splitActive = true
-            splitContent.visibility = VISIBLE
-            definitionsScroll.visibility = VISIBLE
-            val revealed = (scroll as? LensScroll.Reveal)
-                ?.let { secondaryColumns.getOrNull(it.secondaryIndex) }
-            if (scroll == LensScroll.Top) {
-                definitionsScroll.scrollTo(0, 0)
+            // Read before the rows change: where the cursor's row stood.
+            val orderBefore = rowOrder()
+            bind = next
+            // Kept current under the hidden pill: a drag's next magnifier
+            // shows it again.
+            setLabel(next.primary.data.word, next.primary.data.reading, next.primary.data.pitch)
+
+            val items = ArrayList<LensItem>(next.secondaries.size + 1)
+            if (next.secondariesOnTop) {
+                next.secondaries.forEachIndexed { i, sec -> items += LensItem(sec, i) }
+                items += LensItem(next.primary, null)
             } else {
-                // After the layout that places the rebuilt columns: a
-                // column's top is its offset in [splitContent] (a direct
-                // child; [splitContent] sits at the scroll content's top),
-                // the same resting offset [moveNav] scrolls a section to.
-                // On the scroll, not on [splitContent], so it runs after the
-                // ScrollView's own onLayout re-claims its offset; still in
-                // the same pass, before it draws. The ScrollView clamps an
-                // offset past the content's end. A newer bind (any
-                // [hideSplitBody]) makes this one's scroll moot.
-                val bindSeq = splitBindSeq
-                definitionsScroll.doOnNextLayout {
-                    if (bindSeq == splitBindSeq) definitionsScroll.scrollTo(0, revealed?.top ?: savedY)
-                }
+                items += LensItem(next.primary, null)
+                next.secondaries.forEachIndexed { i, sec -> items += LensItem(sec, i) }
             }
-            // A controller cursor on a target this rebind tore down keeps
-            // its place: on the revealed section when the rebind reveals one
-            // that is a target (the host binding the sections it loaded,
-            // whether the row was activated by the cursor or by touch), else
-            // on the target at its index, clamped, which is the same section
-            // after a deck back-fill and the rebuilt row after one that lands
-            // while the row reads "Looking up...". Never on a detached view.
-            if (cursorIndex >= 0) {
-                navCursor = revealed?.takeIf { it in views }
-                    ?: views.getOrNull(cursorIndex.coerceAtMost(views.lastIndex))
+
+            // The loading body stands until the rows have pixels
+            // ([onDocumentLayout]); from the magnifier there is none to hold.
+            if (!fromLoading) loadingContent.visibility = GONE
+            list.setRows(items, next.primary.data.definitionLang, footer = next.loadMore?.let(::loadMoreText))
+            // No page can draw: the notice is in the slot now, and no layout
+            // report will come to take the loading body away.
+            if (list.showsNotice) loadingContent.visibility = GONE
+            definitionsScroll.visibility = VISIBLE
+            when (scroll) {
+                LensScroll.Top -> {
+                    pendingReveal = null
+                    definitionsScroll.scrollTo(0, 0)
+                }
+                // The scroll keeps its offset by itself: the document keeps
+                // its height until the rebind's own layout lands.
+                LensScroll.Keep -> pendingReveal = null
+                // Lands with the layout that holds the row ([onDocumentLayout]):
+                // its top is its resting scroll offset, the same one the
+                // controller scrolls a selected row to.
+                is LensScroll.Reveal -> pendingReveal =
+                    items.indexOfFirst { it.secondary == scroll.secondaryIndex }
+                        .takeIf { it >= 0 }?.let(list::idAt)
+            }
+            // A controller cursor keeps its target across a rebind: rows are
+            // named by their word, so the same section is the same row. It
+            // moves in two cases: the rebind reveals a row (the sections a
+            // "Load more" brought, whether the footer was activated by the
+            // cursor or by touch), and the cursor goes with the view; or its
+            // own row is gone, and it takes the row now in that slot.
+            docCursor?.let { cur ->
+                val order = rowOrder()
+                val reveal = pendingReveal
+                val row = when {
+                    reveal != null -> reveal
+                    cur.first in order -> return@let
+                    else -> order.getOrNull(
+                        orderBefore.indexOf(cur.first).coerceIn(0, (order.size - 1).coerceAtLeast(0)),
+                    )
+                }
+                docCursor = row?.let { it to if (it == WordRowList.FOOTER_ID) DefAction.MORE else DefAction.OPEN }
+                shownDocCursor = null
                 syncNavRing()
             }
+            syncPill()
+            applyBodyPadding()
             invalidate()
         }
 
-        /** Builds the "Load more" row into [splitContent] and returns it,
-         *  the split body's last nav target. The controller's selection tint
-         *  is written to (and cleared from) a target's background
-         *  ([applySectionTint]), so the touch ripple rides the foreground. */
-        private fun addLoadMoreRow(state: LensLoadMore): TextView {
-            val ripple = TypedValue().also {
-                context.theme.resolveAttribute(android.R.attr.selectableItemBackground, it, true)
-            }
-            val row = TextView(context).apply {
-                text = loadMoreText(state)
-                setTextColor(context.themeColor(R.attr.ptTextLink))
-                setTextSize(TypedValue.COMPLEX_UNIT_SP, 13f)
-                gravity = Gravity.CENTER
-                maxLines = 1
-                ellipsize = TextUtils.TruncateAt.END
-                minHeight = dp(40f)
-                setPadding(bodyHPaddingPx - dp(6f), 0, bodyHPaddingPx - dp(6f), 0)
-                foreground = context.getDrawable(ripple.resourceId)
-                isClickable = true
-                isFocusable = true
-                setOnClickListener { fireLoadMoreTap() }
-            }
-            splitContent.addView(
-                row,
-                LinearLayout.LayoutParams(
-                    LinearLayout.LayoutParams.MATCH_PARENT,
-                    LinearLayout.LayoutParams.WRAP_CONTENT,
-                ),
-            )
-            loadMoreRow = row
-            loadMoreState = state
-            return row
-        }
+        /** The ids of the bound rows top to bottom, the footer's last. */
+        private fun rowOrder(): List<String> =
+            List(list.wordRows.size) { list.idAt(it).orEmpty() } +
+                listOfNotNull(WordRowList.FOOTER_ID.takeIf { bind?.loadMore != null })
 
         private fun loadMoreText(state: LensLoadMore): String =
             if (state.loading) context.getString(R.string.lens_loading)
@@ -2875,276 +2394,46 @@ class MagnifierLens(
 
         /** See [MagnifierLens.setLoadMoreLoading]. */
         fun setLoadMoreLoading(loading: Boolean) {
-            val row = loadMoreRow ?: return
-            val state = loadMoreState?.copy(loading = loading) ?: return
-            loadMoreState = state
-            row.text = loadMoreText(state)
+            val b = bind ?: return
+            val state = (b.loadMore ?: return).copy(loading = loading)
+            bind = Bind(b.primary, b.secondaries, b.secondariesOnTop, state)
+            list.setFooter(loadMoreText(state))
         }
 
-        /** Builds one split section into [splitContent]: the
-         *  [LensSection.caption] line when there is one, then the headword
-         *  header (name + reading side by side, chevron alone at the
-         *  trailing edge when it opens) over the flat definitions body.
-         *  [showHeader] false skips the header entirely (the top-rendered
-         *  primary: the pill already names it). The caption and header sit
-         *  outside the body's holder, so a styled swap-in
-         *  ([attachSectionStyled]) keeps them. Returns the section's root
-         *  column, a direct child of [splitContent], whether or not it opens;
-         *  it is a tap target, and so a nav target, only when
-         *  [LensSection.opens]. [fire] is the section's (already-debounced)
-         *  open action. */
-        private fun addSplitSection(
-            section: LensSection,
-            fire: () -> Unit,
-            showHeader: Boolean,
-        ): View {
-            val col = LinearLayout(context).apply {
-                orientation = LinearLayout.VERTICAL
-            }
-            section.caption?.let { caption ->
-                // The header reading's size and muted color, on its own
-                // line above the name, with the header's insets.
-                col.addView(
-                    TextView(context).apply {
-                        text = caption
-                        setTextColor(panelSecondaryText)
-                        setTextSize(TypedValue.COMPLEX_UNIT_SP, 12f)
-                        maxLines = 1
-                        ellipsize = TextUtils.TruncateAt.END
-                        setPadding(bodyHPaddingPx - dp(6f), 0, bodyHPaddingPx - dp(6f), 0)
-                    },
-                    LinearLayout.LayoutParams(
-                        LinearLayout.LayoutParams.MATCH_PARENT,
-                        LinearLayout.LayoutParams.WRAP_CONTENT,
-                    ),
-                )
-            }
-            if (showHeader) {
-                val header = LinearLayout(context).apply {
-                    orientation = LinearLayout.HORIZONTAL
-                    gravity = Gravity.CENTER_VERTICAL
-                    // Symmetric insets for the split sections — the single
-                    // view's scrollbar-gutter asymmetry (+8dp on the right)
-                    // read as a lopsided frame here.
-                    setPadding(bodyHPaddingPx - dp(6f), 0, bodyHPaddingPx - dp(6f), 0)
-                }
-                // Name and reading sit ADJACENT ([Name] [Reading]); the
-                // stretch lives in the spacer after them, so only the
-                // chevron is pushed to the trailing edge.
-                header.addView(
-                    TextView(context).apply {
-                        text = section.data.word
-                        setTextColor(panelPrimaryText)
-                        setTextSize(TypedValue.COMPLEX_UNIT_SP, 15f)
-                        typeface = Typeface.create("sans-serif-medium", Typeface.NORMAL)
-                        maxLines = 1
-                        ellipsize = TextUtils.TruncateAt.END
-                    },
-                    LinearLayout.LayoutParams(
-                        LinearLayout.LayoutParams.WRAP_CONTENT,
-                        LinearLayout.LayoutParams.WRAP_CONTENT,
-                    ),
-                )
-                section.data.reading?.let { reading ->
-                    header.addView(
-                        TextView(context).apply {
-                            text = reading
-                            setTextColor(panelSecondaryText)
-                            setTextSize(TypedValue.COMPLEX_UNIT_SP, 12f)
-                            maxLines = 1
-                            ellipsize = TextUtils.TruncateAt.END
-                        },
-                        LinearLayout.LayoutParams(
-                            LinearLayout.LayoutParams.WRAP_CONTENT,
-                            LinearLayout.LayoutParams.WRAP_CONTENT,
-                        ).apply { marginStart = dp(8f) },
-                    )
-                }
-                if (section.opens) {
-                    header.addView(
-                        View(context),
-                        LinearLayout.LayoutParams(0, 1, 1f),
-                    )
-                    header.addView(
-                        buildSectionChevron(),
-                        LinearLayout.LayoutParams(sectionChevronSize, sectionChevronSize)
-                            .apply { marginStart = dp(8f) },
-                    )
-                }
-                col.addView(
-                    header,
-                    LinearLayout.LayoutParams(
-                        LinearLayout.LayoutParams.MATCH_PARENT,
-                        LinearLayout.LayoutParams.WRAP_CONTENT,
-                    ).apply { bottomMargin = dp(2f) },
-                )
-            }
-            val body = WordDefinitionsView(context).apply {
-                setPadding(bodyHPaddingPx - dp(6f), 0, bodyHPaddingPx - dp(6f), 0)
-                metaChipFill = panelBadgeBg
-                emptyPlaceholder = context.getString(R.string.word_detail_no_definitions)
-                // The conjugation line rides inside the body, so a headerless
-                // section shows it too.
-                bind(
-                    section.data, section.label, LENS_DEFINITIONS_SCALE,
-                    showMisc = false, showInflections = true,
-                )
-            }
-            // Flat and (maybe) styled renderers share one holder, so the
-            // styled swap-in is a visibility flip INSIDE the section —
-            // invisible to the column layout around it.
-            val holder = FrameLayout(context).apply {
-                addView(body, LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.WRAP_CONTENT))
-            }
-            attachSectionStyled(holder, body, section, fire)
-            if (!showHeader && section.opens) {
-                // A headerless section keeps its open affordance: the
-                // chevron floats over the body's top-right at the CONTENT
-                // edge — the same column every header chevron ends at —
-                // level with the first row, no header row, no vertical
-                // cost; the single-unit body ([singleChevronView]) uses
-                // the same placement. (A maximal-width first gloss line
-                // could reach under it; the usual first row is the
-                // conjugation line, whose end margin keeps it clear, or
-                // the left-packed meta chips.)
-                // Absolute RIGHT, matching the lens's canvas-aligned layout
-                // discipline. Added LAST so it stays painted over a styled
-                // swap-in.
-                holder.addView(
-                    buildSectionChevron(),
-                    LayoutParams(
-                        sectionChevronSize, sectionChevronSize,
-                        Gravity.TOP or Gravity.RIGHT,
-                    ).apply {
-                        topMargin = dp(4f)
-                        rightMargin = bodyHPaddingPx - dp(6f)
-                    },
-                )
-            }
-            col.addView(
-                holder,
-                LinearLayout.LayoutParams(
-                    LinearLayout.LayoutParams.MATCH_PARENT,
-                    LinearLayout.LayoutParams.WRAP_CONTENT,
-                ),
-            )
-            if (section.opens) {
-                col.isClickable = true
-                col.setOnClickListener { fire() }
-            }
-            splitContent.addView(
-                col,
-                LinearLayout.LayoutParams(
-                    LinearLayout.LayoutParams.MATCH_PARENT,
-                    LinearLayout.LayoutParams.WRAP_CONTENT,
-                ),
-            )
-            return col
-        }
+        /** The "Load more" row's text as bound, null when there is none. */
+        fun loadMoreTextOrNull(): String? = bind?.loadMore?.let(::loadMoreText)
 
-        /** The section's styled (WebView) upgrade, mirroring the single-unit
-         *  body's contract: the flat [body] renders instantly and stands as
-         *  the fallback; when the section's data carries a structured
-         *  payload, a pooled renderer binds behind it — INVISIBLE at 1px,
-         *  never GONE, for the same laid-out-at-real-width reasons as
-         *  [ensureStyledView] — and swaps over the flat view only once the
-         *  page reports painted height. Body taps report through the page's
-         *  own hit testing ([YomitanDefinitionsView.onBodyTap]) into the
-         *  SECTION's (already-debounced) open action — per-section views are
-         *  exactly what makes tap attribution possible here, where one
-         *  shared page couldn't say which section a tap landed in — and
-         *  link taps stay live, handing off to the browser as in the
-         *  single-unit body. */
-        private fun attachSectionStyled(
-            holder: FrameLayout,
-            body: WordDefinitionsView,
-            section: LensSection,
-            fire: () -> Unit,
-        ) {
-            val styledData = section.data.styled ?: return
-            if (styledData.structured.isEmpty()) return
-            val sv = obtainSplitStyledView() ?: return
-            val bindSeq = splitBindSeq
-            sv.visibility = INVISIBLE
-            // A non-opening section's body must stay inert — and a pooled
-            // view must never keep a previous bind's handler.
-            sv.onBodyTap = if (section.opens) {
-                { fire() }
-            } else {
-                null
-            }
-            sv.onContentHeight = { h ->
-                // Superseded-bind reports must not touch the live tree; the
-                // splitActive check additionally covers the window between
-                // this bind and a non-split rebind that hasn't detached yet.
-                if (h > 0 && bindSeq == splitBindSeq && splitActive) {
-                    sv.layoutParams = (sv.layoutParams as? LayoutParams
-                        ?: LayoutParams(LayoutParams.MATCH_PARENT, h)).apply { height = h }
-                    if (sv.visibility != VISIBLE) {
-                        sv.visibility = VISIBLE
-                        body.visibility = GONE
-                    }
-                    onStyledHeightChanged()
-                }
-            }
-            sv.onRendererGone = {
-                // The component destroyed itself; drop it from the pool (its
-                // siblings will report their own deaths) and never build
-                // another — flat is the standing fallback.
-                splitStyledPool.remove(sv)
-                (sv.parent as? ViewGroup)?.removeView(sv)
-                styledUnavailable = true
-                if (bindSeq == splitBindSeq) body.visibility = VISIBLE
-            }
-            holder.addView(sv, LayoutParams(LayoutParams.MATCH_PARENT, 1))
-            sv.setContent(
-                DefinitionsDocument.contentHtml(
-                    section.data,
-                    styledData.structured,
-                    localizePos = { context.localizePos(it) },
-                    showMisc = false,
-                    metaChips = styledMetaChips(context, section.data),
-                    label = section.label,
-                    inflectionLines = section.data.inflectedForms.map { InflectionChain.format(context, it) },
-                ),
-                styledData.dictStyles,
-                styledData.sourceLanguage,
-            )
-        }
-
-        private fun buildSectionChevron(): ImageView = ImageView(context).apply {
-            val d = AppCompatResources.getDrawable(context, R.drawable.ic_lens_chevron)?.mutate()
-            if (d != null) {
-                DrawableCompat.setTint(d, panelSecondaryText)
-                setImageDrawable(d)
-            }
-        }
-
-        /** Hairline between the split sections — card-border color, inset to
-         *  the text column. */
-        private fun buildSplitDivider(): View = View(context).apply {
-            setBackgroundColor(cardBorderColor)
-            layoutParams = LinearLayout.LayoutParams(
-                LinearLayout.LayoutParams.MATCH_PARENT,
-                (density * 1f).toInt().coerceAtLeast(1),
-            ).apply {
-                topMargin = dp(9f)
-                bottomMargin = dp(9f)
-                marginStart = bodyHPaddingPx - dp(6f)
-                marginEnd = bodyHPaddingPx - dp(6f)
-            }
-        }
+        // What a JVM test needs to stand in for the page and read the result.
+        fun layoutRowsForTest(rowHeightCssPx: Int) = list.layoutForTest(rowHeightCssPx)
+        fun shownRowsForTest(): List<DefRow> = list.shownDocRows
+        fun cursorForTest(): Pair<String, String>? = docCursor
+        fun rowTopForTest(id: String): Int? = list.rowTop(id)
+        fun tapRowForTest(id: String, act: String) = list.activate(id, act)
+        fun pillShownForTest(): Boolean = pillView.visibility == VISIBLE
+        fun bodyPadsForTest(): Pair<Int, Int> = definitionsScroll.paddingTop to definitionsScroll.paddingBottom
 
         fun setLoading(word: String?, reading: String?) {
             mode = Mode.LOADING
             setLabel(word, reading)
-            showFlatBody()
-            // Nothing to open into yet; the bind that follows decides.
-            singleChevronView.visibility = GONE
+            clearRows()
             populateLoading()
+            loadingContent.visibility = VISIBLE
             definitionsScroll.scrollTo(0, 0)
             definitionsScroll.visibility = VISIBLE
+            syncPill()
+            applyBodyPadding()
             invalidate()
+        }
+
+        /** The pill names the word while the lens is a magnifier or is
+         *  loading; once a definition row shows, the row names it and the
+         *  pill is hidden. INVISIBLE, never GONE: its width tween measures
+         *  it laid out, and the next magnifier shows it again. */
+        val pillShows: Boolean get() = pillView.visibility == VISIBLE
+
+        private fun syncPill() {
+            if (pillView.visibility == GONE) return
+            pillView.visibility = if (mode == Mode.DEFINITIONS) INVISIBLE else VISIBLE
         }
 
         /** Toggle the spinner skin on the Placeholder pill. Loading is a
@@ -3194,13 +2483,6 @@ class MagnifierLens(
             }
             requestFocus()
             isInteractive = true
-            // Chips become visible only in the sticky state (per the
-            // design — they're quick actions for a settled lookup, not
-            // drag-time UI). Reveal is deferred until the pill's
-            // width animation (placeholder → word) completes, so the
-            // chips' "under-pill" start position is actually under the
-            // pill at its final word-state width.
-            if (mode == Mode.DEFINITIONS) scheduleChipReveal()
         }
 
         fun detachInteractiveListeners() {
@@ -3208,132 +2490,155 @@ class MagnifierLens(
             navPreDraw?.let { viewTreeObserver.removeOnPreDrawListener(it) }
             navPreDraw = null
             stopNavScroll()
-            keyPressView?.let { ConfirmKeyPress.cancel(it) }
-            keyPressView = null
-            navCursor = null
+            removeCallbacks(holdRunnable)
+            holdPending = false
+            holdTarget = null
+            holdFired = false
+            pillCursor = false
+            docCursor = null
+            focusWhenLaidOut = false
             navConsumedDown.clear()
-            applySectionTint(null)
+            syncNavRing()
             focusRing.setTarget(null, null)
             dismissRequest = null
             clearFocus()
             isInteractive = false
-            leftChip.animate().cancel()
-            rightChip.animate().cancel()
-            leftChip.translationX = 0f
-            rightChip.translationX = 0f
-            leftChip.visibility = GONE
-            rightChip.visibility = GONE
         }
 
-        // ── Controller nav: cursor over the pill + chips, stick scroll ────
+        // ── Controller nav: a cursor over the rows and their buttons, stick scroll ──
 
-        private var navCursor: View? = null
+        /** The cursor on the pill: the one chrome target, there only while
+         *  the pill shows (a lens that is still loading). */
+        private var pillCursor = false
+
+        /** The cursor on a target of the list (a row, or a button in it):
+         *  its row id and its action. At most one of this and [pillCursor]
+         *  is set. */
+        private var docCursor: Pair<String, String>? = null
+
+        /** The target the page is drawing the cursor on, so the per-preDraw
+         *  [syncNavRing] only talks to the page on an actual change. */
+        private var shownDocCursor: Pair<String, String>? = null
+
         private var navPreDraw: ViewTreeObserver.OnPreDrawListener? = null
         /** Keycodes whose DOWN we consumed, so the matching UP is too — and
          *  so the A that OPENED the lens (pressed on the sheet, released over
-         *  this freshly-focused window) can't instantly activate the pill. */
+         *  this freshly-focused window) can't instantly activate a target. */
         private val navConsumedDown = mutableSetOf<Int>()
         private val navItemLoc = IntArray(2)
         private val navSelfLoc = IntArray(2)
         private val navTmp = Rect()
+        private val navRtl = resources.configuration.layoutDirection == LAYOUT_DIRECTION_RTL
 
-        /** Auto-select for a controller-opened lens: the pill rings from the
-         *  start, so the very next A drills into the detail screen. */
-        fun focusPill() {
-            navCursor = pillView
+        /** The laid-out target [at] names, null when the page does not hold
+         *  it (it is gone, or a rebind has not laid it out yet). */
+        private fun docTarget(at: Pair<String, String>?): DocTarget? =
+            at?.let { (row, act) -> list.targets.firstOrNull { it.rowId == row && it.act == act } }
+
+        /** Where a fresh cursor lands, and the auto-select of a
+         *  controller-opened lens, so the very next A drills into the
+         *  detail screen: the pill while it shows (a lens still loading),
+         *  else the first row. */
+        fun focusStart() {
+            if (pillView.isShown) {
+                setCursor(pill = true, doc = null)
+                return
+            }
+            val first = DocNav.next(list.targets, null, DocNav.Dir.DOWN, navRtl)
+            // Asked before the page has laid the rows out (a lens opened by
+            // the controller is, as a rule): the cursor lands with them.
+            focusWhenLaidOut = first == null
+            setCursor(pill = false, doc = first?.let { it.rowId to it.act })
+        }
+
+        /** A [focusStart] that found no row yet; [onDocumentLayout] honours it. */
+        private var focusWhenLaidOut = false
+
+        private fun setCursor(pill: Boolean, doc: Pair<String, String>?) {
+            pillCursor = pill
+            docCursor = doc
             syncNavRing()
         }
 
-        private fun navChromeRow(): List<View> =
-            listOf(leftChip, pillView, rightChip).filter { it.isShown }
+        private fun hasCursor(): Boolean =
+            (pillCursor && pillView.isShown) || docTarget(docCursor) != null
 
-        fun navSections(): List<View> =
-            splitSectionViews.filter { it.isShown }
+        /** The rows the cursor can reach, top to bottom, as the page has
+         *  laid them out. */
+        fun navRows(): List<String> =
+            list.targets.filter { it.act.isNotEmpty() }.map { it.rowId }.distinct()
 
-        /** Item rect in THIS view's coordinates. Chips ring their 32dp visible
-         *  disk, not the 48dp hit halo. */
-        private fun navRectInView(v: View, out: Rect): Boolean {
+        /** The pill's rect in THIS view's coordinates. */
+        private fun pillRectInView(out: Rect): Boolean {
+            val v = pillView
             if (!v.isShown || v.width <= 0 || v.height <= 0) return false
             v.getLocationOnScreen(navItemLoc)
             getLocationOnScreen(navSelfLoc)
             val l = navItemLoc[0] - navSelfLoc[0]
             val t = navItemLoc[1] - navSelfLoc[1]
             out.set(l, t, l + v.width, t + v.height)
-            if (v === leftChip || v === rightChip) {
-                val inset = (chipHitSizePx - chipVisDiameterPx) / 2
-                out.inset(inset, inset)
-            }
             return true
         }
 
-        /** The split section currently carrying the cursor tint, so the
-         *  per-preDraw [syncNavRing] only mutates backgrounds on an actual
-         *  cursor change. */
-        private var tintedSection: View? = null
-
-        /** Move the cursor tint to [target] (null clears). Sections render
-         *  selection as a soft accent fill (10% alpha) instead of the
-         *  boundary ring — a full-width definitions cell wants a
-         *  background, not chrome. The inset is a LayerDrawable layer inset
-         *  with padding pinned to zero, NOT an InsetDrawable: a background's
-         *  reported padding becomes the VIEW's padding on setBackground,
-         *  which shifted the section's text on selection. */
-        private fun applySectionTint(target: View?) {
-            if (tintedSection === target) return
-            tintedSection?.background = null
-            tintedSection = target
-            target?.background = LayerDrawable(
-                arrayOf(
-                    GradientDrawable().apply {
-                        setColor(withAlpha(accentColor, 0x1A))
-                        cornerRadius = dp(10f).toFloat()
-                    },
-                ),
-            ).apply {
-                setLayerInset(0, dp(8f), dp(2f), dp(8f), dp(2f))
-                setPadding(0, 0, 0, 0)
-            }
-        }
-
+        /** Draws the cursor where it is. A row or a button renders its
+         *  selection in the page; the pill gets the boundary ring. */
         private fun syncNavRing() {
-            val cur = navCursor
-            val curSection = cur?.takeIf { it in splitSectionViews && it.isShown }
-            applySectionTint(curSection)
-            if (curSection != null) {
-                focusRing.setTarget(null, null)
-                return
+            val doc = docCursor?.takeIf { docTarget(it) != null }
+            if (doc != shownDocCursor) {
+                shownDocCursor = doc
+                list.setCursor(docTarget(doc))
             }
-            if (cur == null || !navRectInView(cur, navTmp)) {
+            if (doc != null || !pillCursor || !pillRectInView(navTmp)) {
                 focusRing.setTarget(null, null)
                 return
             }
             focusRing.setTarget(navTmp, null)
         }
 
-        /** Dpad + A for the sticky lens (B stays in [LensRoot]). On the Anki
-         *  chip the A is delivered as a real press on the chip
-         *  ([ConfirmKeyPress]), so a held A runs the chip's own long-press
-         *  (the headless one-tap) at the long-press timeout, exactly as a
-         *  held finger does; an early release is the chip's click (the
-         *  review sheet). Everything else activates on the consumed UP.
-         *  Any of these — the timeout-fired one-tap included — may dismiss
-         *  this focused window mid-press: the dismissal seam lingers the
-         *  window as an invisible key sink until every tracked press
-         *  releases ([WindowKeyPairGuard] on [LensRoot]), so a still-held
-         *  key's UP cannot orphan into the app beneath. */
+        /** An activate key held on a target that takes a hold (a row's Anki
+         *  button): the hold's action runs at the long-press timeout, exactly
+         *  as a held finger's does (the headless one-tap), and the release
+         *  then does nothing; an early release is the tap (the review sheet). */
+        private var holdPending = false
+        private var holdTarget: Pair<String, String>? = null
+        private var holdFired = false
+        private val holdRunnable = Runnable {
+            val t = holdTarget ?: return@Runnable
+            holdFired = true
+            list.activate(t.first, DefAction.hold(t.second))
+        }
+
+        private fun takesHold(at: Pair<String, String>): Boolean =
+            at.second == DefAction.TRAILING &&
+                list.shownRows.firstOrNull { it.id == at.first }?.trailingHolds == true
+
+        /** Dpad + A for the sticky lens (B stays in [LensRoot]). A held A on
+         *  a row's Anki button is that button's hold (see [holdRunnable]);
+         *  everything else activates on the consumed UP. Any of these — the
+         *  timeout-fired one-tap included — may dismiss this focused window
+         *  mid-press: the dismissal seam lingers the window as an invisible
+         *  key sink until every tracked press releases ([WindowKeyPairGuard]
+         *  on [LensRoot]), so a still-held key's UP cannot orphan into the
+         *  app beneath. */
         fun handleNavKey(ev: KeyEvent): Boolean {
             if (!isInteractive) return false
             if (ev.action == KeyEvent.ACTION_UP) {
                 if (!navConsumedDown.remove(ev.keyCode)) return false
                 if (ControllerKeys.isActivate(ev.keyCode)) {
-                    val held = keyPressView
-                    if (held != null) {
-                        keyPressView = null
-                        ConfirmKeyPress.up(held, ev)
+                    if (holdPending) {
+                        // A press that began on a hold target: its release is
+                        // the tap, unless the hold already ran or the cursor
+                        // left the target mid-press.
+                        removeCallbacks(holdRunnable)
+                        val t = holdTarget
+                        val fired = holdFired
+                        holdPending = false
+                        holdTarget = null
+                        holdFired = false
+                        if (t != null && !fired) list.activate(t.first, t.second)
                     } else {
-                        val cur = navCursor
-                        // First A selects the pill; only a second activates.
-                        if (cur == null || !cur.isShown) focusPill() else activateNav(cur)
+                        // First A selects; only a second activates.
+                        if (!hasCursor()) focusStart() else activateNav()
                     }
                 }
                 return true
@@ -3342,91 +2647,60 @@ class MagnifierLens(
             val dir = ControllerKeys.direction(ev.keyCode)
             if (dir == null && !ControllerKeys.isActivate(ev.keyCode)) return false
             if (dir != null) {
-                // Cursor leaving the chip mid-press: cancel the view press
-                // (no click, no pending long-press). The ref is deliberately
-                // KEPT — the eventual A-UP then routes to the now-unpressed
-                // chip and no-ops, instead of activating the moved-to item.
-                keyPressView?.let { ConfirmKeyPress.cancel(it) }
-                val cur = navCursor
-                if (cur == null || !cur.isShown) focusPill() else moveNav(cur, dir)
-            } else if (ev.repeatCount == 0 && keyPressView == null &&
-                navCursor === rightChip && rightChip.isShown
-            ) {
-                keyPressView = rightChip
-                ConfirmKeyPress.down(rightChip, ev)
+                // Cursor leaving the target mid-press: no tap, no pending
+                // hold. The press stays tracked, so the eventual A-UP no-ops
+                // instead of activating the moved-to item.
+                if (holdPending) {
+                    removeCallbacks(holdRunnable)
+                    holdTarget = null
+                }
+                if (!hasCursor()) focusStart() else moveNav(dir)
+            } else if (ev.repeatCount == 0 && !holdPending) {
+                val cur = docCursor?.takeIf { docTarget(it) != null }
+                if (cur != null && takesHold(cur)) {
+                    holdPending = true
+                    holdTarget = cur
+                    holdFired = false
+                    postDelayed(holdRunnable, ViewConfiguration.getLongPressTimeout().toLong())
+                }
             }
             navConsumedDown.add(ev.keyCode)
             return true
         }
 
-        /** The view holding an in-flight forwarded key press (the Anki chip —
-         *  the lens's one hold-capable item). See [ConfirmKeyPress]. */
-        private var keyPressView: View? = null
-
-        /** Explicit nav graph instead of spatial scoring. The lens is two
-         *  strips: the chrome row (Speak chip · pill · Anki chip) along one
-         *  card edge, and the split body's sections stacked on the body
-         *  side. Spatial scoring breaks on this layout — a section is a
-         *  card-wide rect centered like the pill, so once the body has
-         *  scrolled (unclipped rects, center rounding) a section can beat a
-         *  chip on a LEFT/RIGHT move with a near-zero axis distance.
-         *  LEFT/RIGHT walk the chrome row only; the vertical axis moves
-         *  between the row and the sections (direction flip-aware: the
-         *  body is below the chrome when the lens sits above the word,
-         *  above it when flipped). */
-        private fun moveNav(cur: View, dir: SheetNavGeometry.Dir) {
-            val chrome = navChromeRow()
-            val sections = navSections()
-            if (cur !in chrome && cur !in sections) {
-                focusPill()
+        /** The cursor walks the list's targets as a page's does ([DocNav]):
+         *  up and down between rows, left and right among a row's own
+         *  targets (the row, its Speak, its Anki). A row reached by a
+         *  vertical move reads top-aligned: its top in the document IS its
+         *  resting scroll offset. The pill, there only while no row shows,
+         *  is a lone target. */
+        private fun moveNav(dir: SheetNavGeometry.Dir) {
+            if (pillCursor && pillView.isShown) return
+            val cur = docTarget(docCursor)
+            if (cur == null) {
+                focusStart()
                 return
             }
-            val towardBody =
-                if (lensFlipped) SheetNavGeometry.Dir.UP else SheetNavGeometry.Dir.DOWN
-            val towardChrome =
-                if (lensFlipped) SheetNavGeometry.Dir.DOWN else SheetNavGeometry.Dir.UP
-            // Walk order into/through the body follows the physical axis:
-            // chrome-on-top enters at the stack's top (phrase) and walks
-            // down; a flipped lens (chrome at the bottom) enters at the
-            // stack's bottom (word) and walks up.
-            val bodyWalk = if (lensFlipped) sections.reversed() else sections
-            val next: View = when {
-                cur in chrome &&
-                    (dir == SheetNavGeometry.Dir.LEFT || dir == SheetNavGeometry.Dir.RIGHT) -> {
-                    val i = chrome.indexOf(cur)
-                    chrome.getOrNull(if (dir == SheetNavGeometry.Dir.LEFT) i - 1 else i + 1)
-                }
-                cur in chrome && dir == towardBody -> bodyWalk.firstOrNull()
-                cur in sections && dir == towardBody ->
-                    bodyWalk.getOrNull(bodyWalk.indexOf(cur) + 1)
-                cur in sections && dir == towardChrome ->
-                    bodyWalk.getOrNull(bodyWalk.indexOf(cur) - 1)
-                        ?: pillView.takeIf { it.isShown }
-                else -> null
-            } ?: return
-            navCursor = next
-            // A selected definitions section reads top-aligned: scroll its
-            // top to where the first row rests at scroll 0 (clear of the
-            // pill band — section tops within splitContent ARE resting
-            // scroll offsets, see the scroll's padding derivation). Stepping
-            // back out to the chrome restores the resting scroll.
-            if (next in sections) {
-                definitionsScroll.smoothScrollTo(0, next.top)
-            } else if (cur in sections) {
-                definitionsScroll.smoothScrollTo(0, 0)
+            val docDir = when (dir) {
+                SheetNavGeometry.Dir.UP -> DocNav.Dir.UP
+                SheetNavGeometry.Dir.DOWN -> DocNav.Dir.DOWN
+                SheetNavGeometry.Dir.LEFT -> DocNav.Dir.LEFT
+                SheetNavGeometry.Dir.RIGHT -> DocNav.Dir.RIGHT
             }
-            syncNavRing()
+            val next = DocNav.next(list.targets, cur, docDir, navRtl) ?: return
+            if (next.rowId != cur.rowId) {
+                list.rowTop(next.rowId)?.let { definitionsScroll.smoothScrollTo(0, it) }
+            }
+            setCursor(pill = false, doc = next.rowId to next.act)
         }
 
-        private fun activateNav(v: View) {
+        private fun activateNav() {
+            val doc = docCursor
             when {
-                v === pillView -> fireOpenTap()
-                v === leftChip -> onSpeakTap()
-                v === rightChip -> onAnkiTap()
-                // Sections, and the "Load more" row, carry their own
-                // (debounced) action as their click listener: one wiring
+                // A target carries its own (debounced) action: one wiring
                 // for touch and controller.
-                v in splitSectionViews -> v.performClick()
+                doc != null -> list.activate(doc.first, doc.second)
+                pillCursor -> fireOpenTap()
             }
         }
 
@@ -3514,89 +2788,9 @@ class MagnifierLens(
             Choreographer.getInstance().removeFrameCallback(navScrollFrame)
         }
 
-        /** Run [revealChips] now if no pill width animation is in flight;
-         *  otherwise wait for the pill animator to end and run it then.
-         *  This ensures the chips' "under-pill" start position is at the
-         *  pill's settled word-state width, not at a mid-animation width
-         *  (which would leave the chips visibly exposed). */
-        private fun scheduleChipReveal() {
-            val anim = pillAnimator
-            if (anim == null || !anim.isRunning) {
-                revealChips()
-                return
-            }
-            anim.addListener(object : android.animation.AnimatorListenerAdapter() {
-                override fun onAnimationEnd(animation: android.animation.Animator) {
-                    animation.removeListener(this)
-                    if (isInteractive) revealChips()
-                }
-            })
-        }
-
-        /** Lay the chips at their final positions — visible disks
-         *  [chipPillGapPx] away from the pill's left and right edges —
-         *  then translate them back inward so they sit under the pill,
-         *  set visibility, and animate translationX back to 0 so they
-         *  slide out from under the pill to their resting places. */
-        private fun revealChips() {
-            // [fitPillText] bounds the capsule at [pillMaxWidthPx], so both
-            // lanes come out ≥ 0 however long the word is — a wide pill walks
-            // the chips out to the host's edges and stops there, instead of
-            // walking them past the frame that clips them.
-            val (leftLaneMargin, rightLaneMargin) = computeChipLaneMargins(
-                viewW = viewW,
-                pillWidth = measurePillNaturalWidth(),
-                chipLane = chipLanePx,
-            )
-            // The vertical anchor is OWNED by applyCardHeightGeometry — keep
-            // whatever it last wrote. Recomputing from the live pillAnchorY
-            // here reads the ANIMATED card top when the reveal was deferred
-            // past a pill tween that ends mid-grow (the loading→definitions
-            // path: setLoading's pill tween is still running at
-            // makeInteractive), and endCardGrow only clears the draw-only
-            // ride — the mid-grow margin then strands the chips inside the
-            // grown card. The existing margin is always right: the grow's
-            // end-state (written at beginCardGrow) or the settled anchor.
-            val chipTopMargin = (leftChip.layoutParams as? LayoutParams)?.topMargin
-                ?: (pillAnchorY - chipHitSizePx / 2)
-
-            // Absolute LEFT/RIGHT + left/rightMargin: the lane margins are
-            // view-pixel coordinates measured off [viewW], so pairing them with
-            // relative START/END margins would mirror the pair under an RTL
-            // locale and swap the two chips — prev/next would read backwards.
-            leftChip.layoutParams = LayoutParams(
-                chipHitSizePx, chipHitSizePx,
-                Gravity.LEFT or Gravity.TOP,
-            ).apply {
-                leftMargin = leftLaneMargin
-                topMargin = chipTopMargin
-            }
-            rightChip.layoutParams = LayoutParams(
-                chipHitSizePx, chipHitSizePx,
-                Gravity.RIGHT or Gravity.TOP,
-            ).apply {
-                rightMargin = rightLaneMargin
-                topMargin = chipTopMargin
-            }
-
-            leftChip.animate().cancel()
-            rightChip.animate().cancel()
-            // Initial offset accounts for both the chip's visible
-            // diameter AND the resting gap, so the disk is fully tucked
-            // under the pill at t=0 regardless of the gap.
-            val initialOffset = (chipVisDiameterPx + chipPillGapPx).toFloat()
-            leftChip.translationX = initialOffset
-            rightChip.translationX = -initialOffset
-            leftChip.visibility = VISIBLE
-            rightChip.visibility = if (showAnkiChip) VISIBLE else GONE
-            val interp = android.view.animation.DecelerateInterpolator()
-            leftChip.animate().translationX(0f).setDuration(220L).setInterpolator(interp).start()
-            rightChip.animate().translationX(0f).setDuration(220L).setInterpolator(interp).start()
-        }
-
         private fun populateLoading() {
             val ctx = context
-            definitionsContent.removeAllViews()
+            loadingContent.removeAllViews()
             val row = LinearLayout(ctx).apply {
                 orientation = LinearLayout.HORIZONTAL
                 gravity = Gravity.CENTER_VERTICAL
@@ -3613,7 +2807,7 @@ class MagnifierLens(
                 setTextSize(TypedValue.COMPLEX_UNIT_SP, 13f)
                 setPadding(dp(8f), 0, 0, 0)
             })
-            definitionsContent.addView(row)
+            loadingContent.addView(row)
         }
 
         /** Card chrome: bg fill, zoomed pixels (ZOOM only, clipped to the

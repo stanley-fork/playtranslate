@@ -423,7 +423,6 @@ suspend fun Context.sendWordCard(
                 else YomitanStyledData(
                     structured = flat,
                     dictStyles = emptyMap(),
-                    sourceLanguage = s.sourceLanguage,
                 )
             }
         }

@@ -32,8 +32,8 @@ import kotlinx.coroutines.launch
  * update, the deferred-translation request). The in-app
  * [TranslationResultFragment] and the floating workspace's
  * [WorkspaceSentencePage] are shells over this, each supplying what only
- * it knows through [Host]: where the lens's window lives, what its chips
- * do, what a word tap opens, the Anki entries, editing, the OCR and
+ * it knows through [Host]: where the lens's window lives, what its rows'
+ * actions do, what a word tap opens, the Anki entries, editing, the OCR and
  * language pickers, the Clear action, the show-on-screen toggle, and who
  * completes a deferred translation. Same constraints as every other
  * shared binder: plain views, ids from the shared layout.
@@ -85,7 +85,7 @@ class TranslationResultContent(
          *  (see [SourceTextLens]). */
         val opensWithoutEntry: Boolean
 
-        /** Wire a freshly built lens's chips for this tap. */
+        /** Wire a freshly built lens's actions for this tap. */
         fun wireLensActions(lens: MagnifierLens, resolved: SourceWordLookup.ResolvedAt)
 
         /** A word row's body tap: open that word's detail. [surface] is the
@@ -234,9 +234,11 @@ class TranslationResultContent(
             ttsAlertTarget = host.ttsAlertTarget,
             binder = binder,
             screenSize = { host.screenSize() },
-            showAnkiChip = { true },
+            // The review looks a word up again by itself, so every row
+            // offers it, entry or not.
+            offersAnki = { true },
             opensWithoutEntry = host.opensWithoutEntry,
-            decks = wordRows.deckSource,
+            deckBadges = true,
             wireActions = { lens, resolved -> host.wireLensActions(lens, resolved) },
         )
         binder.tvOriginal.onTapAtOffset = { offset -> sourceLens.onTapAtOffset(offset) }
@@ -392,6 +394,13 @@ class TranslationResultContent(
                 )
                 // Drawn like Loading; asks for the rows when the card is shown.
                 wordRows.render(state)
+                // The rows are being looked up: load their page meanwhile,
+                // but never inside the page's entrance (the first WebView of
+                // a process blocks the main thread while it loads).
+                host.scope.launch {
+                    host.awaitEnterSettled()
+                    if (host.isAlive && generation == lookupGeneration) wordRows.prepareRows()
+                }
             }
             is WordLookupsState.Settled -> {
                 // Spans project against the displayed text (which may carry
@@ -535,7 +544,9 @@ class TranslationResultContent(
 
     /** A view to keep visually pinned across a result re-render, plus its
      *  pixel offset from the top of the scroll viewport when captured. */
-    private class ScrollAnchor(val view: View, val offsetFromViewportTop: Int)
+    /** [view] at [offsetFromViewportTop]; with [rowId], that row of the
+     *  Words card's document ([view] is then the document's view). */
+    private class ScrollAnchor(val view: View, val offsetFromViewportTop: Int, val rowId: String? = null)
 
     /** Snapshot the view at the top of the viewport so a re-render that
      *  changes the cards' heights restores the same CONTENT. Candidates run
@@ -560,8 +571,16 @@ class TranslationResultContent(
             }
         }
         for (i in 0 until content.childCount) consider(content.getChildAt(i))
-        val rows = wordRows.container
-        for (i in 0 until rows.childCount) consider(rows.getChildAt(i))
+        // The word rows are one view (their document), so a deep scroll
+        // anchors on the row inside it that the viewport top is in.
+        wordRows.rowsView?.takeIf { it.isShown && it.height > 0 }?.let { rows ->
+            val rowsTop = scrollView.contentTopOf(rows)
+            if (scrollY in rowsTop until rowsTop + rows.height) {
+                val id = wordRows.rowAt(scrollY - rowsTop)
+                val top = id?.let { wordRows.rowTop(it) }
+                if (id != null && top != null) return ScrollAnchor(rows, rowsTop + top - scrollY, id)
+            }
+        }
         val anchor = straddler ?: firstBelow ?: return null
         return ScrollAnchor(anchor, scrollView.contentTopOf(anchor) - scrollY)
     }
@@ -573,12 +592,14 @@ class TranslationResultContent(
             scrollView.scrollToTopSilently(scrollListener)
             return
         }
-        val target = scrollView.contentTopOf(anchor.view) - anchor.offsetFromViewportTop
+        // A row that is gone leaves its document as the anchor.
+        val rowTop = anchor.rowId?.let { wordRows.rowTop(it) } ?: 0
+        val target = scrollView.contentTopOf(anchor.view) + rowTop - anchor.offsetFromViewportTop
         scrollView.restoreScrollSilently(target, scrollListener)
     }
 
     /** Tear down: the lens, the popovers, the sections' speak job, the Words
-     *  card's styled renderers. Idempotent. */
+     *  card's page. Idempotent. */
     fun release() {
         sourceLens.dismiss()
         popovers.release()

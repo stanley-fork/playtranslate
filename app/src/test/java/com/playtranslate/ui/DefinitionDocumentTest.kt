@@ -1,0 +1,371 @@
+package com.playtranslate.ui
+
+import android.app.Activity
+import android.os.Bundle
+import android.os.Looper
+import android.webkit.WebView
+import android.widget.FrameLayout
+import com.playtranslate.R
+import com.playtranslate.model.ImportedSense
+import com.playtranslate.model.ImportedSenseGroup
+import com.playtranslate.yomitan.YomitanDataStore
+import com.playtranslate.yomitan.YomitanDictionaryStore
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.cancel
+import kotlinx.coroutines.runBlocking
+import org.junit.After
+import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNotSame
+import org.junit.Assert.assertTrue
+import org.junit.Before
+import org.junit.Test
+import org.junit.runner.RunWith
+import org.robolectric.Robolectric
+import org.robolectric.RobolectricTestRunner
+import org.robolectric.Shadows.shadowOf
+import java.io.File
+
+/**
+ * [DefinitionDocument]'s rules, driven as the page drives them: the test
+ * plays the page (it finishes the shell's load, sends layout reports through
+ * the bridge, kills the renderer) and reads what the document sent it.
+ *
+ * Rows are fed eight at a time and more only while the end is near; a
+ * rebind with the same ids patches the rows that changed and nothing else;
+ * a rebind with other ids is a new row set, and reports from the old one
+ * are ignored; the view is 1 px only before its first layout; renderer
+ * death is recovered once per content and the notice shows the second
+ * time; a document with nothing to draw takes no shell; the view is a
+ * focus stop only while a row offers something to act on; a dictionary
+ * store that fails costs a chunk its styling, never its rows; and a row that
+ * gains dictionary content under its id is fed again, not patched.
+ */
+@RunWith(RobolectricTestRunner::class)
+class DefinitionDocumentTest {
+
+    class Host : Activity() {
+        override fun onCreate(savedInstanceState: Bundle?) {
+            setTheme(R.style.Theme_PlayTranslate)
+            super.onCreate(savedInstanceState)
+        }
+    }
+
+    private lateinit var activity: Activity
+    private lateinit var slot: FrameLayout
+    private lateinit var doc: DefinitionDocument
+    private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
+    private val actions = mutableListOf<Pair<String, String>>()
+
+    @Before fun setUp() {
+        DefinitionShells.reset()
+        activity = Robolectric.buildActivity(Host::class.java).setup().get()
+        slot = FrameLayout(activity)
+        activity.setContentView(slot)
+        doc = DefinitionDocument(
+            activity, slot, scope,
+            theme = {
+                DefinitionsDocument.DocTheme(
+                    DefinitionsDocument.Tokens(-1, -2, -3, -4, -5, 16.5f), divider = -6, band = -7,
+                )
+            },
+            onAction = { row, act -> actions += row.id to act },
+            // Inline, so a step's sends have happened when it returns.
+            buildOn = Dispatchers.Main.immediate,
+        )
+    }
+
+    @After fun tearDown() {
+        doc.release()
+        scope.cancel()
+        DefinitionShells.reset()
+    }
+
+    private fun row(id: String, meaning: String = "meaning of $id") = DefRow.Word(
+        id,
+        WordDefinitionData(
+            word = id, reading = null, senses = listOf(SenseDisplay(emptyList(), meaning, emptyList())),
+            freqScore = 0, isCommon = false,
+        ),
+        speak = DefRow.Speak.IDLE, trailing = DefRow.Trailing.HIDE,
+    )
+
+    private fun rows(n: Int) = (0 until n).map { row("w$it") }
+
+    private fun idle() = shadowOf(Looper.getMainLooper()).idle()
+
+    private val view: DefinitionDocumentView get() = slot.getChildAt(0) as DefinitionDocumentView
+    private val web: WebView get() = view.getChildAt(0) as WebView
+
+    /** The shell's page finished loading: what was queued for it runs. */
+    private fun pageReady() {
+        shadowOf(web).webViewClient.onPageFinished(web, "")
+        idle()
+    }
+
+    /** The last script the document ran in the page. */
+    private fun sent(): String = shadowOf(web).lastEvaluatedJavascript.orEmpty()
+
+    /** Waits for the page to be sent a script that [arrived] accepts. A row
+     *  holding dictionary content asks the store on the store's own thread,
+     *  so its chunk is not sent within the step that set it. */
+    private fun awaitSent(arrived: (String) -> Boolean) {
+        for (i in 0 until 300) {
+            idle()
+            if (arrived(sent())) return
+            Thread.sleep(10)
+        }
+    }
+
+    /** The page reports a layout of row set [gen]. */
+    private fun layout(gen: Int, heightCssPx: Int, targets: String = "[]") {
+        val bridge = shadowOf(web).getJavascriptInterface("PTBridge")
+        bridge.javaClass.getMethod("onLayout", Int::class.java, Int::class.java, String::class.java)
+            .invoke(bridge, gen, heightCssPx, targets)
+        idle()
+    }
+
+    private fun tap(domId: String, act: String) {
+        val bridge = shadowOf(web).getJavascriptInterface("PTBridge")
+        bridge.javaClass.getMethod("onAction", String::class.java, String::class.java).invoke(bridge, domId, act)
+        idle()
+    }
+
+    private fun killRenderer() {
+        shadowOf(web).webViewClient.onRenderProcessGone(web, null)
+        idle()
+    }
+
+    @Test fun `nothing to draw and nothing drawn takes no shell`() {
+        doc.setRows(emptyList(), "ja")
+        assertEquals(0, slot.childCount)
+    }
+
+    @Test fun `the first eight rows go at once, and more only while the end is near`() {
+        doc.setRows(rows(20), "ja")
+        pageReady()
+        assertTrue(sent(), sent().startsWith("ptSet("))
+        assertTrue(sent().contains("id=\\\"k7\\\"") && !sent().contains("id=\\\"k8\\\""))
+        assertTrue("the row set's generation rides with it", sent().endsWith(",1)"))
+
+        // A short document: its end is near, so the next rows follow.
+        layout(1, 400)
+        assertTrue(sent(), sent().startsWith("ptAppend("))
+        assertTrue(sent().contains("id=\\\"k8\\\"") && sent().contains("id=\\\"k15\\\"") && !sent().contains("id=\\\"k16\\\""))
+
+        // Now far taller than two screens: nothing more until a scroll brings the end near.
+        layout(1, 100_000)
+        assertTrue("no further append", sent().contains("id=\\\"k15\\\""))
+        assertEquals(20, doc.shownRows.size)
+    }
+
+    @Test fun `the view is one pixel only before its first layout`() {
+        doc.setRows(rows(2), "ja")
+        pageReady()
+        assertEquals(1, view.layoutParams.height)
+        layout(1, 100)
+        val first = view.layoutParams.height
+        assertTrue(first > 1)
+
+        // A new row set keeps the height on screen until its own layout lands.
+        doc.setRows(listOf(row("other")), "ja")
+        assertEquals(first, view.layoutParams.height)
+        layout(2, 40)
+        assertTrue(view.layoutParams.height in 2 until first)
+    }
+
+    @Test fun `a rebind with the same ids patches only the row that changed`() {
+        val first = rows(3)
+        doc.setRows(first, "ja")
+        pageReady()
+        val set = sent()
+
+        doc.setRows(first, "ja")
+        assertEquals("an identical rebind sends nothing", set, sent())
+
+        doc.setRows(listOf(first[0], row("w1", "a new meaning"), first[2]), "ja")
+        assertTrue(sent(), sent().startsWith("ptReplace(\"k1\","))
+        assertTrue(sent().contains("a new meaning") && sent().endsWith(",1)"))
+    }
+
+    @Test fun `a row patched before its chunk went is sent as it is now`() {
+        doc.setRows(rows(12), "ja")
+        pageReady()
+        // Row 10 is not in the page yet: the list changes, the page does not.
+        val before = sent()
+        doc.setRows(rows(12).mapIndexed { i, r -> if (i == 10) row("w10", "patched early") else r }, "ja")
+        assertEquals(before, sent())
+        layout(1, 400)
+        assertTrue(sent(), sent().startsWith("ptAppend(") && sent().contains("patched early"))
+    }
+
+    @Test fun `other ids are a new row set, and the old one's reports are ignored`() {
+        doc.setRows(rows(2), "ja")
+        pageReady()
+        layout(1, 100)
+        val height = view.layoutParams.height
+
+        doc.setRows(listOf(row("x"), row("y")), "ja")
+        assertTrue(sent(), sent().startsWith("ptSet(") && sent().endsWith(",2)"))
+        layout(1, 9_000)
+        assertEquals("a late report from the first set changes nothing", height, view.layoutParams.height)
+    }
+
+    @Test fun `a tap reaches the host with its row, and targets name rows by their own ids`() {
+        doc.setRows(rows(2), "ja")
+        pageReady()
+        layout(1, 100, """["k1","open",0,50,300,50,"k1","speak",200,55,36,40]""")
+        assertEquals(listOf(DocTarget("w1", "open", 0, 50, 300, 50), DocTarget("w1", "speak", 200, 55, 36, 40)), doc.targets)
+        tap("k1", DefAction.SPEAK)
+        assertEquals(listOf("w1" to DefAction.SPEAK), actions)
+        tap("k99", DefAction.OPEN)
+        assertEquals("a row the document does not hold is no tap", 1, actions.size)
+    }
+
+    @Test fun `a document of plain senses is no focus stop, and a late translation patches its one row`() {
+        fun sense(id: String, translation: String = "") = DefRow.Sense(
+            id, number = null, pos = "", gloss = "gloss of $id",
+            examples = listOf(DefRow.Example("example of $id", translation, italic = false)),
+        )
+        doc.setRows(listOf(sense("s0"), sense("s1")), "ja")
+        pageReady()
+        assertFalse(view.isFocusable)
+        doc.setRows(listOf(sense("s0"), sense("s1", "translated")), "ja")
+        idle()
+        assertTrue(sent(), sent().startsWith("ptReplace(") && sent().contains("translated"))
+        assertFalse(sent(), sent().contains("gloss of s0"))
+        // Rows with something to tap make it one again.
+        doc.setRows(rows(2), "ja")
+        idle()
+        assertTrue(view.isFocusable)
+    }
+
+    @Test fun `emptying keeps the shell at one pixel for the rows that follow`() {
+        doc.setRows(rows(2), "ja")
+        pageReady()
+        layout(1, 100)
+        val shell = web
+        doc.setRows(emptyList(), "ja")
+        assertEquals("ptSet('',2)", sent())
+        assertEquals(1, view.layoutParams.height)
+        doc.setRows(rows(1), "ja")
+        assertTrue(shell === web)
+    }
+
+    @Test fun `renderer death is recovered once per content, then the notice shows`() {
+        doc.setRows(rows(2), "ja")
+        pageReady()
+        val first = web
+        killRenderer()
+        assertFalse(doc.showsNotice)
+        assertNotSame("a new shell took the dead one's place", first, web)
+        pageReady()
+        assertTrue("the rows are sent again", sent().startsWith("ptSet(") && sent().contains("meaning of w0"))
+
+        killRenderer()
+        assertTrue("a second death on the same rows", doc.showsNotice)
+
+        // New rows are a new attempt.
+        doc.setRows(listOf(row("fresh")), "ja")
+        assertFalse(doc.showsNotice)
+        pageReady()
+        assertTrue(sent().contains("meaning of fresh"))
+    }
+
+    @Test fun `a renderer death takes the spare with it, so one death is one death`() {
+        doc.setRows(rows(2), "ja")
+        pageReady()
+        // A second surface holding definitions keeps a spare loaded.
+        DefinitionShells.retain(activity)
+        val spare = DefinitionShells.spareForTest ?: error("no spare")
+        val first = web
+        // The platform tells the document's page first; the spare, which
+        // shared the render process, has not heard yet.
+        shadowOf(first).webViewClient.onRenderProcessGone(first, null)
+        idle()
+        assertTrue("the spare died with the render process", spare.isDead)
+        assertNotSame("the document did not recover onto the dead spare", spare.webView, web)
+        assertNotSame(first, web)
+        assertFalse(doc.showsNotice)
+    }
+
+    @Test fun `a dictionary store that fails costs the styling, never the rows`() {
+        // The store's database cannot be opened: a directory sits where its
+        // file goes. The row asks the store, since its imported sense kept a
+        // structured glossary.
+        val root = YomitanDictionaryStore.rootDir(activity)
+        runBlocking { YomitanDataStore.resetForTest() }
+        root.deleteRecursively()
+        File(root, "yomitan.sqlite").mkdirs()
+        try {
+            assertTrue(
+                "the store really fails here",
+                runCatching { runBlocking { YomitanDataStore.stylingFor(activity, "ja") } }.isFailure,
+            )
+            val imported = ImportedSenseGroup("Dict", listOf(ImportedSense("its flat gloss", scRowid = 7L)), dictId = "d1")
+            val word = DefRow.Word(
+                "w",
+                WordDefinitionData(
+                    word = "w", reading = null, senses = emptyList(), freqScore = 0, isCommon = false,
+                    importedGroups = listOf(imported),
+                ),
+            )
+            doc.setRows(listOf(word), "ja")
+            pageReady()
+            awaitSent { it.startsWith("ptSet(") }
+            assertTrue("the row is sent: ${sent().take(80)}", sent().startsWith("ptSet("))
+            assertTrue("with the sense's flat text", sent().contains("its flat gloss"))
+        } finally {
+            runBlocking { YomitanDataStore.resetForTest() }
+            root.deleteRecursively()
+        }
+    }
+
+    @Test fun `a row that gains dictionary content under its id is a new row set`() {
+        // Each sense kept a structured glossary under its rowid, which only
+        // feeding fetches.
+        fun word(vararg rowids: Long, speak: DefRow.Speak = DefRow.Speak.IDLE) = DefRow.Word(
+            "w",
+            WordDefinitionData(
+                word = "w", reading = null, senses = emptyList(), freqScore = 0, isCommon = false,
+                importedGroups = listOf(
+                    ImportedSenseGroup("Dict", rowids.map { ImportedSense("gloss $it", scRowid = it) }, dictId = "d1"),
+                ),
+            ),
+            speak = speak,
+        )
+        doc.setRows(listOf(word(1)), "ja")
+        pageReady()
+        awaitSent { it.startsWith("ptSet(") }
+        assertTrue(sent(), sent().startsWith("ptSet(") && sent().endsWith(",1)"))
+
+        // The same content with a spinner: a patch, as ever.
+        doc.setRows(listOf(word(1, speak = DefRow.Speak.LOADING)), "ja")
+        awaitSent { it.startsWith("ptReplace(") }
+        assertTrue(sent(), sent().startsWith("ptReplace("))
+
+        // A second glossary under the same id: nothing has fetched it, so
+        // the rows are fed again.
+        doc.setRows(listOf(word(1, 2)), "ja")
+        awaitSent { it.startsWith("ptSet(") }
+        assertTrue("a new row set: ${sent().take(60)}", sent().startsWith("ptSet(") && sent().endsWith(",2)"))
+        assertTrue(sent().contains("gloss 2"))
+
+        // Losing one needs no fetch: a patch.
+        doc.setRows(listOf(word(2)), "ja")
+        awaitSent { it.startsWith("ptReplace(") }
+        assertTrue(sent(), sent().startsWith("ptReplace(") && sent().endsWith(",2)"))
+    }
+
+    @Test fun `release drops the view and a later rebind starts over`() {
+        doc.setRows(rows(2), "ja")
+        pageReady()
+        doc.release()
+        assertEquals(0, slot.childCount)
+        assertTrue(doc.shownRows.isEmpty())
+        doc.setRows(rows(1), "ja")
+        assertEquals(1, slot.childCount)
+    }
+}
