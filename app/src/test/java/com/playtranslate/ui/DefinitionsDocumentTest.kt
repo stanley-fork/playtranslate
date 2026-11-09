@@ -572,6 +572,23 @@ class DefinitionsDocumentTest {
         assertEquals("rgba(236,239,241,0.102)", DefinitionsDocument.cssAlpha(0x40ECEFF1, 0.10f))
     }
 
+    @Test
+    fun `bold in a CJK language is the page's own stroke, never the engine's made-up weight`() {
+        // The system's CJK font has one weight: an engine asked for bold
+        // thickens the outline until a dense character closes up. Each
+        // element the page draws bold (a headword, a bolded reading, a
+        // sentence-sheet word) is the regular weight under a light stroke
+        // in the three languages that font serves.
+        val css = shell()
+        val rule = Regex("""([^{}]*)\{ font-weight: 400; -webkit-text-stroke: \.02em; }""").find(css)
+            ?: error("no drawn-weight rule")
+        val selectors = rule.groupValues[1].substringAfterLast("*/").split(',').map { it.trim() }.toSet()
+        val expected = listOf(".w", ".rd.b", ".sww").flatMap { el -> listOf("ja", "zh", "ko").map { "$el:lang($it)" } }.toSet()
+        assertEquals(expected, selectors)
+        // The elements still ask for bold where a real bold face exists.
+        assertTrue(css.contains(".w { font-size: 1.636em; font-weight: 700;"))
+    }
+
     private fun shell() = DefinitionsDocument.documentShellHtml()
 
     /** The `ptTheme` call a surface gives a loaded shell. */

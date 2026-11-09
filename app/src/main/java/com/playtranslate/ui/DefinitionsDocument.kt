@@ -444,6 +444,16 @@ $DOCUMENT_JS
 .stub .w { font-size: 1.064em; color: var(--pt-secondary); }
 .rd { font-size: .909em; color: var(--pt-secondary); }
 .rd.b { color: var(--pt-fg); font-weight: 700; }
+/* Bold in a CJK language is drawn here, never asked of the engine. The
+   system's CJK font has one weight, and the engine's made-up bold thickens
+   an unhinted outline: at these sizes the strokes of a dense character
+   (量, 鬱) close into a block. The native rows' fake bold was hinted, which
+   kept a pixel between the strokes. So the regular weight under a stroke
+   of our own, two thirds of the platform's, light enough to keep the gaps
+   open. The language is the element's own (its lang attribute). */
+.w:lang(ja), .w:lang(zh), .w:lang(ko),
+.rd.b:lang(ja), .rd.b:lang(zh), .rd.b:lang(ko),
+.sww:lang(ja), .sww:lang(zh), .sww:lang(ko) { font-weight: 400; -webkit-text-stroke: .02em; }
 .rds { margin: 2px 12px 0 0; }
 .rds .rd { display: inline-block; margin: 0 12px 6px 0; }
 [dir=rtl] .rds { margin: 2px 0 0 12px; }

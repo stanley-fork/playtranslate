@@ -324,6 +324,8 @@ class DefRowHtmlTest {
         val h = pageRow(sheetWord())
         assertTrue(h, h.startsWith("<div class=\"row sw\" id=\"k7\" data-row data-inert data-act=\"target\">"))
         assertTrue(h, h.contains("<span class=\"sww\">猫</span><span class=\"swr\">ねこ</span><span class=\"sws\">\u2605\u2605</span>"))
+        // The word's language, which the stylesheet's weight rule reads.
+        assertTrue(h, h.contains("<div class=\"swl\" lang=\"ja\"><span class=\"sww\">"))
         assertEquals(h, 1, h.count("data-act=\"trailing\" aria-label=\"Hide word\""))
         assertTrue(h, h.contains("<div class=\"swd swm\">cat</div>"))
         assertFalse(h, h.contains("feline") || h.contains("class=\"au"))
