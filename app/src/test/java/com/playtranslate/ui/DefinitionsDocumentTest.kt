@@ -565,6 +565,20 @@ class DefinitionsDocumentTest {
     }
 
     @Test
+    fun `a row is drawn pressed only for a press of its own`() {
+        // Catches: the row lighting up behind its own button (an element is
+        // :active while anything inside it is), and the mark being dropped
+        // at the lift, where a quick tap's pressed look is still showing.
+        val shell = shell()
+        assertTrue(shell.contains(".cell[data-act]:active:not(.np), .row.cur { background: var(--pt-press); }"))
+        assertTrue(shell.contains("t.closest('[data-act]') === row && (!link || row.hasAttribute('data-inert'))"))
+        assertTrue(shell.contains("if (!own) { unpressed = row; row.classList.add('np'); }"))
+        // Cleared where the next touch begins, and nowhere else.
+        assertEquals(1, Regex("classList\\.remove\\('np'\\)").findAll(shell).count())
+        assertTrue(shell.contains("document.addEventListener('touchstart', function (e) {\n    if (unpressed) { unpressed.classList.remove('np'); unpressed = null; }"))
+    }
+
+    @Test
     fun `cssAlpha is the color-mix-with-transparent equivalent`() {
         assertEquals("rgba(236,239,241,0.102)", DefinitionsDocument.cssAlpha(0xFFECEFF1.toInt(), 0.10f))
         assertEquals("rgba(0,188,212,0.161)", DefinitionsDocument.cssAlpha(0xFF00BCD4.toInt(), 0.16f))

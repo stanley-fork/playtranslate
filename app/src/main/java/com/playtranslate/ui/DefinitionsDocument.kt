@@ -435,7 +435,10 @@ $DOCUMENT_JS
 [dir=rtl] .row + .row::before { left: 0; right: 16px; }
 .cell { padding: 14px 4px 14px 16px; }
 [dir=rtl] .cell { padding: 14px 16px 14px 4px; }
-.cell[data-act]:active, .row.cur { background: var(--pt-press); }
+/* Pressed only when the press is the row's own (the page marks the others
+   np): an element is :active while anything inside it is, so the row would
+   light up behind its own button. */
+.cell[data-act]:active:not(.np), .row.cur { background: var(--pt-press); }
 .cell.stub { padding-top: 8px; padding-bottom: 8px; background: var(--pt-band); }
 .head { display: flex; align-items: center; }
 .title { flex: 1; min-width: 0; display: flex; flex-wrap: wrap; align-items: baseline; }
@@ -736,6 +739,21 @@ button.act:active, .act.cur { background: var(--pt-press); }
     cursor = rowId ? [rowId, act] : null;
     applyCursor();
   };
+
+  // A press lights a row only when the row itself is what the tap would
+  // fire: not one of its buttons, and not a link that is live. The mark
+  // stays until the next touch begins, because the engine keeps a quick
+  // tap's pressed look for a moment after the finger has lifted.
+  var unpressed = null;
+  document.addEventListener('touchstart', function (e) {
+    if (unpressed) { unpressed.classList.remove('np'); unpressed = null; }
+    var t = e.target;
+    var row = t && t.closest ? t.closest('[data-row]') : null;
+    if (!row) return;
+    var link = t.closest('a[href]');
+    var own = t.closest('[data-act]') === row && (!link || row.hasAttribute('data-inert'));
+    if (!own) { unpressed = row; row.classList.add('np'); }
+  }, { passive: true });
 
   // A press held on an element that asks for it (data-hold) reports that
   // element's action as held, and is not also a tap. The timer dies with
