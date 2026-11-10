@@ -19,6 +19,8 @@ import java.util.concurrent.atomic.AtomicLong
  *  - which backends the pass tries (prompt completers that can complete and
  *    are not in a cooldown) and in what order (the registry's, setOrder
  *    included);
+ *  - who it names as it goes (each completer as it starts asking it, never
+ *    one it skips), and a cancellation thrown there ending it;
  *  - how it ends: the first non-blank answer wins and is returned with its
  *    backend, a failure or a blank falls through, cancellation stops it, and
  *    a pass nobody answered names the FIRST completer tried and what it
@@ -135,6 +137,62 @@ class TranslationBackendRegistryCompleteTest {
 
         assertSame(expired, TranslationBackendRegistry.complete("s", "u").backend)
         assertEquals(0, next.completeCalls.get())
+    }
+
+    // ── naming who is asked ──────────────────────────────────────────────
+
+    @Test fun `the pass names each completer as it starts asking it, and never one it skips`() = runBlocking<Unit> {
+        val named = mutableListOf<String>()
+        // What had been named when each completer was asked: its own name
+        // comes before its asking, and nothing after it before it answers.
+        val namedWhenAsked = mutableMapOf<String, List<String>>()
+        val cannot = FakeCompleterBackend(id = "cannot", priority = 10, canComplete = false)
+        val cooled = cooledDown("cooled", 20)
+        val broken = FakeCompleterBackend(
+            id = "broken", priority = 30,
+            answer = { _, _ -> namedWhenAsked["broken"] = named.toList(); throw IOException("synthetic") },
+        )
+        val blank = FakeCompleterBackend(
+            id = "blank", priority = 40, answer = { _, _ -> namedWhenAsked["blank"] = named.toList(); "  " },
+        )
+        val answering = FakeCompleterBackend(
+            id = "answering", priority = 50, answer = { _, _ -> namedWhenAsked["answering"] = named.toList(); "it" },
+        )
+        val unused = FakeCompleterBackend(id = "unused", priority = 60)
+        TranslationBackendRegistry.init(listOf(
+            FakeOnlineBackend(id = "deepl", priority = 5), cannot, cooled, broken, blank, answering, unused,
+        ))
+
+        val result = TranslationBackendRegistry.complete("s", "u") { named += it.id }
+
+        assertSame(answering, result.backend)
+        assertEquals("the tried, in order; never the skipped or the unreached", listOf("broken", "blank", "answering"), named)
+        assertEquals(listOf("broken"), namedWhenAsked["broken"])
+        assertEquals(listOf("broken", "blank"), namedWhenAsked["blank"])
+        assertEquals(listOf("broken", "blank", "answering"), namedWhenAsked["answering"])
+
+        // A pass with nothing to try names nobody.
+        TranslationBackendRegistry.init(listOf(cannot, cooled))
+        named.clear()
+        val thrown = runCatching { TranslationBackendRegistry.complete("s", "u") { named += it.id } }.exceptionOrNull()
+        assertTrue("$thrown", thrown is CompletionFailedException)
+        assertEquals(emptyList<String>(), named)
+    }
+
+    @Test fun `a cancellation thrown where a completer is named ends the pass before anyone is asked`() {
+        // How the Ask session stops a pass whose question was put away.
+        val first = FakeCompleterBackend(id = "first", priority = 10)
+        val second = FakeCompleterBackend(id = "second", priority = 20)
+        TranslationBackendRegistry.init(listOf(first, second))
+
+        val thrown = runCatching {
+            runBlocking { TranslationBackendRegistry.complete("s", "u") { throw CancellationException("put away") } }
+        }.exceptionOrNull()
+
+        assertTrue("$thrown", thrown is CancellationException)
+        assertFalse("never turned into a failed pass", thrown is CompletionFailedException)
+        assertEquals(0, first.completeCalls.get())
+        assertEquals(0, second.completeCalls.get())
     }
 
     // ── falling through ──────────────────────────────────────────────────

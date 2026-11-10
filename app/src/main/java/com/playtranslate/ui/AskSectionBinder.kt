@@ -2,6 +2,7 @@ package com.playtranslate.ui
 
 import android.content.Context
 import android.content.res.ColorStateList
+import android.graphics.Typeface
 import android.view.LayoutInflater
 import android.view.MotionEvent
 import android.view.View
@@ -37,9 +38,10 @@ import com.playtranslate.translation.TranslationError
  * the one thing about it kept here. The card shows one of two groups. While
  * nothing is asked, the questions: the presets as chips, a hairline, then
  * the field and its send button. Otherwise, the question on screen: its
- * title with an X that puts it away, a hairline, then "Thinking…", the
- * answer and who gave it, or the failure and Try again. An answer takes the
- * questions' place rather than sitting under them; X brings them back.
+ * title with an X that puts it away, in a row as tall as the chips', then
+ * who is being asked, the answer and who gave it, or the failure and Try
+ * again. An answer takes the questions' place rather than sitting under
+ * them; X brings them back.
  *
  * Hidden is DERIVED, never stored ([isHidden]): the eye's pref AND a session
  * with nothing on screen. A collapsed section shows its card exactly while a
@@ -218,7 +220,10 @@ class AskSectionBinder(
         when (state) {
             AskState.Idle -> applyPresets()
             is AskState.Asking -> showQuestion(
-                state.question, ctx.getString(R.string.ask_status_thinking), R.attr.ptTextHint,
+                state.question,
+                state.service?.let { ctx.getString(R.string.ask_status_asking, it) }
+                    ?: ctx.getString(R.string.ask_status_asking_unnamed),
+                R.attr.ptText,
             )
             is AskState.Answered -> showQuestion(
                 state.question, state.text, R.attr.ptText,
@@ -319,12 +324,25 @@ class AskSectionBinder(
         retry: Boolean = false,
     ) {
         titleText.text = question.title
+        titleText.setTypeface(null, if (readsInItalic(question.title)) Typeface.ITALIC else Typeface.NORMAL)
         bodyText.text = body
         bodyText.setTextColor(ctx.themeColor(bodyColor))
         footerText.text = footer
         footerText.isVisible = footer != null
         retryButton.isVisible = retry
     }
+
+    /** Whether [text] is drawn in italic: when every letter in it is Latin
+     *  script, the rule WordDetailBinder's example translations follow by
+     *  language (targetSupportsItalics). CJK has no italic, so Android
+     *  would slant its glyphs, and Cyrillic's and Greek's italics are
+     *  different letterforms. The text decides rather than a language
+     *  setting: a preset's title is in the app's language, a question of
+     *  the user's own in whatever they typed. */
+    private fun readsInItalic(text: CharSequence): Boolean =
+        text.codePoints().noneMatch {
+            Character.isLetter(it) && Character.UnicodeScript.of(it) != Character.UnicodeScript.LATIN
+        }
 
     /** The failure in words: the generic line, and under it the service's
      *  reason when the session says which online service refused and how. */

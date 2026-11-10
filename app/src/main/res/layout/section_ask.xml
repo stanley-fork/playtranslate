@@ -119,7 +119,8 @@
             </LinearLayout>
 
             <!-- A question on screen: its title with the X that puts it away
-                 and brings the questions back, then what has come of it. -->
+                 and brings the questions back, then what has come of it,
+                 with no hairline between them. -->
             <LinearLayout
                 android:id="@+id/askAnswer"
                 android:layout_width="match_parent"
@@ -127,16 +128,22 @@
                 android:orientation="vertical"
                 android:visibility="gone">
 
+                <!-- As tall as the chip row with one line of chips (a 26 dp
+                     chip, ask_preset_chip.xml, and the row's 12 dp above and
+                     below it), so the title takes the chips' place at their
+                     height. -->
                 <LinearLayout
                     android:layout_width="match_parent"
                     android:layout_height="wrap_content"
-                    android:minHeight="40dp"
+                    android:minHeight="50dp"
                     android:orientation="horizontal"
                     android:gravity="center_vertical"
                     android:paddingStart="16dp"
                     android:paddingEnd="4dp">
 
-                    <!-- The preset's name, or the user's own words. -->
+                    <!-- The preset's name, or the user's own words. Italic
+                         when every letter in it is Latin script, set in code
+                         with its text. -->
                     <TextView
                         android:id="@+id/tvAskTitle"
                         android:layout_width="0dp"
@@ -144,8 +151,8 @@
                         android:layout_weight="1"
                         android:maxLines="2"
                         android:ellipsize="end"
-                        android:textColor="?attr/ptTextMuted"
-                        android:textSize="13sp" />
+                        android:textColor="?attr/ptTextHint"
+                        android:textSize="15sp" />
 
                     <ImageButton
                         android:id="@+id/btnAskClose"
@@ -156,11 +163,6 @@
                         android:src="@drawable/ic_close" />
 
                 </LinearLayout>
-
-                <View
-                    android:layout_width="match_parent"
-                    android:layout_height="1dp"
-                    android:background="?attr/ptDivider" />
 
                 <LinearLayout
                     android:layout_width="match_parent"
@@ -180,15 +182,15 @@
                         android:textSize="11sp"
                         android:visibility="gone" />
 
-                    <!-- "Thinking…", the answer, or the failure; its colour
-                         is set in code with its text. -->
+                    <!-- "Asking <service>…", the answer, or the failure; its
+                         colour is set in code with its text. -->
                     <TextView
                         android:id="@+id/tvAskBody"
                         android:layout_width="match_parent"
                         android:layout_height="wrap_content"
                         android:lineSpacingMultiplier="1.3"
                         android:textColor="?attr/ptText"
-                        android:textSize="14sp" />
+                        android:textSize="16sp" />
 
                     <!-- A text button: asks the failed question again. -->
                     <TextView
@@ -207,14 +209,18 @@
                         android:textSize="13sp"
                         android:visibility="gone" />
 
-                    <!-- "Answered by <service>", under a finished answer. -->
+                    <!-- "Answered by <service>", under a finished answer.
+                         Styled as the Translation card's "Translated by"
+                         (section_target.xml's tvTranslationNote, italic in
+                         TranslationSectionBinder). -->
                     <TextView
                         android:id="@+id/tvAskFooter"
                         android:layout_width="match_parent"
                         android:layout_height="wrap_content"
-                        android:layout_marginTop="8dp"
+                        android:layout_marginTop="6dp"
                         android:textColor="?attr/ptTextHint"
                         android:textSize="11sp"
+                        android:textStyle="italic"
                         android:visibility="gone" />
 
                 </LinearLayout>

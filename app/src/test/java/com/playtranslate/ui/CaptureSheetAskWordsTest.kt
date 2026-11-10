@@ -543,29 +543,33 @@ class CaptureSheetAskWordsTest {
         assertEquals("and the panel height", height, o.panelHeight)
     }
 
-    @Test fun `an answer grows the Ask card past its Thinking line, and the sheet grows with it`() {
+    @Test fun `an answer grows the Ask card past its Asking line, and the sheet grows with it`() {
         val o = open(screen, text(2), text(2), askHidden = false)
         giveLlm()
         tap(chips(o)[0])
         assertTrue("asking", o.askSession.state.value is AskState.Asking)
         assertEquals(View.VISIBLE, o.v(R.id.askAnswer).visibility)
-        assertEquals(ctx.getString(R.string.ask_status_thinking), (o.v(R.id.tvAskBody) as TextView).text.toString())
-        val needThinking = o.need
-        val heightThinking = o.panelHeight
-        val cardThinking = o.v(R.id.cardAsk).height
-        assertTrue("precondition: the need is above the floor", needThinking > floor(screen))
-        assertTrue("precondition: the panel rests at the need, under the cap ($heightThinking, $needThinking)",
-            heightThinking == needThinking && needThinking < CaptureResultGeometry.autoMaxHeight(screen.h))
+        assertEquals(
+            "the registry's pass named the fake it is asking",
+            ctx.getString(R.string.ask_status_asking, llm.displayName),
+            (o.v(R.id.tvAskBody) as TextView).text.toString(),
+        )
+        val needAsking = o.need
+        val heightAsking = o.panelHeight
+        val cardAsking = o.v(R.id.cardAsk).height
+        assertTrue("precondition: the need is above the floor", needAsking > floor(screen))
+        assertTrue("precondition: the panel rests at the need, under the cap ($heightAsking, $needAsking)",
+            heightAsking == needAsking && needAsking < CaptureResultGeometry.autoMaxHeight(screen.h))
 
         answer(longAnswer)
         assertTrue("answered", o.askSession.state.value is AskState.Answered)
         assertEquals(longAnswer, (o.v(R.id.tvAskBody) as TextView).text.toString())
-        val grown = o.v(R.id.cardAsk).height - cardThinking
+        val grown = o.v(R.id.cardAsk).height - cardAsking
         assertTrue("the card grew ($grown)", grown > 0)
-        assertEquals("the need grew by the card's growth", needThinking + grown, o.need)
+        assertEquals("the need grew by the card's growth", needAsking + grown, o.need)
         assertEquals("the panel follows, up to the cap",
             minOf(o.need, CaptureResultGeometry.autoMaxHeight(screen.h)), o.panelHeight)
-        assertTrue("and it grew", o.panelHeight > heightThinking)
+        assertTrue("and it grew", o.panelHeight > heightAsking)
     }
 
     @Test fun `a collapsed Ask's pill shows the card for its question without writing the pref, the need growing by its header and card`() {

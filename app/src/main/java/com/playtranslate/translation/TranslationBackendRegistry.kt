@@ -287,6 +287,11 @@ object TranslationBackendRegistry {
      * on-device models), skipping one in a cooldown, falling through on a
      * failure, returning the first answer. A blank reply is a failure.
      *
+     * [onAttempt] hears of each completer as the pass starts asking it, so
+     * a caller can say who is being asked: the first pick before the pass
+     * first suspends, then the next one each time it falls through. A
+     * completer skipped (unable, or in a cooldown) is never named.
+     *
      * A win clears the service's cooldown state as a translated text does
      * ([Cooldownable.recordSuccess]): it answered. What a failure does to
      * that state is the backend's own business
@@ -298,7 +303,11 @@ object TranslationBackendRegistry {
      * first backend that was tried and what it threw (neither, when every
      * completer was in a cooldown or none exists). Cancellation re-throws.
      */
-    suspend fun complete(system: String, user: String): Completion {
+    suspend fun complete(
+        system: String,
+        user: String,
+        onAttempt: (TranslationBackend) -> Unit = {},
+    ): Completion {
         var firstTried: TranslationBackend? = null
         var firstFailure: Exception? = null
         for (backend in orderedBackends()) {
@@ -310,6 +319,7 @@ object TranslationBackendRegistry {
                 Log.d(TAG, "Completer ${backend.id} skipped (cooldown ${coolDown - now}ms remaining)")
                 continue
             }
+            onAttempt(backend)
             val attemptStartedAt = System.currentTimeMillis()
             try {
                 val text = completer.complete(system, user)

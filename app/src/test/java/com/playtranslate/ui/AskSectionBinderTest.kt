@@ -4,6 +4,7 @@ import android.app.Activity
 import android.content.Context
 import android.content.ContextWrapper
 import android.content.SharedPreferences
+import android.graphics.Typeface
 import android.os.Bundle
 import android.os.Looper
 import android.os.SystemClock
@@ -68,7 +69,11 @@ import org.robolectric.android.controller.ActivityController
  * question (a chip, a pill, a touch on the field, the controller's A on it, a
  * send) alerts the host once and does nothing else. With one, a chip asks its
  * preset, which leads the recency from then on, and the card follows the
- * session to the answer and who gave it; a typed question goes trimmed, by the
+ * session to the answer and who gave it. The question's look: its title in the
+ * hint colour, italic exactly when every letter is Latin, in a row as tall as
+ * the chips' with no hairline under it, "Asking <service>…" under it (the next
+ * service when the pass falls through, no name before one is picked), and
+ * "Answered by" styled as the Translation card's note; a typed question goes trimmed, by the
  * button or the IME's Send, never blank, and writes no pref. A field that goes
  * out of sight (a chip tapped mid-typing, the eye) takes its keyboard with it
  * and keeps its draft. A failure shows the
@@ -144,9 +149,11 @@ class AskSectionBinderTest {
         override suspend fun translate(text: String, source: String, target: String): String = text
     }
 
-    /** One question put to the fake LLM: the prompt it got, and the gate the
-     *  test answers or fails it through. It stays in flight until then. */
-    private class Call(val user: String) {
+    /** One question put to the fake LLM: the prompt it got, the session's
+     *  naming of who is asked (through which a test has the pass fall
+     *  through to another service), and the gate the test answers or fails
+     *  it through. It stays in flight until then. */
+    private class Call(val user: String, val attempt: (TranslationBackend) -> Unit) {
         val reply = CompletableDeferred<TranslationBackendRegistry.Completion>()
     }
 
@@ -187,9 +194,12 @@ class AskSectionBinderTest {
         root.findViewById<View>(R.id.statusContainer).visibility = View.GONE
         root.findViewById<View>(R.id.resultsContent).visibility = View.VISIBLE
         activity.setContentView(root)
-        session = AskSession(scope) { _, user ->
-            val call = Call(user)
+        // As the registry's pass does, the fake names its first pick
+        // (Gemini) before it first waits.
+        session = AskSession(scope) { _, user, onAttempt ->
+            val call = Call(user, onAttempt)
             calls += call
+            onAttempt(gemini)
             call.reply.await()
         }
         session.bind(AskSentence("猫が魚を食べた。", "ja", "en"))
@@ -295,6 +305,11 @@ class AskSectionBinderTest {
     private fun eyeIcon(): Int = shadowOf(eye.drawable).createdFromResId
 
     private fun color(attr: Int) = activity.themeColor(attr)
+
+    /** Whether [v] draws in italic, read through the typeface's style:
+     *  under these tests' Robolectric, isItalic answered false for the
+     *  italic typeface whose style says italic. */
+    private fun italic(v: TextView) = ((v.typeface?.style ?: Typeface.NORMAL) and Typeface.ITALIC) != 0
 
     private fun ordered() = AskPresets.ordered(activity, prefs)
 
@@ -407,11 +422,11 @@ class AskSectionBinderTest {
         tap(pills().first())
         // In flight.
         assertTrue(prefs.hideAskSection)
-        assertEquals(AskState.Asking(AskQuestion.Preset(preset)), session.state.value)
+        assertEquals(AskState.Asking(AskQuestion.Preset(preset), "Gemini"), session.state.value)
         assertEquals(View.VISIBLE, card.visibility)
         assertTrue(shown(answerGroup))
         assertFalse(shown(idleGroup))
-        assertEquals(activity.getString(R.string.ask_status_thinking), body.text.toString())
+        assertEquals(activity.getString(R.string.ask_status_asking, "Gemini"), body.text.toString())
         assertTrue("the pills go while the card is up", pills().none(::shown))
         // The one write was the recency's (it changed); none was the pref's.
         assertEquals(1, store.writes.size)
@@ -604,13 +619,14 @@ class AskSectionBinderTest {
         assertEquals(1, host.interactions)
         assertEquals(0, host.llmNeeded)
         assertEquals("first in the recency", listOf(preset.id, "a_preset_since_removed"), prefs.askPresetRecency)
-        assertEquals(AskState.Asking(AskQuestion.Preset(preset)), session.state.value)
+        assertEquals(AskState.Asking(AskQuestion.Preset(preset), "Gemini"), session.state.value)
         assertEquals(1, calls.size)
         assertTrue(shown(answerGroup))
         assertFalse(shown(idleGroup))
         assertEquals(preset.title, title.text.toString())
-        assertEquals(activity.getString(R.string.ask_status_thinking), body.text.toString())
-        assertEquals(color(R.attr.ptTextHint), body.currentTextColor)
+        assertEquals(color(R.attr.ptTextHint), title.currentTextColor)
+        assertEquals(activity.getString(R.string.ask_status_asking, "Gemini"), body.text.toString())
+        assertEquals(color(R.attr.ptText), body.currentTextColor)
         assertFalse(shown(footer))
         assertFalse(shown(retry))
         assertEquals("X is tinted in code", color(R.attr.ptTextMuted), close.imageTintList?.defaultColor)
@@ -667,7 +683,7 @@ class AskSectionBinderTest {
         store.writes.clear()
         assertTrue("precondition: typing, keyboard up", field.isFocused && shadowOf(imm).isSoftInputVisible)
         tap(send)
-        assertEquals(AskState.Asking(AskQuestion.Custom("What does tabeta mean?")), session.state.value)
+        assertEquals(AskState.Asking(AskQuestion.Custom("What does tabeta mean?"), "Gemini"), session.state.value)
         assertEquals("What does tabeta mean?", title.text.toString())
         assertTrue(calls.single().user.contains("What does tabeta mean?"))
         assertEquals("", field.text.toString())
@@ -686,7 +702,7 @@ class AskSectionBinderTest {
         assertTrue("precondition: typing, keyboard up", field.isFocused && shadowOf(imm).isSoftInputVisible)
         field.onEditorAction(EditorInfo.IME_ACTION_SEND)
         settle()
-        assertEquals(AskState.Asking(AskQuestion.Custom("Is it polite?")), session.state.value)
+        assertEquals(AskState.Asking(AskQuestion.Custom("Is it polite?"), "Gemini"), session.state.value)
         assertEquals("Is it polite?", title.text.toString())
         assertEquals(2, calls.size)
         assertEquals("", field.text.toString())
@@ -724,6 +740,94 @@ class AskSectionBinderTest {
         assertEquals("Is it pol", field.text.toString())
     }
 
+    // ── The question's look ─────────────────────────────────────────────
+
+    @Test
+    fun `asking, the title takes the chips' place at their height, with no hairline under it`() {
+        start()
+        assertEquals("precondition: one line of chips", 1, chips().map { it.top }.distinct().size)
+        val chipRowHeight = view<View>(R.id.askPresetChips).height
+        assertTrue("precondition: laid out", chipRowHeight > 0)
+
+        tap(chips().first())
+
+        val titleRow = title.parent as View
+        val below = body.parent as View
+        assertEquals("the title row is as tall as the chips' row was", chipRowHeight, titleRow.height)
+        assertEquals("what has come of it starts where the title row ends", titleRow.bottom, below.top)
+    }
+
+    @Test
+    fun `the title is in italic exactly when every letter in it is Latin script`() {
+        start()
+        // A preset: its name, in the app's language (English here).
+        tap(chips().first())
+        assertTrue("the preset's name", italic(title))
+        tap(close)
+
+        // A question of the user's own: whatever they typed. Alternating,
+        // so each render is seen to set the style rather than keep it.
+        val cases = listOf(
+            "Why ga and not wa?" to true,
+            "なぜ「が」なの？" to false,
+            "Pourquoi « ga » et pas « wa » ?" to true,
+            "Почему здесь «га»?" to false,
+            "Tại sao dùng ga?" to true,
+            "Why が and not は?" to false,
+            "2 + 2?" to true,
+            "为什么用这个词？" to false,
+            "Ποιο είναι το υποκείμενο;" to false,
+            "왜 이 단어를 썼어?" to false,
+            "ทำไมใช้คำนี้" to false,
+            "لماذا هذه الكلمة؟" to false,
+        )
+        for ((text, expected) in cases) {
+            binder.render(AskState.Asking(AskQuestion.Custom(text), "Gemini"))
+            settle()
+            assertEquals(text, title.text.toString())
+            assertEquals("'$text'", expected, italic(title))
+        }
+    }
+
+    @Test
+    fun `the line under the title names the service being asked, the next one when the pass falls through, and none before one is picked`() {
+        start()
+        tap(chips().first())
+        assertEquals(activity.getString(R.string.ask_status_asking, "Gemini"), body.text.toString())
+
+        calls.last().attempt(NamedBackend("Qwen 3.5", online = false))
+        settle()
+        assertEquals("Qwen 3.5", (session.state.value as AskState.Asking).service)
+        assertEquals(activity.getString(R.string.ask_status_asking, "Qwen 3.5"), body.text.toString())
+        assertEquals(color(R.attr.ptText), body.currentTextColor)
+
+        // Before the pass has picked anyone, a state no surface's immediate
+        // dispatcher lets a frame show: the line without a name.
+        binder.render(AskState.Asking(AskQuestion.Custom("Why ga?")))
+        settle()
+        assertEquals(activity.getString(R.string.ask_status_asking_unnamed), body.text.toString())
+        assertEquals(color(R.attr.ptText), body.currentTextColor)
+    }
+
+    @Test
+    fun `the line under an answer is styled as the Translation card's Translated by`() {
+        start()
+        tap(chips().first())
+        answer("Ga marks the cat as the one who ate.", by = gemini)
+        assertTrue(shown(footer))
+        // The same page's note, as section_target.xml draws it; italic is
+        // TranslationSectionBinder's, set when it says who translated.
+        val note = view<TextView>(R.id.tvTranslationNote)
+        assertEquals("size", note.textSize, footer.textSize)
+        assertEquals("colour", note.currentTextColor, footer.currentTextColor)
+        assertEquals(
+            "gap above",
+            (note.layoutParams as ViewGroup.MarginLayoutParams).topMargin,
+            (footer.layoutParams as ViewGroup.MarginLayoutParams).topMargin,
+        )
+        assertTrue("italic", italic(footer))
+    }
+
     // ── Failure ─────────────────────────────────────────────────────────
 
     @Test
@@ -744,11 +848,11 @@ class AskSectionBinderTest {
         val interactions = host.interactions
         tap(retry)
         assertEquals("Try again is an interaction", interactions + 1, host.interactions)
-        assertEquals(AskState.Asking(asked), session.state.value)
+        assertEquals(AskState.Asking(asked, "Gemini"), session.state.value)
         assertEquals(2, calls.size)
         assertEquals("the same question, asked again", calls[0].user, calls[1].user)
         assertFalse(shown(retry))
-        assertEquals(activity.getString(R.string.ask_status_thinking), body.text.toString())
+        assertEquals(activity.getString(R.string.ask_status_asking, "Gemini"), body.text.toString())
     }
 
     @Test
@@ -813,17 +917,19 @@ class AskSectionBinderTest {
         start()
         assertEquals("the first render", 1, host.heightChanges)
         tap(chips().first())
-        assertEquals("asking", 2, host.heightChanges)
+        // Two renders in the one tap: the question, then the service the
+        // pass picked (which the line under it names).
+        assertEquals("asking, then whom", 3, host.heightChanges)
         answer("Ga marks the cat as the one who ate.")
-        assertEquals("answered", 3, host.heightChanges)
+        assertEquals("answered", 4, host.heightChanges)
         tap(close)
-        assertEquals("nothing asked", 4, host.heightChanges)
+        assertEquals("nothing asked", 5, host.heightChanges)
         tap(eye)
-        assertEquals("the eye hides the card", 5, host.heightChanges)
+        assertEquals("the eye hides the card", 6, host.heightChanges)
         tap(eye)
-        assertEquals("the eye shows it", 6, host.heightChanges)
+        assertEquals("the eye shows it", 7, host.heightChanges)
         binder.render(AskState.Idle)
-        assertEquals("a render the host repeats", 7, host.heightChanges)
+        assertEquals("a render the host repeats", 8, host.heightChanges)
 
         // A finger's tap with an LLM focuses the field, which is an
         // interaction (a live host holds the sentence being asked about);

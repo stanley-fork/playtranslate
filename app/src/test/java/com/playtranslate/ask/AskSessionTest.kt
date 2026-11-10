@@ -6,6 +6,7 @@ import com.playtranslate.translation.CompletionFailedException
 import com.playtranslate.translation.FakeCompleterBackend
 import com.playtranslate.translation.OpenAiRateLimitException
 import com.playtranslate.translation.StructuralFailureException
+import com.playtranslate.translation.TranslationBackend
 import com.playtranslate.translation.TranslationBackendRegistry.Completion
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CompletableDeferred
@@ -26,7 +27,8 @@ import org.junit.Test
 /**
  * [AskSession], one surface's question and answer, keyed by its sentence:
  *  - the states a question goes through (Idle, Asking while the LLM works,
- *    Answered with the reply trimmed and the service named, Failed with the
+ *    naming each service the pass starts asking and nobody once the request
+ *    is cancelled, Answered with the reply trimmed and the service named, Failed with the
  *    online service and failure worth naming, or nothing), and the prompt
  *    the LLM is sent ([AskPrompts.build]);
  *  - at most one request in flight: a new question, [AskSession.close] or
@@ -64,12 +66,14 @@ class AskSessionTest {
      * [ignoreCancellation] is set waits on its gate under [NonCancellable]
      * and then returns its answer normally, even after its coroutine was
      * cancelled, never observing the cancel: an LLM that cannot be stopped.
+     * It names nobody it asks, so its questions stay unnamed; the tests of
+     * naming write their own passes.
      */
     private class FakeLlm {
         val calls = mutableListOf<Call>()
         var ignoreCancellation = false
 
-        val complete: suspend (String, String) -> Completion = { system, user ->
+        val complete: suspend (String, String, (TranslationBackend) -> Unit) -> Completion = { system, user, _ ->
             val call = Call(system, user).also { calls += it }
             if (ignoreCancellation) {
                 val answer = withContext(NonCancellable) { call.reply.await() }
@@ -143,6 +147,68 @@ class AskSessionTest {
         llm.calls.single().reply.complete(Completion("Because.", onDevice))
 
         assertEquals(AskState.Answered(custom, "Because.", "Qwen 3.5"), session.state.value)
+    }
+
+    // ── naming who is asked ──────────────────────────────────────────────
+
+    @Test fun `the question in flight names the completer the pass asks, then the next one when it falls through`() {
+        val fellThrough = CompletableDeferred<Unit>()
+        val reply = CompletableDeferred<Completion>()
+        // As the registry's pass does: the first pick is named before the
+        // pass first waits, the next one when the first has failed.
+        val session = AskSession(scope) { _, _, onAttempt ->
+            onAttempt(online)
+            fellThrough.await()
+            onAttempt(onDevice)
+            reply.await()
+        }
+        session.bind(sentence)
+
+        session.ask(grammar)
+        assertEquals(AskState.Asking(grammar, "OpenAI"), session.state.value)
+
+        fellThrough.complete(Unit)
+        assertEquals(AskState.Asking(grammar, "Qwen 3.5"), session.state.value)
+
+        reply.complete(Completion("Because.", onDevice))
+        assertEquals(AskState.Answered(grammar, "Because.", "Qwen 3.5"), session.state.value)
+    }
+
+    @Test fun `a cancelled request names nobody, even when its pass goes on after the cancel`() {
+        // A pass whose first completer cannot be stopped: it returns from
+        // its wait under NonCancellable and fails, so the pass falls
+        // through and would name, then ask, the next one.
+        val gates = mutableListOf<CompletableDeferred<Unit>>()
+        var askedAfterFallingThrough = 0
+        val session = AskSession(scope) { _, _, onAttempt ->
+            onAttempt(online)
+            val gate = CompletableDeferred<Unit>().also { gates += it }
+            withContext(NonCancellable) { gate.await() }
+            onAttempt(onDevice)
+            askedAfterFallingThrough++
+            Completion("An answer.", onDevice)
+        }
+        session.bind(sentence)
+
+        // Put away.
+        session.ask(grammar)
+        session.close()
+        gates[0].complete(Unit)
+        assertEquals(AskState.Idle, session.state.value)
+        assertEquals("the pass stopped where it would have named the next", 0, askedAfterFallingThrough)
+
+        // Superseded: the second question keeps its own name.
+        session.ask(grammar)
+        session.ask(custom)
+        assertEquals(AskState.Asking(custom, "OpenAI"), session.state.value)
+        gates[1].complete(Unit)
+        assertEquals(AskState.Asking(custom, "OpenAI"), session.state.value)
+        assertEquals(0, askedAfterFallingThrough)
+
+        // The control: the live pass does go on, naming the next.
+        gates[2].complete(Unit)
+        assertEquals(1, askedAfterFallingThrough)
+        assertEquals(AskState.Answered(custom, "An answer.", "Qwen 3.5"), session.state.value)
     }
 
     // ── one request in flight: supersede ─────────────────────────────────

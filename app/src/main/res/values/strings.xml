@@ -905,8 +905,15 @@
     <string name="cd_toggle_ask_visibility">Toggle Ask visibility</string>
 
     <!-- Status line in the Ask section's answer area while the question is
-         with the AI model and nothing has come back yet. -->
-    <string name="ask_status_thinking">Thinking…</string>
+         with an AI model and nothing has come back yet. %1$s = the display
+         name of the AI service or on-device model being asked (e.g.
+         Gemini); if it fails, the next one's name replaces it. -->
+    <string name="ask_status_asking">Asking <xliff:g id="service_name" example="Gemini">%1$s</xliff:g>…</string>
+
+    <!-- The same status line (ask_status_asking) in the moment before the
+         app has picked which AI service or model to ask, so no name is
+         known yet. -->
+    <string name="ask_status_asking_unnamed">Asking…</string>
 
     <!-- The line under an answer in the Ask section, saying who answered.
          %1$s = the display name of the AI service or on-device model that

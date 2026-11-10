@@ -2,6 +2,7 @@ package com.playtranslate.ask
 
 import com.playtranslate.translation.BackendFailure
 import com.playtranslate.translation.CompletionFailedException
+import com.playtranslate.translation.TranslationBackend
 import com.playtranslate.translation.TranslationBackendRegistry
 import com.playtranslate.translation.classifyBackendFailure
 import kotlinx.coroutines.CancellationException
@@ -18,8 +19,12 @@ import kotlinx.coroutines.launch
 sealed class AskState {
     object Idle : AskState()
 
-    /** Sent; no answer yet. */
-    data class Asking(val question: AskQuestion) : AskState()
+    /** Sent; no answer yet. [service] is the display name of the service
+     *  or model being asked, the next one's when the pass falls through;
+     *  null until the pass picks one, which it does before it first
+     *  suspends, so on a surface's immediate dispatcher no frame shows a
+     *  question without its name. */
+    data class Asking(val question: AskQuestion, val service: String? = null) : AskState()
 
     data class Answered(
         val question: AskQuestion,
@@ -55,10 +60,15 @@ sealed class AskState {
  */
 class AskSession(
     private val scope: CoroutineScope,
-    /** Puts a prompt to the user's LLM. The registry's pass in production;
-     *  a test substitutes it. */
-    private val complete: suspend (system: String, user: String) -> TranslationBackendRegistry.Completion =
-        { system, user -> TranslationBackendRegistry.complete(system, user) },
+    /** Puts a prompt to the user's LLM, naming each one to [onAttempt] as
+     *  it starts asking it. The registry's pass in production; a test
+     *  substitutes it. */
+    private val complete: suspend (
+        system: String,
+        user: String,
+        onAttempt: (TranslationBackend) -> Unit,
+    ) -> TranslationBackendRegistry.Completion =
+        { system, user, onAttempt -> TranslationBackendRegistry.complete(system, user, onAttempt) },
 ) {
     private val _state = MutableStateFlow<AskState>(AskState.Idle)
     val state: StateFlow<AskState> = _state.asStateFlow()
@@ -87,7 +97,14 @@ class AskSession(
         job = scope.launch {
             val next = try {
                 val messages = AskPrompts.build(question, about)
-                val answer = complete(messages.system, messages.user)
+                val answer = complete(messages.system, messages.user) { backend ->
+                    // Named only while this request is the live one, by the
+                    // same promise as the write below: a pass that goes on
+                    // after its cancel (a completer that returned or failed
+                    // without seeing it) is stopped here, naming nobody.
+                    ensureActive()
+                    _state.value = AskState.Asking(question, backend.displayName)
+                }
                 AskState.Answered(question, answer.text.trim(), answer.backend.displayName)
             } catch (e: CancellationException) {
                 throw e
