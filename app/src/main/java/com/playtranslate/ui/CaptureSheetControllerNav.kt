@@ -66,7 +66,9 @@ interface CaptureSheetNavHost {
     fun onControllerBack()
     fun expandFromSliver()
 
-    /** The currently-reachable buttons (header actions + collapsed-strip eyes). */
+    /** The currently reachable actions, in visual order: the sections'
+     *  header actions, the Ask section's controls and the Words rows (each
+     *  a target inside the Words card's document, [NavAction.target]). */
     fun navActions(): List<NavAction>
 
     /** The grabber pill's drawn bounds while it's up (expanded posture only —
@@ -118,17 +120,21 @@ interface CaptureSheetNavHost {
 
 /**
  * Gamepad navigation for the over-game capture sheet: B/back dismisses (the
- * host's ladder), dpad moves a VIRTUAL cursor across the grabber pill,
- * buttons, and source words, A activates (the pill parks to the sliver; on the
- * parked sheet a first A rings the strip and a second expands it), the
- * right stick scrolls, and the left stick drags the sheet's edge like the
- * grabber. An open popover is modal: a header's ⋯ menu makes its rows the
- * only targets, the size slider takes none (B closes either). Virtual — no
- * Android view ever gains
- * focus — because words aren't views, the ring is custom anyway, and real
- * focus would paint stock highlights next to it. Created only while the sheet
- * window is focusable (controller attached); all input arrives through the
- * root's dispatchKeyEvent / onGenericMotionEvent.
+ * host's ladder), dpad moves a VIRTUAL cursor across the grabber pill, the
+ * buttons, the targets drawn inside a view (the Words rows of a definitions
+ * document, each its own item at its own rect) and the source words, A
+ * activates (the pill parks to the sliver; on the parked sheet a first A
+ * rings the strip and a second expands it; a target inside a view activates
+ * itself and never clicks the view), the right stick scrolls, and the left
+ * stick drags the sheet's edge like the grabber. An open popover is modal: a
+ * header's ⋯ menu makes its rows the only targets, the size slider takes none
+ * (B closes either). Virtual, so no Android view ever gains focus: words and
+ * a document's rows aren't views, the ring is custom anyway, and real focus
+ * would paint stock highlights next to it. Actions are collected afresh on
+ * every keypress, so the cursor is matched to them by equality (the same
+ * view, and an equal target inside it), never by reference.
+ * Created only while the sheet window is focusable (controller attached);
+ * all input arrives through the root's dispatchKeyEvent / onGenericMotionEvent.
  */
 class CaptureSheetControllerNav(
     ctx: Context,
@@ -136,11 +142,16 @@ class CaptureSheetControllerNav(
 ) {
     sealed interface Item {
         /** [floating]: a popover's row, which lives outside the scroller, so
-         *  it rings unclipped and scrolls, if at all, within its own menu. */
+         *  it rings unclipped and scrolls, if at all, within its own menu.
+         *  [target]: one of many targets inside [view] ([NavAction.target]),
+         *  whose rect and activation are its own; null for the view itself.
+         *  Two buttons are the same item exactly when their view and target
+         *  are equal, so two targets in one view are two items. */
         data class Button(
             val view: View,
             val holdActivates: Boolean,
             val floating: Boolean = false,
+            val target: NavTarget? = null,
         ) : Item
         data class Word(val index: Int) : Item
         /** The grabber pill above the sheet — A parks the sheet to its sliver. */
@@ -239,7 +250,9 @@ class CaptureSheetControllerNav(
                         ConfirmKeyPress.down(cur.view, ev)
                     }
                 } else {
-                    cur.view.performClick()
+                    // The action's own press-down activation: a target
+                    // inside the view activates itself, a view is clicked.
+                    NavAction(cur.view, target = cur.target).activate()
                 }
             }
             is Item.Word -> host.activateWord(cur.index)
@@ -285,14 +298,26 @@ class CaptureSheetControllerNav(
         return true
     }
 
+    /** A button's live rect: its target's when it has one (a row of a
+     *  document), else its view's. False when it is not showing, which
+     *  makes it no candidate and leaves it no ring. Everything that reads a
+     *  button's rect reads it here. */
+    private fun buttonRectOnScreen(b: Item.Button, out: Rect): Boolean =
+        b.target?.rectOnScreen(out) ?: viewRectOnScreen(b.view, out)
+
+    /** [action] as a button item; [floating] for a popover's row. */
+    private fun buttonOf(action: NavAction, floating: Boolean = false) =
+        Item.Button(action.view, action.holdActivates, floating, action.target)
+
     /** Collected lazily per keypress — no registry to go stale. An open
      *  popover is modal: its rows are the whole set. */
     private fun candidates(): List<Pair<Item, Rect>> {
         val out = ArrayList<Pair<Item, Rect>>()
         host.popoverNavActions()?.let { rows ->
             for (a in rows) {
+                val item = buttonOf(a, floating = true)
                 val r = Rect()
-                if (viewRectOnScreen(a.view, r)) out.add(Item.Button(a.view, a.holdActivates, floating = true) to r)
+                if (buttonRectOnScreen(item, r)) out.add(item to r)
             }
             return out
         }
@@ -301,8 +326,9 @@ class CaptureSheetControllerNav(
             if (host.handleRect(r)) out.add(Item.Handle to r)
         }
         for (a in host.navActions()) {
+            val item = buttonOf(a)
             val r = Rect()
-            if (viewRectOnScreen(a.view, r)) out.add(Item.Button(a.view, a.holdActivates) to r)
+            if (buttonRectOnScreen(item, r)) out.add(item to r)
         }
         for (i in 0 until host.wordCount()) {
             val r = Rect()
@@ -394,7 +420,7 @@ class CaptureSheetControllerNav(
             return
         }
         val ok = when (cur) {
-            is Item.Button -> viewRectOnScreen(cur.view, tmpRect)
+            is Item.Button -> buttonRectOnScreen(cur, tmpRect)
             is Item.Word -> host.wordRect(cur.index, tmpRect)
             Item.Handle -> host.handleRect(tmpRect)
             Item.Sliver -> host.sliverRect(tmpRect)
@@ -429,10 +455,11 @@ class CaptureSheetControllerNav(
         if (cursor is Item.Word) clearCursor()
     }
 
-    /** After a layout-changing activation (a section eye toggle swaps a whole
-     *  column for its collapsed strip): if the cursor's item left the screen,
-     *  retarget to whatever now sits nearest where the ring last was — in the
-     *  column-collapse case, the strip's eye. */
+    /** After a layout-changing activation (an eye hides its section's card
+     *  and its header's other actions; the eye itself stays in the header):
+     *  if the cursor's item went away, which for a button is no longer being
+     *  among the candidates (a target inside a view included), the cursor
+     *  lands on whatever now sits nearest where the ring last was. */
     fun revalidateCursor() {
         val cur = cursor ?: return
         val stillValid = when {
@@ -481,7 +508,11 @@ class CaptureSheetControllerNav(
             return
         }
         if (cur is Item.Button && cur.floating) {
-            val back = candidates().firstOrNull { (it.first as? Item.Button)?.view === anchor }
+            // The anchor is an ordinary view: its own item, never a target
+            // drawn inside it.
+            val back = candidates().firstOrNull { (item, _) ->
+                item is Item.Button && item.view === anchor && item.target == null
+            }
             if (back != null) setCursor(back.first, back.second) else revalidateCursor()
         }
     }

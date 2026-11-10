@@ -223,6 +223,14 @@ class WordRowsBinder(
 
     val isEmpty: Boolean get() = list.isEmpty
 
+    /** What a controller cursor can reach here, in visual order: the
+     *  header's shown actions (its eye, which stays whether the card shows
+     *  or not), then, while the card is shown, each tappable target the
+     *  page reported for its rows (a row, its speak button, its hidden-words
+     *  eye), all inside the one document view ([NavAction.target]). */
+    fun navigableActions(): List<NavAction> =
+        if (isHidden) header.navActions() else header.navActions() + list.navActions()
+
     /** The user is about to see this card's rows (the lookup for them is
      *  running): start loading the page now. A no-op for a hidden card.
      *  Never called inside a page's entrance animation: the first page of a

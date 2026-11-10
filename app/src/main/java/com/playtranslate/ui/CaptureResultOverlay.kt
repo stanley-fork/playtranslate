@@ -1084,6 +1084,13 @@ class CaptureResultOverlay(
             if (panelLp.bottomMargin != imeLift) {
                 panelLp.bottomMargin = imeLift
                 panel.requestLayout()
+                // The keyboard went away under the Ask question (its own
+                // hide button, the system's Back): typing there is over.
+                // The source edit is an editor with its own way out; the
+                // question is a field that would merely look idle, with the
+                // sheet still in its typing state behind it (no swipe-away,
+                // no taps passed on to the game).
+                if (imeLift == 0 && typingIn == TypingIn.ASK_QUESTION) askBinder?.clearFieldFocus()
             }
             insets
         }
@@ -2807,7 +2814,7 @@ class CaptureResultOverlay(
         ctx.getSystemService(InputMethodManager::class.java)
             ?.hideSoftInputFromWindow(editText.windowToken, 0)
         editContainer.visibility = View.GONE
-        root.requestFocus()            // pull view focus off editText
+        returnFocusToRoot()
         applyWindowFocusPolicy()
         val prev = lastResult ?: return
         if (newText.isBlank() || newText == prev.originalText) return
@@ -2890,7 +2897,7 @@ class CaptureResultOverlay(
         ctx.getSystemService(InputMethodManager::class.java)
             ?.hideSoftInputFromWindow(editText.windowToken, 0)
         editContainer.visibility = View.GONE
-        root.requestFocus()            // pull view focus off editText
+        returnFocusToRoot()
         applyWindowFocusPolicy()
     }
 
@@ -2903,7 +2910,9 @@ class CaptureResultOverlay(
      *  differently while a keyboard is up reads this one answer: the
      *  window's focus policy, the controller's stand-down, the resize floor
      *  and the park (a sliver would strand the keyboard), the swipe-away,
-     *  the outside-tap router and B. */
+     *  the outside-tap router and B. The question's typing ends with its
+     *  focus: at a send, at B, when the field goes out of sight, and when
+     *  the keyboard is closed under it (the insets listener in [show]). */
     private val typingIn: TypingIn
         get() = when {
             editContainer.visibility == View.VISIBLE -> TypingIn.SOURCE_EDIT
@@ -2937,9 +2946,25 @@ class CaptureResultOverlay(
                 ctx.getSystemService(InputMethodManager::class.java)
                     ?.showSoftInput(field, InputMethodManager.SHOW_IMPLICIT)
             }
-        } else {
-            root.requestFocus()   // view focus back where the controller reads keys
+        } else if (typingIn == TypingIn.NOTHING) {
+            // Not while the focus is on its way to the source editor (the
+            // Edit action tapped mid-question): this runs inside that
+            // hand-over, and taking the focus here would take it from the
+            // editor as it arrives.
+            returnFocusToRoot()
         }
+    }
+
+    /** A field is done: view focus goes back to the root, where a
+     *  controller's keys are read. Only with a controller, which is when the
+     *  root can hold it ([show]). A root that cannot passes the request down
+     *  to the first view that can take focus from a touch, and that is the
+     *  Ask question's field: typing would begin there, keyboard and all,
+     *  the moment another field was left, or begin again the moment it
+     *  ended. Without a controller a field that is done simply has no
+     *  focus (it lost it by its own clearFocus, or by going out of sight). */
+    private fun returnFocusToRoot() {
+        if (nav != null) root.requestFocus()
     }
 
     /** The user reached for an Ask question with no LLM set up: say so, on
@@ -3005,9 +3030,13 @@ class CaptureResultOverlay(
         override fun expandFromSliver() = userExpandFromSliver()
 
         override fun navActions(): List<NavAction> {
-            // A hidden section's restore eye is its header's own (the
-            // header stays), so the headers' actions are the whole list.
-            return binder?.navigableActions().orEmpty()
+            // In visual order, top to bottom: the two texts' headers, then
+            // the Ask section's header and controls, then the Words header
+            // and its rows' targets. A hidden section's restore eye is its
+            // header's own (the header stays), so each binder's list holds it.
+            return binder?.navigableActions().orEmpty() +
+                askBinder?.navigableActions().orEmpty() +
+                wordRows?.navigableActions().orEmpty()
         }
 
         private val handleLoc = IntArray(2)
