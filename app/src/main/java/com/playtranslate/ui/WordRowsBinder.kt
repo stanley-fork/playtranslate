@@ -31,6 +31,9 @@ import kotlinx.coroutines.launch
  * The rows are a [WordRowList] in [container]: ONE definitions document,
  * the pack's definitions and the imported dictionaries' alike drawn by its
  * page, with the deck badges and each row's speak spinner kept by the list.
+ * It is the one list whose rows take two columns where its page is at
+ * least 560px wide ([DefinitionsDocument.DocTheme.twoColumnsWhenWide]), as
+ * the card is at full width on a landscape screen.
  * This binder adds what is the card's own: the hidden-words eye as the
  * rows' second button, the hidden-last ordering, and the card's visibility.
  * The document feeds its rows on demand and fetches their structured
@@ -132,6 +135,7 @@ class WordRowsBinder(
             override fun onInteraction() = host.onInteraction()
         },
         WordRowList.COMPACT_SCALE,
+        twoColumnsWhenWide = true,
         onLayout = { onHeightChanged?.invoke() },
     )
 

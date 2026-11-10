@@ -224,6 +224,28 @@ class DefinitionDocumentTest {
         assertEquals("a row the document does not hold is no tap", 1, actions.size)
     }
 
+    @Test fun `the row at a height is the one it falls in, and in two columns the first of its line`() {
+        doc.setRows(rows(4), "ja")
+        pageReady()
+        val density = activity.resources.displayMetrics.density
+        fun at(cssY: Int) = doc.rowAt((cssY * density).toInt())
+
+        // One column: four rows, each 100 tall.
+        layout(1, 400, """["k0","open",0,0,300,100,"k1","open",0,100,300,100,"k2","open",0,200,300,100,"k3","open",0,300,300,100]""")
+        assertEquals("w0", at(0))
+        assertEquals("w0", at(99))
+        assertEquals("w1", at(100))
+        assertEquals("w3", at(350))
+        assertEquals("past the end is the last row", "w3", at(900))
+
+        // Two columns: w0 and w1 side by side, then w2 and w3.
+        layout(1, 200, """["k0","open",0,0,146,100,"k1","open",154,0,146,100,"k2","open",0,100,146,100,"k3","open",154,100,146,100]""")
+        assertEquals("the line's first row, not the one beside it", "w0", at(50))
+        assertEquals("w2", at(100))
+        assertEquals("w2", at(199))
+        assertEquals("the top of w2 is its line's", doc.rowTopPx("w2"), doc.rowTopPx("w3"))
+    }
+
     @Test fun `a document of plain senses is no focus stop, and a late translation patches its one row`() {
         fun sense(id: String, translation: String = "") = DefRow.Sense(
             id, number = null, pos = "", gloss = "gloss of $id",

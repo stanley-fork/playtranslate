@@ -410,11 +410,15 @@ internal fun wordRowList(
     scope: CoroutineScope,
     host: WordRowList.Host<RowState>,
     scale: Float,
+    /** Two columns on a wide page
+     *  ([DefinitionsDocument.DocTheme.twoColumnsWhenWide]): the results'
+     *  Words card only. */
+    twoColumnsWhenWide: Boolean = false,
     /** The page laid the rows out. */
     onLayout: () -> Unit = {},
 ) = WordRowList(
     ctx, slot, scope, host,
     describe = RowState::toWordEntry,
-    theme = { cardDocTheme(ctx, WordRowList.GLOSS_SP * scale) },
+    theme = { cardDocTheme(ctx, WordRowList.GLOSS_SP * scale, twoColumnsWhenWide) },
     onLayout = onLayout,
 )

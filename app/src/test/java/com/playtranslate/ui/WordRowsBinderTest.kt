@@ -6,6 +6,9 @@ import android.os.Bundle
 import android.os.Looper
 import android.view.LayoutInflater
 import android.view.View
+import android.view.ViewGroup
+import android.webkit.WebView
+import android.widget.FrameLayout
 import androidx.test.core.app.ApplicationProvider
 import com.playtranslate.Prefs
 import com.playtranslate.R
@@ -58,6 +61,12 @@ import org.robolectric.android.controller.ActivityController
  * each a target inside the one document view; the eye alone while the card
  * is hidden. The page is played by its JVM stand-in
  * ([WordRowList.layoutForTest]), since no engine lays anything out here.
+ *
+ * And the page it asks for: the card's theme asks for two columns on a wide
+ * page, and a word list built without asking (the dictionary search, a word
+ * page's sections) and a card's theme by default do not. The columns
+ * themselves are the shell's rule (DefinitionsDocumentTest), which no engine
+ * lays out here either.
  */
 @RunWith(RobolectricTestRunner::class)
 class WordRowsBinderTest {
@@ -490,6 +499,49 @@ class WordRowsBinderTest {
         showPage()
         assertEquals("precondition: the card is hidden", View.GONE, card.visibility)
         assertEquals("the eye alone", listOf(eye), binder.navigableActions().map { it.view })
+    }
+
+    // ── The page it asks for ────────────────────────────────────────────
+
+    /** The script a list's page in [slot] has run once its shell finished
+     *  loading. Called right after the list took its shell, that is the
+     *  theme, the one script queued then: the rows are built off the main
+     *  thread and sent only once the main looper runs again. */
+    private fun firstScriptRunIn(slot: ViewGroup): String {
+        val web = (slot.getChildAt(0) as DefinitionDocumentView).getChildAt(0) as WebView
+        shadowOf(web).webViewClient.onPageFinished(web, "")
+        return shadowOf(web).lastEvaluatedJavascript.orEmpty()
+    }
+
+    @Test
+    fun `the card's page asks for two columns when wide, and a word list or a card theme that does not ask has one`() {
+        binder.render(settled())
+        val theme = firstScriptRunIn(binder.container)
+        assertTrue("precondition: the theme is what ran: ${theme.take(40)}", theme.startsWith("ptTheme("))
+        assertTrue(theme, theme.contains("cols:true"))
+
+        // The dictionary search and a word page's sections build their lists
+        // without asking.
+        val slot = FrameLayout(activity)
+        val other = wordRowList(
+            activity, slot, scope,
+            object : WordRowList.Host<RowState> {
+                override val isAlive: Boolean get() = true
+                override val deckBadges: Boolean get() = false
+                override fun trailing(row: RowState): DefRow.Trailing = DefRow.Trailing.ANKI
+                override fun onOpen(row: RowState) {}
+                override fun onTrailing(row: RowState, shown: DefRow.Trailing) {}
+                override suspend fun speak(row: RowState) {}
+            },
+            WordRowList.LARGE_SCALE,
+        )
+        other.setRows(rows, "ja")
+        val otherTheme = firstScriptRunIn(slot)
+        other.release()
+        assertTrue("precondition: the theme is what ran: ${otherTheme.take(40)}", otherTheme.startsWith("ptTheme("))
+        assertTrue(otherTheme, otherTheme.contains("cols:false"))
+        // Nor does a card's theme, by default.
+        assertFalse(cardDocTheme(activity, WordRowList.GLOSS_SP).twoColumnsWhenWide)
     }
 
     private fun clearPrefs() {
