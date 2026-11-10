@@ -2946,11 +2946,7 @@ class CaptureResultOverlay(
                 ctx.getSystemService(InputMethodManager::class.java)
                     ?.showSoftInput(field, InputMethodManager.SHOW_IMPLICIT)
             }
-        } else if (typingIn == TypingIn.NOTHING) {
-            // Not while the focus is on its way to the source editor (the
-            // Edit action tapped mid-question): this runs inside that
-            // hand-over, and taking the focus here would take it from the
-            // editor as it arrives.
+        } else {
             returnFocusToRoot()
         }
     }

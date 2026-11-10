@@ -673,7 +673,7 @@ class AskSectionBinderTest {
         assertEquals("", field.text.toString())
         assertFalse(field.isFocused)
         assertFalse("the keyboard is down", shadowOf(imm).isSoftInputVisible)
-        assertEquals(1, host.interactions)
+        assertEquals("taking the field's focus, then the send", 2, host.interactions)
         assertEquals("a typed question writes no pref", emptyList<String>(), store.writes)
         assertEquals(listOf(AskPresets.GRAMMAR_BREAKDOWN), prefs.askPresetRecency)
 
@@ -825,13 +825,17 @@ class AskSectionBinderTest {
         binder.render(AskState.Idle)
         assertEquals("a render the host repeats", 7, host.heightChanges)
 
-        // A finger's tap with an LLM focuses the field; clearFieldFocus takes
-        // the focus and the keyboard away, and is a no-op after.
+        // A finger's tap with an LLM focuses the field, which is an
+        // interaction (a live host holds the sentence being asked about);
+        // clearFieldFocus takes the focus and the keyboard away, is none,
+        // and is a no-op after.
         assertTrue(host.focusChanges.isEmpty())
+        val interactions = host.interactions
         touchField()
         assertTrue(field.isFocused)
         assertTrue(binder.fieldHasFocus)
         assertEquals(listOf(true), host.focusChanges)
+        assertEquals("taking the focus is an interaction", interactions + 1, host.interactions)
         val imm = activity.getSystemService(InputMethodManager::class.java)
         imm.showSoftInput(field, 0)
         assertTrue("precondition: the keyboard is up", shadowOf(imm).isSoftInputVisible)
@@ -839,6 +843,7 @@ class AskSectionBinderTest {
         assertFalse(field.isFocused)
         assertFalse(binder.fieldHasFocus)
         assertEquals(listOf(true, false), host.focusChanges)
+        assertEquals("losing it is none", interactions + 1, host.interactions)
         assertFalse("the keyboard is down", shadowOf(imm).isSoftInputVisible)
         binder.clearFieldFocus()
         assertEquals(listOf(true, false), host.focusChanges)

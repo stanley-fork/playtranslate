@@ -187,7 +187,13 @@ class AskSectionBinder(
         // does the end of a touch with no LLM. With an LLM a finger's first
         // touch focuses the field itself and clicks nothing.
         questionField.setOnClickListener { reachForField() }
-        questionField.setOnFocusChangeListener { _, focused -> host.onFieldFocusChanged(focused) }
+        questionField.setOnFocusChangeListener { _, focused ->
+            // Starting to type is an interaction, like a tap on a chip: a
+            // live host holds the sentence the question is being written
+            // about, which the next line would otherwise replace under it.
+            if (focused) host.onInteraction()
+            host.onFieldFocusChanged(focused)
+        }
         questionField.doAfterTextChanged { syncSend() }
         questionField.setOnEditorActionListener { _, actionId, _ ->
             if (actionId != EditorInfo.IME_ACTION_SEND) return@setOnEditorActionListener false
