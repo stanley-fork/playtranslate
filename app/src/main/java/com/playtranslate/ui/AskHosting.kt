@@ -3,6 +3,7 @@ package com.playtranslate.ui
 import android.content.Context
 import com.playtranslate.R
 import com.playtranslate.ask.AskSentence
+import com.playtranslate.language.ChineseScriptVariant
 import com.playtranslate.language.SourceLanguageProfiles
 import com.playtranslate.model.TranslationLangContext
 import com.playtranslate.themeColor
@@ -15,12 +16,19 @@ import com.playtranslate.themeColor
 
 /** The sentence an Ask question is about, for [text] read under
  *  [langContext]: the pair in the terms the prompts take, the source as the
- *  code translation requests name it by. */
+ *  code translation requests name it by, and the target with its script,
+ *  a Chinese target's variant code. Translation requests all say "zh" and
+ *  are converted to the reader's script afterwards; an answer is written
+ *  in it as it comes, so its prompt has to name the script. */
 internal fun askSentence(text: String, langContext: TranslationLangContext): AskSentence =
     AskSentence(
         text = text,
         sourceLang = SourceLanguageProfiles[langContext.sourceLangId].translationCode,
-        targetLang = langContext.targetLang,
+        targetLang = if (ChineseScriptVariant.isChineseTarget(langContext.targetLang)) {
+            langContext.chineseVariant.code
+        } else {
+            langContext.targetLang
+        },
     )
 
 /**
