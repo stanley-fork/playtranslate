@@ -287,7 +287,7 @@ class TranslationResultContent(
         binder.onChooseLanguage = { isSource -> host.onChangeLanguage(isSource) }
         binder.setShowOnScreenAction { host.onShowOnScreenTapped() }
         ask = AskSectionBinder(
-            root, ctx, prefs, vm.ask,
+            root, ctx, prefs, vm.ask, popovers,
             object : AskSectionBinder.Host {
                 override fun onInteraction() = host.onInteraction()
                 override fun onLlmNeeded() = host.onAskNeedsLlm()

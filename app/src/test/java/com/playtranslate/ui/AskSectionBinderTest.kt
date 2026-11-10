@@ -8,6 +8,7 @@ import android.graphics.Typeface
 import android.os.Bundle
 import android.os.Looper
 import android.os.SystemClock
+import android.util.TypedValue
 import android.view.LayoutInflater
 import android.view.MotionEvent
 import android.view.View
@@ -16,6 +17,7 @@ import android.view.ViewGroup
 import android.view.inputmethod.EditorInfo
 import android.view.inputmethod.InputMethodManager
 import android.widget.EditText
+import android.widget.FrameLayout
 import android.widget.ImageButton
 import android.widget.TextView
 import androidx.test.core.app.ApplicationProvider
@@ -43,6 +45,7 @@ import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotEquals
+import org.junit.Assert.assertSame
 import org.junit.Assert.assertTrue
 import org.junit.Before
 import org.junit.Test
@@ -73,7 +76,10 @@ import org.robolectric.android.controller.ActivityController
  * hint colour, italic exactly when every letter is Latin, in a row as tall as
  * the chips' with no hairline under it, "Asking <service>…" under it (the next
  * service when the pass falls through, no name before one is picked), and
- * "Answered by" styled as the Translation card's note; a typed question goes trimmed, by the
+ * "Answered by" styled as the Translation card's note. The answer's Text size:
+ * offered exactly while a question is on screen, opening the one-handle picker
+ * on the surface's popover host as an interaction, and the answer's text at
+ * the saved size, live under the picker and afresh at a render; a typed question goes trimmed, by the
  * button or the IME's Send, never blank, and writes no pref. A field that goes
  * out of sight (a chip tapped mid-typing, the eye) takes its keyboard with it
  * and keeps its draft. A failure shows the
@@ -165,6 +171,9 @@ class AskSectionBinderTest {
     private lateinit var root: View
     private lateinit var session: AskSession
     private lateinit var binder: AskSectionBinder
+
+    /** The page's popover host, as the results page gives the binder one. */
+    private lateinit var popovers: PopoverHost
     private val host = RecordingHost()
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
 
@@ -217,7 +226,8 @@ class AskSectionBinderTest {
      *  collected into [AskSectionBinder.render] from here on, and lay the page
      *  out. The prefs a test sets before this are the binder's start. */
     private fun start() {
-        binder = AskSectionBinder(root, activity, prefs, session, host, hasLlm = { llmAsks++; llm })
+        popovers = PopoverHost(root as FrameLayout)
+        binder = AskSectionBinder(root, activity, prefs, session, popovers, host, hasLlm = { llmAsks++; llm })
         scope.launch {
             session.state.collect {
                 rendered += it
@@ -274,6 +284,7 @@ class AskSectionBinderTest {
     private val header: SectionHeaderRow get() = view(R.id.askHeaderRow)
     private val label: TextView get() = view(R.id.labelAsk)
     private val eye: ImageButton get() = view(R.id.btnToggleAsk)
+    private val textSizeButton: ImageButton get() = view(R.id.btnFontSizeAsk)
     private val more: View get() = view(R.id.btnMoreAsk)
     private val card: View get() = view(R.id.cardAsk)
     private val idleGroup: View get() = view(R.id.askIdle)
@@ -305,6 +316,25 @@ class AskSectionBinderTest {
     private fun eyeIcon(): Int = shadowOf(eye.drawable).createdFromResId
 
     private fun color(attr: Int) = activity.themeColor(attr)
+
+    /** [value] sp in px, as a TextView's textSize reports it. */
+    private fun sp(value: Int) =
+        TypedValue.applyDimension(TypedValue.COMPLEX_UNIT_SP, value.toFloat(), activity.resources.displayMetrics)
+
+    /** A finger on [track]: down at the first x, moved through the rest, and
+     *  up at the last. */
+    private fun drag(track: View, vararg xs: Float) {
+        val t = SystemClock.uptimeMillis()
+        fun send(action: Int, x: Float) {
+            val e = MotionEvent.obtain(t, t, action, x, track.height / 2f, 0)
+            track.dispatchTouchEvent(e)
+            e.recycle()
+        }
+        send(MotionEvent.ACTION_DOWN, xs.first())
+        for (x in xs.drop(1)) send(MotionEvent.ACTION_MOVE, x)
+        send(MotionEvent.ACTION_UP, xs.last())
+        settle()
+    }
 
     /** Whether [v] draws in italic, read through the typeface's style:
      *  under these tests' Robolectric, isItalic answered false for the
@@ -828,6 +858,101 @@ class AskSectionBinderTest {
         assertTrue("italic", italic(footer))
     }
 
+    // ── The answer's text size ──────────────────────────────────────────
+
+    @Test
+    fun `the Text size is offered exactly while a question is on screen, the section collapsed or not`() {
+        start()
+        assertFalse("nothing asked", shown(textSizeButton))
+        tap(chips().first())
+        assertTrue("asking", shown(textSizeButton))
+        answer("Ga marks the cat as the one who ate.")
+        assertTrue("answered", shown(textSizeButton))
+        tap(close)
+        assertFalse("put away", shown(textSizeButton))
+        tap(chips().first())
+        fail(CompletionFailedException(null, null))
+        assertTrue("failed", shown(textSizeButton))
+        tap(close)
+
+        // Collapsed: not with nothing asked; a question asked from the
+        // header's pills keeps the card up, and the Text size with it.
+        tap(eye)
+        assertFalse("collapsed, nothing asked", shown(textSizeButton))
+        tap(pills().first(::shown))
+        assertEquals(View.VISIBLE, card.visibility)
+        assertTrue("collapsed, a question on screen", shown(textSizeButton))
+    }
+
+    @Test
+    fun `a row too narrow for the Text size keeps it, as it keeps the eye, and cuts the label`() {
+        start()
+        tap(chips().first())
+        assertTrue("precondition: offered", shown(textSizeButton))
+        val gap = (16 * activity.resources.displayMetrics.density).toInt()
+        label.measure(
+            MeasureSpec.makeMeasureSpec(0, MeasureSpec.UNSPECIFIED),
+            MeasureSpec.makeMeasureSpec(0, MeasureSpec.UNSPECIFIED),
+        )
+        val natural = label.measuredWidth
+        // Room for the label, the eye and the gap between them: none for an
+        // icon more.
+        val row = header.paddingLeft + natural + gap + eye.layoutParams.width + header.paddingRight
+        header.measure(
+            MeasureSpec.makeMeasureSpec(row, MeasureSpec.EXACTLY),
+            MeasureSpec.makeMeasureSpec(0, MeasureSpec.UNSPECIFIED),
+        )
+        header.layout(0, 0, row, header.measuredHeight)
+        assertTrue("the Text size stays", shown(textSizeButton))
+        assertTrue("as does the eye", shown(eye))
+        assertTrue("the label gives way", label.maxWidth < natural)
+    }
+
+    @Test
+    fun `with no size saved, the answer's text is 16 sp`() {
+        start()
+        assertEquals(sp(16), body.textSize)
+    }
+
+    @Test
+    fun `the Text size opens the one-handle picker on the surface's popover host, anchored on it, and is an interaction`() {
+        start()
+        tap(chips().first())
+        val interactions = host.interactions
+        tap(textSizeButton)
+        assertTrue("${popovers.content}", popovers.content is FontSizePopover)
+        assertSame(textSizeButton, popovers.anchor)
+        assertEquals("opening it is an interaction", interactions + 1, host.interactions)
+    }
+
+    @Test
+    fun `the answer's text is at the saved size from the start, the picker resizes it live and tells the host, and a render reads it afresh`() {
+        prefs.askFontSp = 20
+        start()
+        assertEquals("the saved size from the start", sp(20), body.textSize)
+        tap(chips().first())
+        tap(textSizeButton)
+        val track = root.findViewById<View>(R.id.sizePickerTrack)
+        assertTrue("precondition: the picker is laid out", track.width > 0)
+
+        // A touch at the track's far end jumps the one handle there.
+        val heights = host.heightChanges
+        drag(track, track.width - 1f)
+        assertEquals(Prefs.FONT_SP_CEIL, prefs.askFontSp)
+        assertEquals("the text follows at once", sp(Prefs.FONT_SP_CEIL), body.textSize)
+        assertEquals("the host hears the card may have changed height", heights + 1, host.heightChanges)
+
+        // And at its start, the axis's other end.
+        drag(track, 0f)
+        assertEquals(Prefs.FONT_SP_FLOOR, prefs.askFontSp)
+        assertEquals(sp(Prefs.FONT_SP_FLOOR), body.textSize)
+
+        // Another surface's picker changed it: the next render reads it.
+        prefs.askFontSp = 18
+        binder.render(session.state.value)
+        assertEquals(sp(18), body.textSize)
+    }
+
     // ── Failure ─────────────────────────────────────────────────────────
 
     @Test
@@ -979,13 +1104,13 @@ class AskSectionBinderTest {
         assertEquals(listOf<View>(eye) + chips() + field + send, navViews())
         field.setText("")
 
-        // A question in flight: the eye and X.
+        // A question in flight: the Text size, the eye and X.
         tap(chips().first())
-        assertEquals(listOf(eye, close), navViews())
+        assertEquals(listOf(textSizeButton, eye, close), navViews())
 
-        // Failed: the eye, X and Try again.
+        // Failed: the Text size, the eye, X and Try again.
         fail(CompletionFailedException(null, null))
-        assertEquals(listOf(eye, close, retry), navViews())
+        assertEquals(listOf(textSizeButton, eye, close, retry), navViews())
     }
 
     // ── The order ───────────────────────────────────────────────────────

@@ -1087,6 +1087,14 @@ class Prefs internal constructor(
         get() = sp.getInt(KEY_RESULTS_FONT_MAX_SP, DEFAULT_RESULTS_FONT_MAX_SP)
             .coerceIn(FONT_SP_FLOOR, FONT_SP_CEIL)
 
+    /** The size of the Ask section's answer text (the "Asking…" line, the
+     *  answer, a failure), in sp, on every surface. One size, not a fitted
+     *  range: the section's own Text size picker sets it, on the same axis
+     *  as the range picker. */
+    var askFontSp: Int
+        get() = sp.getInt(KEY_ASK_FONT_SP, DEFAULT_ASK_FONT_SP).coerceIn(FONT_SP_FLOOR, FONT_SP_CEIL)
+        set(v) = sp.edit { putInt(KEY_ASK_FONT_SP, v.coerceIn(FONT_SP_FLOOR, FONT_SP_CEIL)) }
+
     /** Capture method chosen during onboarding: "" = not set, "accessibility", "media_projection" */
     var captureMethod: String
         get() = sp.getString(KEY_CAPTURE_METHOD, "") ?: ""
@@ -1975,11 +1983,13 @@ class Prefs internal constructor(
 
         /** Selectable bounds for the results text-size range picker, in sp.
          *  The picker's track spans exactly this; the binder clamps its fit to
-         *  whatever sub-range the user parks the two handles on. */
+         *  whatever sub-range the user parks the two handles on. The Ask
+         *  section's one-handle picker ([askFontSp]) spans the same. */
         const val FONT_SP_FLOOR = 12
         const val FONT_SP_CEIL = 28
         const val DEFAULT_RESULTS_FONT_MIN_SP = 16
         const val DEFAULT_RESULTS_FONT_MAX_SP = 24
+        const val DEFAULT_ASK_FONT_SP = 16
 
         /** Selectable bounds of [overlayMinTextSp], in sp. The default is also
          *  the range's low end: it is the overlay autosize floor, so the
@@ -2161,6 +2171,7 @@ class Prefs internal constructor(
         private const val KEY_SHOW_FURIGANA_INLINE          = "show_furigana_inline"
         private const val KEY_RESULTS_FONT_MIN_SP           = "results_font_min_sp"
         private const val KEY_RESULTS_FONT_MAX_SP           = "results_font_max_sp"
+        private const val KEY_ASK_FONT_SP                   = "ask_font_sp"
         private const val KEY_DEBUG_FORCE_SINGLE_SCREEN      = "debug_force_single_screen"
         private const val KEY_DEBUG_SHOW_OCR_BOXES           = "debug_show_ocr_boxes"
         private const val KEY_DEBUG_SHOW_DETECTION_LOG      = "debug_show_detection_log"

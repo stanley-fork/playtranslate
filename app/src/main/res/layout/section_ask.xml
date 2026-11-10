@@ -183,7 +183,9 @@
                         android:visibility="gone" />
 
                     <!-- "Asking <service>…", the answer, or the failure; its
-                         colour is set in code with its text. -->
+                         colour is set in code with its text, and its size
+                         from Prefs.askFontSp (16 sp, the size here, unless
+                         the header's Text size changed it). -->
                     <TextView
                         android:id="@+id/tvAskBody"
                         android:layout_width="match_parent"

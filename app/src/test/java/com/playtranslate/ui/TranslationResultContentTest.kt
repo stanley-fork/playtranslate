@@ -36,6 +36,7 @@ import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotEquals
+import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertSame
 import org.junit.Assert.assertTrue
@@ -456,6 +457,22 @@ class TranslationResultContentTest {
         menuRow(activity.getString(R.string.cd_text_size)).performClick()
         assertTrue(content.popovers.content is FontSizeRangePopover)
         assertSame(more, content.popovers.anchor)
+    }
+
+    @Test
+    fun `the Ask header's Text size opens the one-handle picker on the page's popover host`() {
+        content.render(ResultState.Ready(result("猫が食べる。", "The cat eats.")))
+        idle()
+        val sentence = vm.ask.sentence
+        assertNotNull("precondition: the page bound its sentence", sentence)
+        vm.ask.restore(sentence!!, AskState.Answered(AskQuestion.Custom("Why?"), "Because.", "Gemini"))
+        idle()
+        layoutPage()
+        val size = view(R.id.btnFontSizeAsk)
+        assertEquals("an answer on show offers it", View.VISIBLE, size.visibility)
+        size.performClick()
+        assertTrue("${content.popovers.content}", content.popovers.content is FontSizePopover)
+        assertSame(size, content.popovers.anchor)
     }
 
     @Test

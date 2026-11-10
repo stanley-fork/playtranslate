@@ -3,6 +3,7 @@ package com.playtranslate.ui
 import android.content.Context
 import android.content.res.ColorStateList
 import android.graphics.Typeface
+import android.util.TypedValue
 import android.view.LayoutInflater
 import android.view.MotionEvent
 import android.view.View
@@ -60,20 +61,25 @@ import com.playtranslate.translation.TranslationError
  * presets as text pills, in their order and as many as fit beside the label
  * and the eye, so a question is one tap away without opening the section; a
  * pill that doesn't fit is simply not shown, since the opened section lists
- * every preset. Expanded, it is the label and the eye. The pills are fixed
- * slots, one per preset, given the preset in their place whenever the order
- * is read ([applyPresets]).
+ * every preset. Expanded, it is the label and the eye, and while a question
+ * is on screen a Text size between them, pinned like the eye since nothing
+ * else reaches it: the one-handle [FontSizePopover] for the answer's text
+ * ([Prefs.askFontSp]). The pills are fixed slots, one per preset, given the
+ * preset in their place whenever the order is read ([applyPresets]).
  *
- * Nothing here shows an alert, starts an Activity or touches a window. A
- * question reached for with no LLM to put it to (a preset, the field, a
- * send) is the host's to explain ([Host.onLlmNeeded]), and a field that
- * needs a keyboard is the host's to give one ([Host.onFieldFocusChanged]).
+ * Nothing here shows an alert, starts an Activity or touches a window; the
+ * size picker goes on the surface's [PopoverHost], as the other headers' ⋯
+ * menus do. A question reached for with no LLM to put it to (a preset, the
+ * field, a send) is the host's to explain ([Host.onLlmNeeded]), and a field
+ * that needs a keyboard is the host's to give one ([Host.onFieldFocusChanged]).
  */
 class AskSectionBinder(
     root: View,
     private val ctx: Context,
     private val prefs: Prefs,
     private val session: AskSession,
+    /** The surface's one popover host: the answer's size picker shows on it. */
+    private val popovers: PopoverHost,
     private val host: Host,
     /** Whether the user has an LLM a question can be put to. */
     private val hasLlm: () -> Boolean = { TranslationBackendRegistry.hasCompleter() },
@@ -122,12 +128,31 @@ class AskSectionBinder(
         )
     }
 
+    /** The answer's Text size: offered while a question is on screen
+     *  ([applyVisibility]), pinned because a header without ⋯ drops an
+     *  action that doesn't fit and nothing else opens the picker. */
+    private val textSize = HeaderAction(
+        R.id.btnFontSizeAsk, R.drawable.ic_format_size, ctx.getString(R.string.cd_text_size), pinned = true,
+    )
+
     /** The section's eye: pinned, so it sits at the header's end like the
      *  other sections' eyes. The row tints and draws it from this model. */
     private val eye = HeaderAction(
         R.id.btnToggleAsk, R.drawable.ic_visibility,
         ctx.getString(R.string.cd_toggle_ask_visibility), pinned = true,
     )
+
+    /** The answer's size picker, writing the pref live; each change resizes
+     *  the text and so the card. */
+    private val sizePicker = FontSizePopover(
+        read = { prefs.askFontSp },
+        write = { prefs.askFontSp = it },
+    ).apply {
+        onSizeChanged = {
+            applyTextSize()
+            host.onHeightChanged()
+        }
+    }
 
     /** The state [render] last drew: Idle until the first render. */
     private var state: AskState = AskState.Idle
@@ -140,7 +165,14 @@ class AskSectionBinder(
 
     init {
         header.overflowEnabled = false
-        header.setActions(slots + eye, R.id.btnMoreAsk)
+        header.setActions(slots + textSize + eye, R.id.btnMoreAsk)
+        textSize.onClick = { anchor ->
+            // Like a chip or X: a live host holds the sentence whose answer
+            // is being sized, which the next line would otherwise replace
+            // under the open picker.
+            host.onInteraction()
+            popovers.toggle(sizePicker, anchor)
+        }
         eye.onClick = {
             if (isHidden) {
                 prefs.hideAskSection = false
@@ -213,6 +245,10 @@ class AskSectionBinder(
      *  this with every state, the current one first. */
     fun render(state: AskState) {
         this.state = state
+        // The saved size: the first render (a host collects the session
+        // from construction, the current state first) applies it, and a
+        // later one a change made by another surface's picker.
+        applyTextSize()
         // A question on screen takes the field's place.
         if (state !is AskState.Idle) clearFieldFocus()
         idleGroup.isVisible = state is AskState.Idle
@@ -260,7 +296,8 @@ class AskSectionBinder(
     }
 
     /** What a controller cursor can reach here, in visual order, and only
-     *  what is on screen: the header's (its shown pills, then the eye), then
+     *  what is on screen: the header's (its shown pills or the Text size,
+     *  then the eye), then
      *  the card's. One of the card's two groups shows, so keeping the shown
      *  views of both gives the chips, the field and send, or X and Try
      *  again; send has nothing to do (and is no target) while disabled. The
@@ -274,13 +311,23 @@ class AskSectionBinder(
     // ── Rendering ────────────────────────────────────────────────────────
 
     /** Reflect [isHidden]: the card, the eye, the label, and the header's
-     *  pills, which are offered only while the card is hidden. */
+     *  pills, which are offered only while the card is hidden. The Text size
+     *  is offered while a question is on screen, which is also exactly when
+     *  the card is up and expanded with the text it sizes (a question keeps
+     *  even a collapsed section's card up). */
     private fun applyVisibility() {
         val hidden = isHidden
         card.visibility = if (hidden) View.GONE else View.VISIBLE
         eye.icon = if (hidden) R.drawable.ic_visibility_off else R.drawable.ic_visibility
         header.labelDimmed = hidden
         for (slot in slots) slot.available = hidden
+        textSize.available = state !is AskState.Idle
+    }
+
+    /** The answer's text at its saved size ([Prefs.askFontSp]): the
+     *  "Asking…" line, the answer and a failure share the one view. */
+    private fun applyTextSize() {
+        bodyText.setTextSize(TypedValue.COMPLEX_UNIT_SP, prefs.askFontSp.toFloat())
     }
 
     /** The spoiler line shows over a question while the Translation section

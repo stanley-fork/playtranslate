@@ -1032,7 +1032,7 @@ class CaptureResultOverlay(
         scope.launch { wordLookups.state.collect { renderer.render(it) } }
         // The Ask section: the page's own binder over this sheet's session.
         val ask = AskSectionBinder(
-            panel, ctx, prefs, askSession,
+            panel, ctx, prefs, askSession, popovers,
             object : AskSectionBinder.Host {
                 override fun onLlmNeeded() = showAskNeedsLlm()
                 override fun onFieldFocusChanged(focused: Boolean) = onAskFieldFocusChanged(focused)

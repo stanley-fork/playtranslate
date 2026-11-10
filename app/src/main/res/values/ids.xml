@@ -44,6 +44,12 @@
          header's ready-made questions get generated ids: they are a list. -->
     <item name="btnToggleAsk" type="id" />
     <item name="btnMoreAsk" type="id" />
+    <!-- The Ask header's Text size, offered while a question is on screen:
+         it opens the one-handle picker for the answer's text. -->
+    <item name="btnFontSizeAsk" type="id" />
+    <!-- The slider row of a text-size picker (SizePickerCard), so a test
+         can find it inside the popover. -->
+    <item name="sizePickerTrack" type="id" />
     <!-- An ActionOverflowMenu row's parts. -->
     <item name="overflowRowIcon" type="id" />
     <item name="overflowRowLabel" type="id" />

@@ -45,6 +45,7 @@ import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
+import org.junit.Assert.assertSame
 import org.junit.Assert.assertTrue
 import org.junit.Assert.fail
 import org.junit.Before
@@ -177,6 +178,7 @@ class CaptureSheetAskWordsTest {
     private val CaptureResultOverlay.binder: TranslationSectionBinder get() = field("binder")
     private val CaptureResultOverlay.dismissed: Boolean get() = field("dismissed")
     private val CaptureResultOverlay.askSession: AskSession get() = field("askSession")
+    private val CaptureResultOverlay.popovers: PopoverHost get() = field("popovers")
     private val CaptureResultOverlay.wordRows: WordRowsBinder get() = field("wordRows")
     private val CaptureResultOverlay.wordLookups: WordLookupPipeline get() = field("wordLookups")
     private val CaptureResultOverlay.lookupsRenderer: WordLookupsRenderer get() = field("lookupsRenderer")
@@ -570,6 +572,37 @@ class CaptureSheetAskWordsTest {
         assertEquals("the panel follows, up to the cap",
             minOf(o.need, CaptureResultGeometry.autoMaxHeight(screen.h)), o.panelHeight)
         assertTrue("and it grew", o.panelHeight > heightAsking)
+    }
+
+    @Test fun `the sheet's Text size opens the picker on its popover host, and a larger answer grows the card and the sheet with it`() {
+        val o = open(screen, text(2), text(2), askHidden = false)
+        giveLlm()
+        tap(chips(o)[0])
+        answer("It is about a fox.")
+        val button = o.v(R.id.btnFontSizeAsk)
+        tap(button)
+        assertTrue("${o.popovers.content}", o.popovers.content is FontSizePopover)
+        assertSame(button, o.popovers.anchor)
+
+        val need = o.need
+        val card = o.v(R.id.cardAsk).height
+        val track = o.root.findViewById<View>(R.id.sizePickerTrack)
+        assertTrue("precondition: the picker is laid out", track.width > 0)
+        // A touch at the track's far end: the largest size.
+        val t = SystemClock.uptimeMillis()
+        for (action in listOf(MotionEvent.ACTION_DOWN, MotionEvent.ACTION_UP)) {
+            val e = MotionEvent.obtain(t, t, action, track.width - 1f, track.height / 2f, 0)
+            track.dispatchTouchEvent(e)
+            e.recycle()
+        }
+        settle()
+        assertEquals(Prefs.FONT_SP_CEIL, prefs.askFontSp)
+        val grown = o.v(R.id.cardAsk).height - card
+        assertTrue("the card grew ($grown)", grown > 0)
+        assertEquals("the need grew by the card's growth", need + grown, o.need)
+        assertEquals("the panel follows, up to the cap",
+            minOf(o.need, CaptureResultGeometry.autoMaxHeight(screen.h)), o.panelHeight)
+        assertTrue("the picker stays up on its anchor", o.popovers.isShowing)
     }
 
     @Test fun `a collapsed Ask's pill shows the card for its question without writing the pref, the need growing by its header and card`() {
@@ -1043,12 +1076,13 @@ class CaptureSheetAskWordsTest {
             views(),
         )
 
-        // An answer on show: X instead of the chips and the field.
+        // An answer on show: the Text size before the eye, and X instead
+        // of the chips and the field.
         tap(chips(o)[0])
         answer("It is about a fox.")
         assertTrue("precondition: answered", o.askSession.state.value is AskState.Answered)
         assertEquals(
-            texts() + askEye + o.v(R.id.btnAskClose) + wordsEye + targets.map { doc },
+            texts() + o.v(R.id.btnFontSizeAsk) + askEye + o.v(R.id.btnAskClose) + wordsEye + targets.map { doc },
             views(),
         )
 
