@@ -164,6 +164,9 @@ class AskSectionBinderTest {
     /** Whether the user has an LLM: what the binder's hasLlm reads. */
     private var llm = true
 
+    /** How many times the binder asked. */
+    private var llmAsks = 0
+
     /** Every question the fake LLM was asked, in order. */
     private val calls = mutableListOf<Call>()
 
@@ -204,7 +207,7 @@ class AskSectionBinderTest {
      *  collected into [AskSectionBinder.render] from here on, and lay the page
      *  out. The prefs a test sets before this are the binder's start. */
     private fun start() {
-        binder = AskSectionBinder(root, activity, prefs, session, host, hasLlm = { llm })
+        binder = AskSectionBinder(root, activity, prefs, session, host, hasLlm = { llmAsks++; llm })
         scope.launch {
             session.state.collect {
                 rendered += it
@@ -540,6 +543,32 @@ class AskSectionBinderTest {
         touchField()
         assertOnlyAlerted("a touch on the field")
         assertTrue("no focus change reached the host", host.focusChanges.isEmpty())
+    }
+
+    @Test
+    fun `whether a touch on the field is the field's is decided once, where the touch begins`() {
+        llm = false
+        start()
+        llmAsks = 0
+        val t0 = SystemClock.uptimeMillis()
+        fun send(action: Int, y: Float) {
+            val e = MotionEvent.obtain(t0, t0, action, field.width / 2f, y, 0)
+            field.dispatchTouchEvent(e)
+            e.recycle()
+        }
+        // A drag that starts on the field: one question for all of it.
+        send(MotionEvent.ACTION_DOWN, field.height / 2f)
+        for (i in 1..5) send(MotionEvent.ACTION_MOVE, field.height / 2f + i)
+        assertEquals("asked at the down, and not again at each move", 1, llmAsks)
+        send(MotionEvent.ACTION_UP, field.height / 2f + 5)
+        settle()
+        assertEquals("its end is the click, which asks for itself", 2, llmAsks)
+        assertEquals(1, host.llmNeeded)
+        assertFalse(field.isFocused)
+        // The next touch is asked afresh: with an LLM it is the field's.
+        llm = true
+        touchField()
+        assertTrue(field.isFocused)
     }
 
     @Test

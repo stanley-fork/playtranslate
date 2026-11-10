@@ -172,10 +172,13 @@ class AskSectionBinder(
         // With no LLM a touch on the field leads to the host's explanation,
         // not to a keyboard: every event of it is kept from the field, so it
         // neither takes focus nor starts a selection, and its end is a click
-        // (below). Asked at each event, not once per touch: whether an LLM
-        // exists changes only on another screen.
+        // (below). Decided where the touch begins, for the whole of it: the
+        // answer costs a file read per on-device model, which a drag that
+        // starts on the field would pay at every move.
+        var keptFromField = false
         questionField.setOnTouchListener { v, event ->
-            if (hasLlm()) return@setOnTouchListener false
+            if (event.actionMasked == MotionEvent.ACTION_DOWN) keptFromField = !hasLlm()
+            if (!keptFromField) return@setOnTouchListener false
             if (event.actionMasked == MotionEvent.ACTION_UP) v.performClick()
             true
         }

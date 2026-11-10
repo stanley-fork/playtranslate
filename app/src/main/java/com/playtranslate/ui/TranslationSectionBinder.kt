@@ -475,8 +475,8 @@ class TranslationSectionBinder(
     }
 
     /** Flip a section's hidden pref, re-apply its visibility, and notify the host
-     *  so it can re-layout. Both the section's own eye button and the panel's
-     *  collapsed-strip eye route through these. */
+     *  so it can re-layout. The section's eye, which stays in its header
+     *  while the card is hidden, routes through these both ways. */
     fun toggleOriginalHidden() {
         prefs.hideOriginalSection = !prefs.hideOriginalSection
         applyOriginalVisibility()

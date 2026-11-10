@@ -32,8 +32,7 @@ import org.junit.Test
  *  - at most one request in flight: a new question, [AskSession.close] or
  *    another sentence cancels it, and a cancelled request writes nothing,
  *    INCLUDING when the LLM ignores the cancel and returns its answer late
- *    (an LLM call cannot always be interrupted: the on-device engine runs to
- *    its end);
+ *    (the promise is the session's own, whatever its completer does);
  *  - binding: the same sentence changes nothing, another one (or none) ends
  *    the question;
  *  - [AskSession.retry] only from Failed, and [AskSession.restore].
