@@ -7,6 +7,7 @@ import com.playtranslate.translation.classifyBackendFailure
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -102,6 +103,11 @@ class AskSession(
             } catch (_: Exception) {
                 AskState.Failed(question)
             }
+            // "A cancelled request writes nothing" is kept here, not left
+            // to the completer: one that returned normally without seeing
+            // the cancel would otherwise have its answer shown. (Today's
+            // completers all throw the cancellation.)
+            ensureActive()
             _state.value = next
         }
     }
@@ -120,10 +126,12 @@ class AskSession(
     }
 
     /** Take up a finished [answer] to a question about [sentence], as if it
-     *  had been asked here: a surface rebuilt around the same result (the
-     *  capture sheet coming back from a page) carries its answer over. */
+     *  had been asked here, in place of whatever was being asked: a surface
+     *  rebuilt around the same result (the capture sheet coming back from a
+     *  page) carries its answer over. */
     fun restore(sentence: AskSentence, answer: AskState.Answered) {
-        bind(sentence)
+        this.sentence = sentence
+        close()
         _state.value = answer
     }
 }

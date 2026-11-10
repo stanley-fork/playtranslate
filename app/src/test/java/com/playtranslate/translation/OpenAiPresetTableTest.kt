@@ -19,7 +19,9 @@ import org.robolectric.RobolectricTestRunner
  * model, name, key page, requirement, where the picker lists it, the
  * thinking row a new instance's page shows), pinned as literals so a branch
  * edited by mistake shows up here; and the requirement as the factory hands
- * it to a live backend.
+ * it to a live backend. Likewise whether each preset answers a free-form
+ * prompt ([OpenAiPreset.answersPrompts]) and what a factory-built backend
+ * then says to [PromptCompleter.canComplete].
  */
 @RunWith(RobolectricTestRunner::class)
 class OpenAiPresetTableTest {
@@ -152,6 +154,49 @@ class OpenAiPresetTableTest {
         assertFalse(AccountRequirement.NONE.requiresKey)
         assertTrue(AccountRequirement.REQUIRED.requiresKey)
         assertTrue(AccountRequirement.REQUIRED_FREE_TIER.requiresKey)
+    }
+
+    /** Whether each preset's models answer a free-form prompt (the Ask
+     *  section), decided per preset: a preset added without a decision
+     *  here fails the first assertion. Index-Translate is an MT fine-tune
+     *  behind the chat protocol; every other preset serves chat models. */
+    @Test fun `every preset decides whether it answers prompts`() {
+        val answers = mapOf(
+            OpenAiPreset.OPENAI to true,
+            OpenAiPreset.DEEPSEEK to true,
+            OpenAiPreset.MISTRAL to true,
+            OpenAiPreset.GROQ to true,
+            OpenAiPreset.OPENROUTER to true,
+            OpenAiPreset.CLAUDE to true,
+            OpenAiPreset.INDEX_TRANSLATE to false,
+            OpenAiPreset.CUSTOM to true,
+        )
+        assertEquals(OpenAiPreset.entries.toSet(), answers.keys)
+        OpenAiPreset.entries.forEach { preset ->
+            assertEquals(preset.name, answers.getValue(preset), preset.answersPrompts)
+        }
+    }
+
+    /** The factory hands the preset's decision to the backend: an enabled
+     *  Index-Translate instance translates but takes no prompt; an enabled
+     *  OpenAI instance takes one once its key is stored. */
+    @Test fun `factory-built backends say whether they answer prompts`() {
+        val prefs = ctx.getSharedPreferences("test_prefs", Context.MODE_PRIVATE)
+
+        val index = OnlineBackendFactory.build(ctx, prefs, instance(OpenAiPreset.INDEX_TRANSLATE), live = false)
+        assertTrue("precondition: it translates", index.isUsable("ja", "en"))
+        assertFalse("but answers no prompt", (index as PromptCompleter).canComplete())
+
+        val openAi = instance(OpenAiPreset.OPENAI)
+        assertFalse(
+            "no key stored yet",
+            (OnlineBackendFactory.build(ctx, prefs, openAi, live = false) as PromptCompleter).canComplete(),
+        )
+        OnlineServiceStore.writeKey(openAi.id, "sk-test")
+        assertTrue(
+            "enabled, keyed, a chat preset",
+            (OnlineBackendFactory.build(ctx, prefs, openAi, live = false) as PromptCompleter).canComplete(),
+        )
     }
 
     /** The factory hands the instance's requirement to the backend: the
