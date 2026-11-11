@@ -435,9 +435,13 @@ class OpenAiBackend(
                 .build()
 
             try {
-                val reply =
-                    if (call.isAnswer) answerClient.newCall(request).awaitResponse()
-                    else client.newCall(request).execute()
+                val http = (if (call.isAnswer) answerClient else client).newCall(request)
+                // An answer is long and its user may put it away, so its
+                // coroutine's cancel cancels the call wherever the exchange
+                // stands, the reply's body included ([blockingOn] over
+                // [executeToEnd]); a translation is short and runs to its
+                // end.
+                val reply = if (call.isAnswer) blockingOn(http) { http.executeToEnd() } else http.execute()
                 reply.use { response ->
                     throwIfKeylessRefusal(credential, response)
                     when (response.code) {

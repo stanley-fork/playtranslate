@@ -25,6 +25,7 @@ import com.playtranslate.translation.HttpCallClock
 import com.playtranslate.translation.OnlineAttempt
 import com.playtranslate.translation.SentenceAnswer
 import com.playtranslate.translation.SentenceQuestion
+import com.playtranslate.translation.StallBodyUntilCancelled
 import com.playtranslate.translation.StructuralFailureException
 import com.playtranslate.translation.TranslationBackendRegistry
 import com.playtranslate.translation.TranslationErrors
@@ -627,6 +628,28 @@ class PtCloudAskTest {
         assertNoCooldown()
         assertNoPause()
         assertTrue(attempts.isEmpty())
+    }
+
+    @Test fun `an ask cancelled while its answer's body is still arriving cancels its call, records nothing, reports nothing, and rethrows`() {
+        // What the headers carried, with the body stalled behind them: an
+        // answer, and the edge's own 429, which would start the cooldown.
+        for (code in listOf(200, 429)) {
+            val stall = StallBodyUntilCancelled(code)
+            val b = backend(OkHttpClient.Builder().addInterceptor(stall).build())
+            val e = runCatching {
+                runBlocking {
+                    val call = async(Dispatchers.Default) { b.answer(question()) }
+                    assertNotNull("$code: the answer's headers are in and its body is being read", stall.reading.poll(5, TimeUnit.SECONDS))
+                    call.cancel()
+                    call.await()
+                }
+            }.exceptionOrNull()
+            assertTrue("$code: $e", e is CancellationException)
+            assertEquals("$code: the call was cancelled under the body's read", 1, stall.cancelled.size)
+            assertNoCooldown()
+            assertNoPause()
+            assertTrue(attempts.isEmpty())
+        }
     }
 
     // ── Through the registry's pass ────────────────────────────────────

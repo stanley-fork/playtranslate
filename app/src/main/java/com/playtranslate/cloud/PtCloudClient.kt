@@ -10,6 +10,7 @@ import com.playtranslate.translation.HttpCallClock
 import com.playtranslate.translation.HttpTimingLogger
 import com.playtranslate.translation.OnlineAttempt
 import com.playtranslate.translation.SentenceAnswer
+import com.playtranslate.translation.blockingOn
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Deferred
@@ -21,7 +22,6 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.isActive
-import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlinx.coroutines.withContext
 import kotlinx.serialization.decodeFromString
 import okhttp3.Call
@@ -1148,18 +1148,5 @@ class PtCloudClient(
          *  measures against the body cap is the size that goes out. */
         internal fun translateBody(request: TranslateRequest): ByteArray =
             PtJson.lenient.encodeToString(TranslateRequest.serializer(), request).toByteArray(Charsets.UTF_8)
-
-        /**
-         * Runs [read], a blocking step of [call], so that cancelling the
-         * calling coroutine cancels [call] at once: OkHttp then fails the
-         * blocked read, and the continuation, already cancelled, throws
-         * [CancellationException]. A `Job.invokeOnCompletion` hook could not
-         * do this: it fires only after the blocked read returns by itself.
-         */
-        private suspend fun <T> blockingOn(call: Call, read: () -> T): T =
-            suspendCancellableCoroutine { cont ->
-                cont.invokeOnCancellation { call.cancel() }
-                cont.resumeWith(runCatching(read))
-            }
     }
 }

@@ -320,6 +320,33 @@ class OpenAiBackendCompleteTest {
         assertNull(backend.unavailableUntil())
     }
 
+    @Test fun `cancelling complete while the reply's body is still arriving cancels the HTTP call and records nothing`() = runBlocking<Unit> {
+        // What the headers carried, with the body stalled behind them: an
+        // answer, and a refusal whose recording waits on its body.
+        for (code in listOf(200, 429)) {
+            val stall = StallBodyUntilCancelled(code)
+            val backend = openAi(OkHttpClient.Builder().addInterceptor(stall).build())
+            var ended: Throwable? = null
+            val asking = launch(Dispatchers.Default) {
+                try {
+                    backend.complete(SYSTEM, USER)
+                } catch (t: Throwable) {
+                    ended = t
+                    throw t
+                }
+            }
+            val reading = stall.reading.poll(5, TimeUnit.SECONDS)
+            assertNotNull("$code: the reply's headers are in and its body is being read", reading)
+
+            asking.cancelAndJoin()
+
+            assertSame("$code: the call was cancelled under the body's read", reading, stall.cancelled.poll(5, TimeUnit.SECONDS))
+            assertTrue(reading!!.isCanceled())
+            assertTrue("$code: complete ended in $ended", ended is CancellationException)
+            assertNull("$code: nothing recorded", backend.unavailableUntil())
+        }
+    }
+
     // ── g. the answer's own wait ─────────────────────────────────────────
 
     @Test fun `complete does not ride the translation client's read timeout`() = runBlocking<Unit> {

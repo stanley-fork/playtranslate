@@ -10,8 +10,12 @@ import okhttp3.OkHttpClient
 import okhttp3.Protocol
 import okhttp3.Request
 import okhttp3.Response
+import okhttp3.ResponseBody.Companion.asResponseBody
 import okhttp3.ResponseBody.Companion.toResponseBody
 import okio.Buffer
+import okio.Source
+import okio.Timeout
+import okio.buffer
 import java.io.Closeable
 import java.io.EOFException
 import java.io.IOException
@@ -27,7 +31,8 @@ import kotlin.concurrent.thread
 /**
  * HTTP fakes for the online backends' tests, beyond the canned-reply
  * interceptor the older backend tests build inline: a recording one, one
- * that holds a call open until it is cancelled, and a loopback server whose
+ * that holds a call open until it is cancelled, one that answers a call's
+ * headers and stalls its body until then, and a loopback server whose
  * slow reply lets a client's own timeouts fire on a real socket. No real
  * network: the interceptors answer before any connection is made, and the
  * server listens on loopback only.
@@ -87,6 +92,51 @@ internal class HoldUntilCancelled(private val giveUpMs: Long = 5_000) : Intercep
         }
         cancelled.put(call)
         throw IOException("Canceled")
+    }
+}
+
+/**
+ * Answers every call's status and headers at once and then stalls its body,
+ * as a service does that sends its headers before the reply is written: the
+ * first read of the body puts the call on [reading] and blocks until the
+ * call is cancelled ([Call.isCanceled]), which puts it on [cancelled] and
+ * fails the read, as OkHttp fails a read on a cancelled call. The other half
+ * of [HoldUntilCancelled], which holds a call before any reply. A body
+ * nobody cancels fails its read after [giveUpMs], so a regression shows up
+ * as a failed assertion and not as a hung test.
+ */
+internal class StallBodyUntilCancelled(
+    private val code: Int = 200,
+    private val giveUpMs: Long = 5_000,
+) : Interceptor {
+    val reading = LinkedBlockingQueue<Call>()
+    val cancelled = LinkedBlockingQueue<Call>()
+
+    override fun intercept(chain: Interceptor.Chain): Response {
+        val call = chain.call()
+        val stalled = object : Source {
+            override fun read(sink: Buffer, byteCount: Long): Long {
+                reading.put(call)
+                val deadline = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(giveUpMs)
+                while (!call.isCanceled()) {
+                    if (System.nanoTime() > deadline) throw IOException("stalled body was never cancelled")
+                    Thread.sleep(5)
+                }
+                cancelled.put(call)
+                throw IOException("Canceled")
+            }
+
+            override fun timeout(): Timeout = Timeout.NONE
+
+            override fun close() = Unit
+        }
+        return Response.Builder()
+            .request(chain.request())
+            .protocol(Protocol.HTTP_1_1)
+            .code(code)
+            .message(if (code in 200..299) "OK" else "Error")
+            .body(stalled.buffer().asResponseBody("application/json".toMediaType()))
+            .build()
     }
 }
 
