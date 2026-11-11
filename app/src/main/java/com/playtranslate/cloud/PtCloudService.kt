@@ -26,7 +26,8 @@ import kotlinx.coroutines.flow.update
  * PlayTranslate Cloud's composition root and the name the rest of the app
  * knows it by: its id and display name (the translation-error pill's owner
  * and wording), its settings ([config]), its one HTTP client ([client]), its
- * one cooldown, and the user gestures that reset it.
+ * one cooldown, the pause of its answers alone ([askLimitedUntil]), and the
+ * user gestures that reset them.
  *
  * Two routes read through it, one object each, both built on [client] and
  * [config]: the frame reader, which the router
@@ -35,7 +36,9 @@ import kotlinx.coroutines.flow.update
  * [TranslationBackendRegistry], first among the online services, and is this
  * cooldown's face there: the registry's cooldown skip, its success
  * recording, its degraded messaging and its connectivity fan-out reach the
- * cooldown through it, read at each call.
+ * cooldown through it, read at each call. The same backend answers the Ask
+ * section's questions over a third route (`POST /v1/ask`), under the
+ * translation switch.
  *
  * Two switches, one per route ([PtCloudConfig.ocrEnabled],
  * [PtCloudConfig.translateEnabled]), independent of each other: the OCR
@@ -164,13 +167,15 @@ object PtCloudService {
      *  swapped: it is the process's one and sends to the real address, so a
      *  test that sends requests builds its own [PtCloudClient] on a canned
      *  OkHttp client and hands it to the code under test. Forgets
-     *  [keyStoredAtMs], so no test inherits another's. */
+     *  [keyStoredAtMs] and the answers' pause ([askLimitedUntil]), so no
+     *  test inherits another's. */
     @VisibleForTesting
     @Synchronized
     fun installForTest(testState: CooldownState?, testConfig: PtCloudConfig? = null) {
         state = testState
         this.testConfig = testConfig
         keyStoredAtMs = null
+        askLimitedUntilMs = null
     }
 
     /** The service's cooldown. Throws until [init] has run. */
@@ -235,6 +240,48 @@ object PtCloudService {
     fun unavailableDescription(): String? = cooldown.unavailableDescription()
 
     fun unavailableCause(): CooldownCause? = cooldown.unavailableCause()
+
+    @Volatile private var askLimitedUntilMs: Long? = null
+
+    /**
+     * The epoch-ms time until which the service answers no question for the
+     * stored key's account, or null when nothing says so: the account's
+     * answers for the UTC day are used up (the Ask route's own
+     * `429 ask_limit`, [onAskLimit]). A pause of the answers alone, kept
+     * apart from [cooldown]: the cap counts answers and says nothing about
+     * translation or OCR, so no capture and no translation is kept off the
+     * cloud by it. The registry's pass over the services that answer
+     * questions skips the cloud while it runs
+     * ([PtCloudBackend.answersUnavailableUntil]).
+     *
+     * In memory only, on purpose: the server's count is in its memory too
+     * and starts again when it restarts, so a pause that outlived this
+     * process could outlive the count it describes. A new process asks
+     * once, and is refused again if the count still stands.
+     */
+    fun askLimitedUntil(): Long? = askLimitedUntilMs
+
+    /**
+     * An Ask that carried [sentKey] was answered `429 ask_limit` with
+     * [retryAfterS], the seconds until the account's count of answers
+     * starts again (the time to 00:00 UTC): no question goes to the cloud
+     * until then ([askLimitedUntil]). Nothing else changes: not the
+     * cooldown, not a switch, not the pill.
+     *
+     * Acts only while [sentKey] is a usable key and still the stored one,
+     * [onAccountWithheld]'s guard: the cap is the account's, and a key
+     * signed out or replaced during the round trip makes the answer one
+     * about an account that is gone. [retryAfterS] is held to a day, the
+     * longest the time to 00:00 UTC can be, so a number in another unit
+     * cannot pause the answers for the life of the process. Any thread,
+     * under the service's monitor, so the guard and the write are one step
+     * against a key change ([saveClientKey]).
+     */
+    @Synchronized
+    fun onAskLimit(sentKey: String, retryAfterS: Long) {
+        if (!PtCloudConfig.isUsableKey(sentKey) || config.clientKey != sentKey) return
+        askLimitedUntilMs = System.currentTimeMillis() + minOf(retryAfterS, MAX_ASK_PAUSE_S) * 1000
+    }
 
     /**
      * The router's one decision: why a read of [srcId] with [deviceOnly] would
@@ -695,7 +742,10 @@ object PtCloudService {
         CooldownCause.BILLING, CooldownCause.AUTH -> false
     }
 
-    /** Drops the cooldown and both ladders, then does what
+    /** Drops the cooldown and both ladders, and the pause of the answers
+     *  with them ([askLimitedUntil]: a gesture means "try it again now" for
+     *  a question too, and a saved key can be another account's, whose
+     *  count the pause never described), then does what
      *  [com.playtranslate.translation.OnlineServiceMutations.saveConfig]
      *  does for a waterfall service: forget the pill's errors so a failure
      *  after the gesture shows again (both routes report under [ID], so any
@@ -717,6 +767,7 @@ object PtCloudService {
      *  one cooldown, which both routes share, is reset here, by the gesture. */
     private fun resetForUserGesture(clearTranslations: Boolean) {
         cooldown.resetCooldown()
+        askLimitedUntilMs = null
         TranslationErrors.forget(ID)
         if (clearTranslations) GroupTranslator.clearShared()
         afterCooldownReset()
@@ -746,12 +797,17 @@ object PtCloudService {
     }
 
     /** Reports one frame's outcome to the translation-error tracker, through
-     *  the registry's listener, like a waterfall pass's. The frame route's
-     *  only: the translate route's attempts are the registry's own reports,
-     *  since its caller is a registry backend. */
+     *  the registry's listener, like a waterfall pass's. The frame route's,
+     *  and the Ask route's for the one answer it reports, a withholding 403
+     *  ([PtCloudClient.postAsk]): the translate route's attempts are the
+     *  registry's own reports, since its caller is a registry backend. */
     fun report(attempt: OnlineAttempt) {
         TranslationBackendRegistry.reportOnlineAttempts(listOf(attempt))
     }
+
+    /** The longest [onAskLimit] pauses the answers for: a UTC day, in
+     *  seconds. */
+    private const val MAX_ASK_PAUSE_S = 86_400L
 }
 
 /** Why a read stays on the device ([PtCloudService.refusal]), in the order

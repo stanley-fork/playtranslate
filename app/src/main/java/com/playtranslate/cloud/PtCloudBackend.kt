@@ -1,5 +1,6 @@
 package com.playtranslate.cloud
 
+import com.playtranslate.BuildConfig
 import com.playtranslate.R
 import com.playtranslate.ocr.FrameReaders
 import com.playtranslate.translation.BackendFailure
@@ -9,6 +10,9 @@ import com.playtranslate.translation.BatchTranslator
 import com.playtranslate.translation.CooldownCause
 import com.playtranslate.translation.CooldownState
 import com.playtranslate.translation.Cooldownable
+import com.playtranslate.translation.SentenceAnswer
+import com.playtranslate.translation.SentenceAnswerer
+import com.playtranslate.translation.SentenceQuestion
 import com.playtranslate.translation.StarRating
 import com.playtranslate.translation.StructuralFailureException
 import com.playtranslate.translation.TranslationBackend
@@ -41,6 +45,14 @@ import kotlinx.coroutines.withContext
  * ([recordSuccess]). Nor does it report attempts: the registry does, for
  * every online backend.
  *
+ * It also answers the Ask section's questions ([SentenceAnswerer]), over
+ * `POST /v1/ask` ([PtCloudClient.postAsk]): the server writes the prompt
+ * and keeps the answers to what they are for, so the backend is put a
+ * question's parts ([answer]) and is no
+ * [com.playtranslate.translation.PromptCompleter]. Under the same switch
+ * and key as its translations ([canAnswer]), and with a pause of its own
+ * for the account's daily cap on answers ([answersUnavailableUntil]).
+ *
  * Accepted as they are (2026-10-17), no mechanism:
  *  - A frame whose cloud translation ended `deferred`, or failed with no
  *    cooldown, hands its unnamed groups to the waterfall, whose first
@@ -68,7 +80,7 @@ class PtCloudBackend(
     private val client: () -> PtCloudClient = { PtCloudService.client },
     private val config: () -> PtCloudConfig = { PtCloudService.config },
     private val cooldown: () -> CooldownState = { PtCloudService.cooldown },
-) : TranslationBackend, BatchTranslator, Cooldownable {
+) : TranslationBackend, BatchTranslator, SentenceAnswerer, Cooldownable {
 
     override val id = PtCloudService.ID
     override val displayName = PtCloudService.DISPLAY_NAME
@@ -256,6 +268,62 @@ class PtCloudBackend(
         return unnamed
     }
 
+    // SentenceAnswerer: the Ask section's questions.
+
+    /** As [isUsable], for any question: the translation switch on with a
+     *  usable key. The switch is the service's row on the Translation
+     *  services page, which is where the services that answer questions are
+     *  set up; the OCR switch has no say. */
+    override fun canAnswer(): Boolean {
+        val config = config()
+        return PtCloudRouting.configured(config.translateEnabled) { config.hasKey }
+    }
+
+    /** The account's answers for the day are used up until then
+     *  ([PtCloudService.askLimitedUntil]): the route's own `429 ask_limit`,
+     *  which pauses questions and nothing else. */
+    override fun answersUnavailableUntil(): Long? = PtCloudService.askLimitedUntil()
+
+    /**
+     * One `POST /v1/ask` ([PtCloudClient.postAsk]) with [question]'s parts:
+     * the pair's codes as they are, the sentence, and the question's
+     * wording. Its two messages are not sent: the server writes its own
+     * around the parts. The call is labelled as a translate call is
+     * ([ASK_TAG]) and carries the app's build.
+     *
+     * On [Dispatchers.IO], as [translateBatch] is. A sentence or a question
+     * over [MAX_ASK_CODE_POINTS] code points throws
+     * [StructuralFailureException] (REJECTED) before any request: the
+     * server would answer 422, and the registry's pass asks the next
+     * service, which takes the question whole. Cutting either to fit would
+     * get an answer about a text the reader is not looking at.
+     *
+     * What a failure records is the client's to decide and less than a
+     * translation's ([PtCloudClient.postAsk]): only an answer every route
+     * shares touches the cooldown.
+     */
+    override suspend fun answer(question: SentenceQuestion): SentenceAnswer = withContext(Dispatchers.IO) {
+        if (maxOf(PtCloudBatches.codePoints(question.sentence), PtCloudBatches.codePoints(question.question)) >
+            MAX_ASK_CODE_POINTS
+        ) {
+            throw StructuralFailureException(
+                "$displayName takes at most $MAX_ASK_CODE_POINTS code points a sentence or a question",
+                BackendFailure(BackendFailureKind.REJECTED),
+                serverAnswered = false,
+            )
+        }
+        client().postAsk(
+            AskRequest(
+                source = question.source,
+                target = question.target,
+                sentence = question.sentence,
+                question = question.question,
+                askId = FrameReaders.frameId(ASK_TAG),
+                client = WireClient(BuildConfig.VERSION_NAME),
+            ),
+        )
+    }
+
     /** The refusal of a batch or a call the service stopped being usable
      *  for after the registry chose it (switched off, or its key removed;
      *  [translateBatch], [ask]): REJECTED, made before any request, so no
@@ -280,9 +348,18 @@ class PtCloudBackend(
 
     override fun resetCooldown() = cooldown().resetCooldown()
 
-    private companion object {
+    companion object {
+        /** The most code points the Ask route takes in a sentence, and in a
+         *  question (`PT_ASK_MAX_SENTENCE_CHARS` and
+         *  `PT_ASK_MAX_QUESTION_CHARS` in docs/api.md; a longer one is a
+         *  422). */
+        const val MAX_ASK_CODE_POINTS = 1_000
+
         /** A translate call's frame id prefix ([FrameReaders.frameId]):
          *  `tr-...` beside the readers' `d0-...`, `cam-...`, `import-...`. */
-        const val FRAME_TAG = "tr"
+        private const val FRAME_TAG = "tr"
+
+        /** An Ask's label, made as a frame id is: `ask-...`. */
+        private const val ASK_TAG = "ask"
     }
 }

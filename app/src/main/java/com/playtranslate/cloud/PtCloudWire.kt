@@ -75,6 +75,40 @@ data class TranslateRequest(
     val context: String?,
 )
 
+/**
+ * The JSON body of `POST /v1/ask` ("Ask" in docs/api.md): one sentence and
+ * one question about it, as parts and never as a prompt, since the server
+ * writes both messages around them. [source] and [target] are the language
+ * codes as the app holds them (`zh-Hant` as it is, never a display name);
+ * the server checks them (1 to 35 letters, digits, hyphens and underscores)
+ * because it writes them into its system instruction, and [target] is the
+ * language the answer is written in. [sentence] and [question] are each at
+ * most [PtCloudBackend.MAX_ASK_CODE_POINTS] code points, and [question] is
+ * a ready-made question's wording without the sentence in it, or the
+ * reader's own words. [askId] is the client's label for the call, echoed
+ * in the answer and in the client's clock line. `debug` is left out: it is
+ * the developer key's.
+ *
+ * No field has a default: [com.playtranslate.PtJson.lenient] leaves out a
+ * value equal to its default.
+ */
+@Serializable
+data class AskRequest(
+    val source: String,
+    val target: String,
+    val sentence: String,
+    val question: String,
+    @SerialName("ask_id") val askId: String,
+    val client: WireClient,
+)
+
+/** A request's `client` object: the app's build, which the server records
+ *  in the call's usage row and reads nothing else from. It must be 1 to 32
+ *  letters, digits, dots, underscores, pluses or hyphens, or the whole call
+ *  is a `422`. */
+@Serializable
+data class WireClient(@SerialName("app_version") val appVersion: String)
+
 // ── Response, errors ───────────────────────────────────────────────────
 
 /**
@@ -82,7 +116,8 @@ data class TranslateRequest(
  * alone: its [error] word tells one answer of a status from another (a 403
  * `no_entitlement` or `terms_required` from any other 403, a 409
  * `terms_outdated` from any other 409, a 410 `service_closed` from any other
- * 410, a 502 `ocr_unavailable` from the host being off, and the sign-in
+ * 410, Ask's own 429 `ask_limit` from the 429 every route shares, a 502
+ * `ocr_unavailable` from the host being off, and the sign-in
  * routes' refusals from each other), and the fields beside it carry what
  * that answer says. Lenient: every field optional, and absent from a Worker
  * that predates it. Never logged but for the [error] word on a sign-in or
@@ -110,6 +145,11 @@ data class EdgeError(
     /** A verify 401 `code_invalid`'s tries left on the code; 0 when no live
      *  code is left (expired, used, replaced, never sent, or out of tries). */
     @SerialName("attempts_left") val attemptsLeft: Int? = null,
+    /** An Ask's 429 `ask_limit`'s seconds until the account's count of
+     *  answers starts again (the time to 00:00 UTC); absent from every
+     *  other answer. A number of any form, so that one written `3600.0`
+     *  cannot fail the body's decode and read as the shared 429. */
+    @SerialName("retry_after_s") val retryAfterS: Double? = null,
 )
 
 // ── Sign-in ────────────────────────────────────────────────────────────
@@ -346,7 +386,39 @@ data class TranslationPart(
 @Serializable
 data class WireTranslation(val id: Int, val translation: String)
 
-/** Why translation failed; [cls] is what the client's cooldown records. */
+/**
+ * The whole body of a `POST /v1/ask` 200 ("Answer" in docs/api.md), only
+ * the fields the app reads; how it settled is
+ * [PtCloudErrors.classifyAsk]'s to say. [answer] is plain text, already
+ * trimmed by the server, shown as it is on `ok` and empty on
+ * `out_of_scope`. [finishReason] is `stop`, or `length` for an answer cut
+ * at the server's output cap, which the app marks as cut, and is absent
+ * when the answer did not finish.
+ * [error] is present only with status `failed`, in the translation routes'
+ * shape. [limits] is the account's count of answers today after this one.
+ * `engine` (the model's id), `usage` and `timings` are not read: the answer
+ * is credited to the service, never to a model.
+ */
+@Serializable
+data class AskAnswer(
+    val part: String,
+    @SerialName("schema_version") val schemaVersion: Int,
+    /** `ok`, `out_of_scope` or `failed`. */
+    val status: String,
+    val answer: String = "",
+    @SerialName("finish_reason") val finishReason: String? = null,
+    val error: WireTranslationError? = null,
+    val limits: WireAskLimits? = null,
+)
+
+/** An Ask answer's count: the account's calls this UTC day after this one,
+ *  and the day's cap, 0 when there is none. */
+@Serializable
+data class WireAskLimits(val used: Int = 0, val cap: Int = 0)
+
+/** Why translation failed; [cls] is what the client's cooldown records.
+ *  Also why an Ask's answer failed ([AskAnswer.error]), where [cls] has one
+ *  more value, `blocked`, and records nothing. */
 @Serializable
 data class WireTranslationError(
     @SerialName("class") val cls: String,

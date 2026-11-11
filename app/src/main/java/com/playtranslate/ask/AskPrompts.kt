@@ -1,6 +1,7 @@
 package com.playtranslate.ask
 
 import com.playtranslate.language.ChineseScriptVariant
+import com.playtranslate.translation.SentenceQuestion
 import com.playtranslate.translation.llm.LlmPromptTemplates
 import com.playtranslate.translation.llm.languageDisplayName
 import java.util.Locale
@@ -29,15 +30,19 @@ sealed class AskQuestion {
 }
 
 /**
- * The Ask section's prompts, as data: one system prompt, a template per
- * ready-made question, and the frame a typed question is put in. Templates
- * share the translation prompts' tokens and substitution
- * ([LlmPromptTemplates.fill]) except `{target}`, which here is the answer's
- * language named in full ([answerLanguage]) where the translation prompts
- * have its English name. `{source}` is the sentence's language's English
- * name, `{text}` the sentence, `{question}` the user's own words. [build]
- * ends every user message with [ANSWER_IN], so both messages say the
- * answer's language.
+ * The Ask section's prompts, as data: one system prompt, the wording of each
+ * ready-made question, and the frames a question is put in with its
+ * sentence. Templates share the translation prompts' tokens and
+ * substitution ([LlmPromptTemplates.fill]) except `{target}`, which here is
+ * the answer's language named in full ([answerLanguage]) where the
+ * translation prompts have its English name. `{source}` is the sentence's
+ * language's English name, `{text}` the sentence, `{question}` the
+ * question's wording. [build] ends every user message with [ANSWER_IN], so
+ * both messages say the answer's language.
+ *
+ * The prompts are for the models that are put one. A service that writes
+ * its own (PlayTranslate Cloud) is sent the question's parts, which [build]
+ * returns beside them ([SentenceQuestion]).
  *
  * Kotlin constants, not string resources, for the reason the translation
  * prompts are: the models are instructed in English, and a localized prompt
@@ -55,34 +60,49 @@ object AskPrompts {
             ANSWER_IN + " Be concise and specific to this sentence. " +
             "Write plain text, without Markdown."
 
+    /** The grammar breakdown's wording ([AskPreset.question]). */
     const val GRAMMAR_BREAKDOWN =
         "Break this {source} sentence down into its grammar points, in the order they appear. " +
             "For each one, quote the part of the sentence it covers, then explain in one or two " +
-            "lines what it does there.\n\n{text}"
+            "lines what it does there."
+
+    /** The frame for a ready-made question: its wording, then the sentence. */
+    const val PRESET = "{question}\n\n{text}"
 
     /** The frame for the user's own question. */
     const val CUSTOM = "{question}\n\nThe sentence ({source}):\n{text}"
 
-    /** The two messages a completion takes. */
-    data class Messages(val system: String, val user: String)
-
-    /** The messages that put [question] to a model about [sentence]. */
-    fun build(question: AskQuestion, sentence: AskSentence): Messages {
+    /**
+     * [question] about [sentence], in the two forms a service takes it
+     * ([SentenceQuestion]): the parts (the pair's codes as [sentence] holds
+     * them, the sentence, and the question's wording without the sentence),
+     * and the two messages made of them.
+     *
+     * The wording is a ready-made question's template filled, or the
+     * user's own words, which are never read as a template. It goes into
+     * the user message as a value, like the sentence, so nothing either
+     * contains is expanded as a token.
+     */
+    fun build(question: AskQuestion, sentence: AskSentence): SentenceQuestion {
         // A value given for {target} takes the place of the English name
         // fill would give it.
         val target = LlmPromptTemplates.TOKEN_TARGET to answerLanguage(sentence.targetLang)
-        val values = hashMapOf(target, LlmPromptTemplates.TOKEN_TEXT to sentence.text)
-        val template = when (question) {
-            is AskQuestion.Preset -> question.preset.prompt
-            is AskQuestion.Custom -> {
-                values[LlmPromptTemplates.TOKEN_QUESTION] = question.text
-                CUSTOM
-            }
+        fun fill(template: String, vararg values: Pair<String, String>) =
+            LlmPromptTemplates.fill(template, sentence.sourceLang, sentence.targetLang, mapOf(target, *values))
+        val (wording, frame) = when (question) {
+            is AskQuestion.Preset -> fill(question.preset.question) to PRESET
+            is AskQuestion.Custom -> question.text to CUSTOM
         }
-        return Messages(
-            system = LlmPromptTemplates.fill(SYSTEM, sentence.sourceLang, sentence.targetLang, mapOf(target)),
-            user = LlmPromptTemplates.fill(
-                "$template\n\n$ANSWER_IN", sentence.sourceLang, sentence.targetLang, values,
+        return SentenceQuestion(
+            source = sentence.sourceLang,
+            target = sentence.targetLang,
+            sentence = sentence.text,
+            question = wording,
+            system = fill(SYSTEM),
+            user = fill(
+                "$frame\n\n$ANSWER_IN",
+                LlmPromptTemplates.TOKEN_QUESTION to wording,
+                LlmPromptTemplates.TOKEN_TEXT to sentence.text,
             ),
         )
     }

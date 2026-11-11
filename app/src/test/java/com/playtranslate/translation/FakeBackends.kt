@@ -233,6 +233,55 @@ internal class FakeCompleterBackend(
     override fun resetCooldown() = cooldownState.resetCooldown()
 }
 
+/** A [SentenceAnswerer] for the registry's completion pass: [answer]
+ *  decides each call from the question it is put (an answer, out of scope,
+ *  a throw), [canAnswer] is fixed, [pausedUntil] is the pause of its answers
+ *  alone, and it takes part in cooldowns through its own [cooldownState].
+ *  Online, as the one real answerer is. Counters say what the registry
+ *  called. */
+internal class FakeAnswererBackend(
+    override val id: BackendId,
+    override val priority: Int,
+    override val displayName: String = "fake-answerer-$id",
+    private val canAnswer: Boolean = true,
+    @Volatile var pausedUntil: Long? = null,
+    val cooldownState: CooldownState = CooldownState(context = null, backendId = id),
+    private val answer: suspend (SentenceQuestion) -> SentenceAnswer = { SentenceAnswer.Text("answer-from-$id") },
+) : TranslationBackend, SentenceAnswerer, Cooldownable {
+    override val status: BackendStatus = BackendStatus.Hidden
+    override val requiresInternet: Boolean = true
+    override val isDegradedFallback: Boolean = false
+    val answerCalls = AtomicInteger(0)
+    val translateCalls = AtomicInteger(0)
+    val recordSuccessCalls = AtomicInteger(0)
+    /** The question of the last [answer] call. */
+    @Volatile var lastQuestion: SentenceQuestion? = null
+
+    override fun isUsable(source: String, target: String): Boolean = true
+    override suspend fun translate(text: String, source: String, target: String): String {
+        translateCalls.incrementAndGet()
+        return "translated-by-$id"
+    }
+
+    override fun canAnswer(): Boolean = canAnswer
+    override fun answersUnavailableUntil(): Long? = pausedUntil
+    override suspend fun answer(question: SentenceQuestion): SentenceAnswer {
+        answerCalls.incrementAndGet()
+        lastQuestion = question
+        return answer.invoke(question)
+    }
+
+    override fun unavailableUntil(): Long? = cooldownState.unavailableUntil()
+    override fun unavailableDescription(): String? = cooldownState.unavailableDescription()
+    override fun unavailableCause(): CooldownCause? = cooldownState.unavailableCause()
+    override fun recordSuccess(attemptStartedAtMs: Long) {
+        recordSuccessCalls.incrementAndGet()
+        cooldownState.recordSuccess(attemptStartedAtMs)
+    }
+    override fun onConnectivityRestored(): Boolean = cooldownState.onConnectivityRestored()
+    override fun resetCooldown() = cooldownState.resetCooldown()
+}
+
 /**
  * Minimal in-memory [SharedPreferences] for tests that need to
  * construct production classes that take a SharedPreferences without

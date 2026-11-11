@@ -6,7 +6,7 @@ import com.playtranslate.R
 
 /**
  * One ready-made question the Ask section offers about a sentence: a chip
- * to tap, and the prompt it sends.
+ * to tap, and the question it asks.
  */
 data class AskPreset(
     /** Stable identity. The recency order ([AskPresets]) is keyed by it and
@@ -14,8 +14,11 @@ data class AskPreset(
     val id: String,
     /** The chip's text, and the title over the answer. */
     val title: String,
-    /** The user message, as a template ([AskPrompts]' tokens). */
-    val prompt: String,
+    /** The question's wording, as a template of [AskPrompts]' language
+     *  tokens, without the sentence in it: [AskPrompts.build] puts the
+     *  sentence after it for a model that is put a prompt, and a service
+     *  that takes a question's parts is sent the wording alone. */
+    val question: String,
 )
 
 /**

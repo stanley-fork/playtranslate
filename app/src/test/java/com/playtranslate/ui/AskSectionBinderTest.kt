@@ -33,6 +33,7 @@ import com.playtranslate.translation.BackendFailure
 import com.playtranslate.translation.BackendFailureKind
 import com.playtranslate.translation.CompletionFailedException
 import com.playtranslate.translation.OpenAiRateLimitException
+import com.playtranslate.translation.SentenceAnswer
 import com.playtranslate.translation.TranslationBackend
 import com.playtranslate.translation.TranslationBackendRegistry
 import kotlinx.coroutines.CompletableDeferred
@@ -205,8 +206,8 @@ class AskSectionBinderTest {
         activity.setContentView(root)
         // As the registry's pass does, the fake names its first pick
         // (Gemini) before it first waits.
-        session = AskSession(scope) { _, user, onAttempt ->
-            val call = Call(user, onAttempt)
+        session = AskSession(scope) { asked, onAttempt ->
+            val call = Call(asked.user, onAttempt)
             calls += call
             onAttempt(gemini)
             call.reply.await()
@@ -271,7 +272,7 @@ class AskSectionBinderTest {
     }
 
     private fun answer(text: String, by: TranslationBackend = gemini) {
-        calls.last().reply.complete(TranslationBackendRegistry.Completion(text, by))
+        calls.last().reply.complete(TranslationBackendRegistry.Completion(SentenceAnswer.Text(text), by))
         settle()
     }
 
@@ -997,6 +998,69 @@ class AskSectionBinderTest {
         assertEquals(color(R.attr.ptTextMuted), body.currentTextColor)
         assertTrue(shown(retry))
         assertFalse(shown(footer))
+    }
+
+    // ── A cut answer ────────────────────────────────────────────────────
+
+    @Test
+    fun `an answer the service cut short says so over Answered by, and the next whole answer says only who answered`() {
+        start()
+        tap(chips().first())
+        val asked = (session.state.value as AskState.Asking).question
+        val cloud = NamedBackend("PlayTranslate Cloud", online = true)
+        val by = activity.getString(R.string.ask_answered_by, "PlayTranslate Cloud")
+
+        calls.last().reply.complete(
+            TranslationBackendRegistry.Completion(SentenceAnswer.Text("Ga marks the cat as the one who", cut = true), cloud),
+        )
+        settle()
+
+        assertEquals(
+            AskState.Answered(asked, "Ga marks the cat as the one who", "PlayTranslate Cloud", cut = true),
+            session.state.value,
+        )
+        assertEquals("the text as it came", "Ga marks the cat as the one who", body.text.toString())
+        assertEquals(color(R.attr.ptText), body.currentTextColor)
+        assertTrue(shown(footer))
+        assertEquals(activity.getString(R.string.ask_answer_cut) + "\n" + by, footer.text.toString())
+        assertFalse("an answer, so nothing to try again", shown(retry))
+
+        // The same footer view serves the next answer: no note left behind.
+        tap(close)
+        tap(chips().first())
+        answer("Ga marks the cat as the one who ate.", by = cloud)
+        assertEquals(by, footer.text.toString())
+    }
+
+    // ── Out of scope ────────────────────────────────────────────────────
+
+    @Test
+    fun `a question the service calls out of scope shows the app's own line naming it, with no Try again and no Answered by`() {
+        assertNotEquals(color(R.attr.ptTextMuted), color(R.attr.ptText))
+        start()
+        tap(chips().first())
+        val asked = (session.state.value as AskState.Asking).question
+        val cloud = NamedBackend("PlayTranslate Cloud", online = true)
+
+        calls.last().reply.complete(TranslationBackendRegistry.Completion(SentenceAnswer.OutOfScope, cloud))
+        settle()
+
+        assertEquals(AskState.OutOfScope(asked, "PlayTranslate Cloud"), session.state.value)
+        assertTrue("a question on screen keeps the card up", shown(card))
+        assertTrue(shown(answerGroup))
+        assertFalse(shown(idleGroup))
+        assertEquals(asked.title, title.text.toString())
+        assertEquals(activity.getString(R.string.ask_out_of_scope, "PlayTranslate Cloud"), body.text.toString())
+        assertTrue("the line names who declined: ${body.text}", body.text.contains("PlayTranslate Cloud"))
+        assertEquals(color(R.attr.ptTextMuted), body.currentTextColor)
+        assertFalse("nothing to try again", shown(retry))
+        assertFalse("not an answer, so no Answered by", shown(footer))
+        assertEquals("the Text size, the eye and X, and no Try again", listOf(textSizeButton, eye, close), navViews())
+        assertEquals("nobody was asked again", 1, calls.size)
+
+        tap(close)
+        assertEquals(AskState.Idle, session.state.value)
+        assertTrue("X brings the questions back", shown(idleGroup))
     }
 
     // ── The spoiler line ────────────────────────────────────────────────

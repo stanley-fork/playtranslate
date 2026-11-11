@@ -30,7 +30,8 @@ internal class ItemLines {
 /**
  * PlayTranslate Cloud's two clock lines per frame (docs/api.md, "Clocks";
  * docs/client-latency-handoff.md, item 5; docs/client-cache-handoff.md,
- * item 5) and one per translate call ([translateLine]), keyed by the frame
+ * item 5), one per translate call ([translateLine]) and one per Ask
+ * ([askLine]), keyed by the frame
  * id the client chose, which carries no content. Numbers and status names
  * only: never the key, the URL, a body, or any recognized or translated
  * text. A value the frame did not produce prints as a dash.
@@ -131,6 +132,33 @@ internal object PtCloudClocks {
         connectionReused: Boolean?,
     ): String =
         "translate id=$frameId n=$texts chars=$codePoints ms=$totalMs status=$status " +
+            "reused=${connectionReused ?: DASH}"
+
+    /**
+     * The line of one `POST /v1/ask` call ([PtCloudClient.postAsk]), however
+     * it ended. [sentenceCodePoints] and [questionCodePoints] are the sizes
+     * of the two texts it sent (the server's measure), never the texts;
+     * [totalMs] is the send to the answer read, or to the failure. [status]
+     * is the answer's `status`, `http<code>` for a non-200, `unreadable` for
+     * a 200 that did not decode, and the exception's class name for a
+     * transport failure. [finish] is the answer's `finish_reason` (`length`
+     * is an answer cut at the server's output cap) and [limits] the
+     * account's count of answers today against its cap, each a dash when the
+     * call has none. [connectionReused] is the HTTP stack's (null when it
+     * never reported it).
+     */
+    fun askLine(
+        askId: String,
+        sentenceCodePoints: Int,
+        questionCodePoints: Int,
+        totalMs: Long,
+        status: String,
+        finish: String?,
+        limits: WireAskLimits?,
+        connectionReused: Boolean?,
+    ): String =
+        "ask id=$askId sentence=$sentenceCodePoints question=$questionCodePoints ms=$totalMs status=$status " +
+            "finish=${finish ?: DASH} used=${limits?.let { "${it.used}/${it.cap}" } ?: DASH} " +
             "reused=${connectionReused ?: DASH}"
 
     private fun reworded(itemTexts: Map<Int, String>, final: TranslationPart): Int {

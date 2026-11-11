@@ -920,11 +920,25 @@
          answered (e.g. Gemini). -->
     <string name="ask_answered_by">Answered by <xliff:g id="service_name" example="Gemini">%1$s</xliff:g></string>
 
+    <!-- A line under an answer in the Ask section, above "Answered by", when
+         the service stopped the AI model at its limit on how long an answer
+         may be: the text above ends before the answer was finished, often
+         in the middle of a sentence. -->
+    <string name="ask_answer_cut">This answer reached the length limit and was cut off.</string>
+
     <!-- Warning line above an answer in the Ask section while the user has
          the Translation section hidden (they are reading without the
          translation): an answer about the sentence can reveal what it
          means. -->
     <string name="ask_spoiler_warning">⚠ Answers may give away the hidden translation.</string>
+
+    <!-- Shown in the Ask section's answer area, in place of an answer, when
+         the service that was asked declined the question because it is not
+         about the sentence on screen (the user asked for something else,
+         such as general knowledge or writing). It says what that service
+         does answer. %1$s = the display name of the service that declined
+         (e.g. PlayTranslate Cloud). -->
+    <string name="ask_out_of_scope"><xliff:g id="service_name" example="PlayTranslate Cloud">%1$s</xliff:g> only answers questions about this sentence, such as its meaning, grammar or vocabulary.</string>
 
     <!-- First line of the Ask section's answer area when no AI model
          answered the question. A second line may follow it with the reason

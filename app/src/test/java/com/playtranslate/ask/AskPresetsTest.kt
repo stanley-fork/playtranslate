@@ -31,10 +31,10 @@ class AskPresetsTest {
 
     private val ctx: Context = ApplicationProvider.getApplicationContext()
 
-    private val a = AskPreset("a", "A", "a {text}")
-    private val b = AskPreset("b", "B", "b {text}")
-    private val c = AskPreset("c", "C", "c {text}")
-    private val d = AskPreset("d", "D", "d {text}")
+    private val a = AskPreset("a", "A", "a?")
+    private val b = AskPreset("b", "B", "b?")
+    private val c = AskPreset("c", "C", "c?")
+    private val d = AskPreset("d", "D", "d?")
     private val declared = listOf(a, b, c, d)
 
     private fun sp() = ctx.getSharedPreferences("playtranslate_prefs", Context.MODE_PRIVATE)
@@ -116,6 +116,7 @@ class AskPresetsTest {
 
         requireNotNull(grammar) { "Grammar breakdown missing from AskPresets.ordered" }
         assertTrue("a title to show", grammar.title.isNotBlank())
-        assertTrue("a prompt that carries the sentence: ${grammar.prompt}", grammar.prompt.contains("{text}"))
+        assertTrue("a wording to ask", grammar.question.isNotBlank())
+        assertFalse("the wording leaves the sentence out: ${grammar.question}", grammar.question.contains("{text}"))
     }
 }

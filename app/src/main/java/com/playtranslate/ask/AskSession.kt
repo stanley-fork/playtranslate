@@ -2,6 +2,8 @@ package com.playtranslate.ask
 
 import com.playtranslate.translation.BackendFailure
 import com.playtranslate.translation.CompletionFailedException
+import com.playtranslate.translation.SentenceAnswer
+import com.playtranslate.translation.SentenceQuestion
 import com.playtranslate.translation.TranslationBackend
 import com.playtranslate.translation.TranslationBackendRegistry
 import com.playtranslate.translation.classifyBackendFailure
@@ -31,7 +33,17 @@ sealed class AskState {
         val text: String,
         /** The display name of the service or model that answered. */
         val answeredBy: String,
+        /** The service stopped the answer at its length limit, so [text]
+         *  ends before the answer does ([SentenceAnswer.Text.cut]). */
+        val cut: Boolean = false,
     ) : AskState()
+
+    /** The service asked said the question is about something other than
+     *  the sentence, which is all it answers
+     *  ([SentenceAnswer.OutOfScope]). Its word on the question, so nothing
+     *  is tried again and no other service was asked; [answeredBy] is its
+     *  display name. */
+    data class OutOfScope(val question: AskQuestion, val answeredBy: String) : AskState()
 
     /** Nothing answered. [service] and [failure] say which online service
      *  refused first and how, for the reason line; both null when there is
@@ -60,15 +72,14 @@ sealed class AskState {
  */
 class AskSession(
     private val scope: CoroutineScope,
-    /** Puts a prompt to the user's LLM, naming each one to [onAttempt] as
-     *  it starts asking it. The registry's pass in production; a test
-     *  substitutes it. */
+    /** Puts a question to the user's services, naming each one to
+     *  [onAttempt] as it starts asking it. The registry's pass in
+     *  production; a test substitutes it. */
     private val complete: suspend (
-        system: String,
-        user: String,
+        question: SentenceQuestion,
         onAttempt: (TranslationBackend) -> Unit,
     ) -> TranslationBackendRegistry.Completion =
-        { system, user, onAttempt -> TranslationBackendRegistry.complete(system, user, onAttempt) },
+        { question, onAttempt -> TranslationBackendRegistry.complete(question, onAttempt) },
 ) {
     private val _state = MutableStateFlow<AskState>(AskState.Idle)
     val state: StateFlow<AskState> = _state.asStateFlow()
@@ -96,8 +107,7 @@ class AskSession(
         _state.value = AskState.Asking(question)
         job = scope.launch {
             val next = try {
-                val messages = AskPrompts.build(question, about)
-                val answer = complete(messages.system, messages.user) { backend ->
+                val completion = complete(AskPrompts.build(question, about)) { backend ->
                     // Named only while this request is the live one, by the
                     // same promise as the write below: a pass that goes on
                     // after its cancel (a completer that returned or failed
@@ -105,7 +115,11 @@ class AskSession(
                     ensureActive()
                     _state.value = AskState.Asking(question, backend.displayName)
                 }
-                AskState.Answered(question, answer.text.trim(), answer.backend.displayName)
+                val by = completion.backend.displayName
+                when (val answer = completion.answer) {
+                    is SentenceAnswer.Text -> AskState.Answered(question, answer.text.trim(), by, cut = answer.cut)
+                    SentenceAnswer.OutOfScope -> AskState.OutOfScope(question, by)
+                }
             } catch (e: CancellationException) {
                 throw e
             } catch (e: CompletionFailedException) {

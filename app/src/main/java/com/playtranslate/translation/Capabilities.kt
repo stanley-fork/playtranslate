@@ -197,9 +197,10 @@ class StructuralFailureException(
 /**
  * Backends that can answer a free-form prompt: a system message and a user
  * message in, the model's reply out, untouched. What the Ask section runs
- * on. It is a capability of chat LLMs alone: a machine-translation service
- * does not implement it, and neither does a model fine-tuned for
- * translation only.
+ * on, beside the services that take a question's parts instead
+ * ([SentenceAnswerer]). It is a capability of chat LLMs alone: a
+ * machine-translation service does not implement it, and neither does a
+ * model fine-tuned for translation only.
  *
  * A [complete] call differs from a translation in what its failure may do
  * to the service's standing with the translation waterfall. What the
@@ -236,11 +237,83 @@ interface PromptCompleter {
 }
 
 /**
- * Thrown by [TranslationBackendRegistry.complete] when no [PromptCompleter]
- * answered. [backend] is the first one that was tried and [cause] what it
- * threw, which is the failure worth telling the user about (their
- * first-choice service); both are null when nothing was tried (every
- * completer in a cooldown, or none set up).
+ * A question about a sentence, as the Ask section puts it to the user's
+ * services ([TranslationBackendRegistry.complete]), in the two forms a
+ * service takes one: its parts, for a service that writes the prompt itself
+ * ([SentenceAnswerer]), and the two messages made of those parts, for a
+ * model that is put a prompt ([PromptCompleter]). One value, so that both
+ * forms are always the same question.
+ */
+data class SentenceQuestion(
+    /** The sentence's language, as the code the app holds ("ja"), never a
+     *  display name. */
+    val source: String,
+    /** The language the answer is written in, as the code the app holds,
+     *  with its script where the language has two ("zh-Hant"). */
+    val target: String,
+    val sentence: String,
+    /** The question's wording without the sentence in it: a ready-made
+     *  question's, or the user's own words. */
+    val question: String,
+    /** The prompt made of the parts above. */
+    val system: String,
+    val user: String,
+)
+
+/** What a service said to a [SentenceQuestion]. */
+sealed interface SentenceAnswer {
+    /** The answer, as the model wrote it. [cut] says the service stopped
+     *  the model at its limit on an answer's length, so the text ends
+     *  before the answer does; false where the answer ended by itself, and
+     *  where the service cannot say (a [PromptCompleter]'s reply is only
+     *  its text). */
+    data class Text(val text: String, val cut: Boolean = false) : SentenceAnswer
+
+    /** The service judged the question to be about something other than the
+     *  sentence, and answers no such question. Its answer, not a failure:
+     *  asking again would get the same, and it is the service's word on the
+     *  question, so no other service is asked in its place. */
+    data object OutOfScope : SentenceAnswer
+}
+
+/**
+ * Backends that answer a question about a sentence from its parts
+ * ([SentenceQuestion]'s pair, sentence and question) and write the prompt
+ * themselves: the Ask section's other kind of answerer, beside the chat LLMs
+ * that are put a prompt ([PromptCompleter]). PlayTranslate Cloud is one
+ * (`POST /v1/ask`). Unlike a prompt completer it answers within a scope of
+ * its own and can say a question is outside it ([SentenceAnswer.OutOfScope]).
+ *
+ * What a failure of [answer] does to the service's standing with the
+ * translation waterfall is the backend's own business, as it is for
+ * [PromptCompleter.complete]. **Cancellation** is that contract's too: a
+ * cancelled call is stopped, throws
+ * [kotlinx.coroutines.CancellationException], never a failure, and records
+ * nothing.
+ */
+interface SentenceAnswerer {
+    /** Switched on and set up enough to try, as
+     *  [PromptCompleter.canComplete] says of a completer. */
+    fun canAnswer(): Boolean
+
+    /** The epoch-ms time until which this service takes no question, for a
+     *  reason that is its answers' alone (a cap on how many it gives), or
+     *  null when there is none. Apart from [Cooldownable.unavailableUntil],
+     *  which says when the service as a whole is down, its translations
+     *  included: this one keeps a question from being put and nothing else. */
+    fun answersUnavailableUntil(): Long?
+
+    /** The service's answer to [question]. Throws as a translation call
+     *  does ([ClassifiedFailure] where the failure is understood). */
+    suspend fun answer(question: SentenceQuestion): SentenceAnswer
+}
+
+/**
+ * Thrown by [TranslationBackendRegistry.complete] when no service answered.
+ * [backend] is the first one that was tried and [cause] what it threw, which
+ * is the failure worth telling the user about (their first-choice service);
+ * both are null when nothing was tried (every one in a cooldown, or none
+ * set up).
  */
 class CompletionFailedException(
     val backend: TranslationBackend?,

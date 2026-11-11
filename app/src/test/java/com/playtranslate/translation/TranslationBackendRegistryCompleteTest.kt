@@ -13,17 +13,22 @@ import java.io.IOException
 import java.util.concurrent.atomic.AtomicLong
 
 /**
- * [TranslationBackendRegistry.complete], the one pass that puts a free-form
- * prompt to the user's LLMs, and [TranslationBackendRegistry.hasCompleter],
- * the question the Ask section asks before it takes one. Pinned here:
+ * [TranslationBackendRegistry.complete], the one pass that puts a question
+ * about a sentence to the user's services, and
+ * [TranslationBackendRegistry.hasCompleter], the question the Ask section
+ * asks before it takes one. Pinned here:
  *  - which backends the pass tries (prompt completers that can complete and
- *    are not in a cooldown) and in what order (the registry's, setOrder
- *    included);
- *  - who it names as it goes (each completer as it starts asking it, never
+ *    answerers that can answer, not in a cooldown, and for an answerer not
+ *    in a pause of its answers alone) and in what order (the registry's,
+ *    setOrder included);
+ *  - what each is put: a completer the question's two messages, an answerer
+ *    the question whole, with its parts;
+ *  - who it names as it goes (each one as it starts asking it, never
  *    one it skips), and a cancellation thrown there ending it;
  *  - how it ends: the first non-blank answer wins and is returned with its
- *    backend, a failure or a blank falls through, cancellation stops it, and
- *    a pass nobody answered names the FIRST completer tried and what it
+ *    backend, an answerer's "out of scope" is an answer and ends the pass
+ *    too, a failure or a blank falls through, cancellation stops it, and
+ *    a pass nobody answered names the FIRST one tried and what it
  *    threw (or nothing, when nothing was tried);
  *  - what it leaves behind: recordSuccess on the winner only, and never a
  *    report to the translation error pill's listener (contrasted with a
@@ -46,9 +51,16 @@ class TranslationBackendRegistryCompleteTest {
     private fun failing(id: String, priority: Int, e: Exception) =
         FakeCompleterBackend(id = id, priority = priority, answer = { _, _ -> throw e })
 
+    /** A question whose two messages are [system] and [user]; its parts are
+     *  the same in every test. */
+    private fun question(system: String = "s", user: String = "u") = SentenceQuestion(
+        source = "ja", target = "zh-Hant", sentence = "the sentence", question = "the wording",
+        system = system, user = user,
+    )
+
     /** Runs the pass and returns what it threw, failing if it answered. */
     private fun completeFailure(): Throwable {
-        val outcome = runCatching { runBlocking { TranslationBackendRegistry.complete("system", "user") } }
+        val outcome = runCatching { runBlocking { TranslationBackendRegistry.complete(question("system", "user")) } }
         return outcome.exceptionOrNull()
             ?: throw AssertionError("expected the pass to throw, ${outcome.getOrNull()?.backend?.id} answered")
     }
@@ -78,6 +90,18 @@ class TranslationBackendRegistryCompleteTest {
             FakeCompleterBackend(id = "qwen", priority = 30, requiresInternet = false),
         ))
         assertTrue("one completer that can complete is enough", TranslationBackendRegistry.hasCompleter())
+
+        TranslationBackendRegistry.init(listOf(
+            FakeAnswererBackend(id = "cloud-off", priority = 10, canAnswer = false),
+            FakeOnlineBackend(id = "deepl", priority = 20),
+        ))
+        assertFalse("an answerer that says no is no service to ask", TranslationBackendRegistry.hasCompleter())
+
+        TranslationBackendRegistry.init(listOf(
+            FakeAnswererBackend(id = "cloud", priority = 10),
+            FakeOnlineBackend(id = "deepl", priority = 20),
+        ))
+        assertTrue("one answerer that can answer is enough", TranslationBackendRegistry.hasCompleter())
     }
 
     // ── order and the first answer ───────────────────────────────────────
@@ -88,9 +112,9 @@ class TranslationBackendRegistryCompleteTest {
         val third = FakeCompleterBackend(id = "third", priority = 30, requiresInternet = false)
         TranslationBackendRegistry.init(listOf(third, second, first)) // registered out of order
 
-        val result = TranslationBackendRegistry.complete("the system", "the user")
+        val result = TranslationBackendRegistry.complete(question("the system", "the user"))
 
-        assertEquals("answer-from-first", result.text)
+        assertEquals(SentenceAnswer.Text("answer-from-first"), result.answer)
         assertSame(first, result.backend)
         assertEquals("the system" to "the user", first.lastPrompt)
         assertEquals("later completers are not called", 0, second.completeCalls.get())
@@ -102,11 +126,11 @@ class TranslationBackendRegistryCompleteTest {
         val userFirst = FakeCompleterBackend(id = "user-first", priority = 20)
         TranslationBackendRegistry.init(listOf(byPriority, userFirst))
         // The precondition: without an override the priority order decides.
-        assertSame(byPriority, TranslationBackendRegistry.complete("s", "u").backend)
+        assertSame(byPriority, TranslationBackendRegistry.complete(question()).backend)
 
         TranslationBackendRegistry.setOrder(listOf("user-first"))
 
-        val result = TranslationBackendRegistry.complete("s", "u")
+        val result = TranslationBackendRegistry.complete(question())
         assertSame(userFirst, result.backend)
         assertEquals(1, byPriority.completeCalls.get())
     }
@@ -118,7 +142,7 @@ class TranslationBackendRegistryCompleteTest {
         val ready = FakeCompleterBackend(id = "ready", priority = 40)
         TranslationBackendRegistry.init(listOf(translationOnly, cannot, cooled, ready))
 
-        val result = TranslationBackendRegistry.complete("s", "u")
+        val result = TranslationBackendRegistry.complete(question())
 
         assertSame(ready, result.backend)
         assertEquals("a translation-only backend is not asked to translate the prompt", 0, translationOnly.translateCalls.get())
@@ -135,8 +159,107 @@ class TranslationBackendRegistryCompleteTest {
         val next = FakeCompleterBackend(id = "next", priority = 20)
         TranslationBackendRegistry.init(listOf(expired, next))
 
-        assertSame(expired, TranslationBackendRegistry.complete("s", "u").backend)
+        assertSame(expired, TranslationBackendRegistry.complete(question()).backend)
         assertEquals(0, next.completeCalls.get())
+    }
+
+    // ── answerers ────────────────────────────────────────────────────────
+
+    @Test fun `an answerer is put the question whole and a completer its two messages`() = runBlocking<Unit> {
+        val asked = question("the system", "the user")
+        val answerer = FakeAnswererBackend(id = "cloud", priority = 10)
+        TranslationBackendRegistry.init(listOf(answerer))
+
+        val result = TranslationBackendRegistry.complete(asked)
+
+        assertSame(answerer, result.backend)
+        assertEquals(SentenceAnswer.Text("answer-from-cloud"), result.answer)
+        assertEquals("the parts, as they were given", asked, answerer.lastQuestion)
+        assertEquals("never asked to translate the question", 0, answerer.translateCalls.get())
+
+        // The same question, to a completer after an answerer that fails.
+        val failingAnswerer = FakeAnswererBackend(id = "cloud", priority = 10, answer = { throw IOException("synthetic") })
+        val completer = FakeCompleterBackend(id = "gemini", priority = 20)
+        TranslationBackendRegistry.init(listOf(failingAnswerer, completer))
+
+        val next = TranslationBackendRegistry.complete(asked)
+
+        assertSame("an answerer's failure falls through", completer, next.backend)
+        assertEquals("the system" to "the user", completer.lastPrompt)
+        assertEquals(1, failingAnswerer.answerCalls.get())
+        assertEquals(0, failingAnswerer.recordSuccessCalls.get())
+    }
+
+    @Test fun `an answerer's cut answer is returned as it said it, and a completer's reply is never cut`() = runBlocking<Unit> {
+        val cut = FakeAnswererBackend(id = "cloud", priority = 10, answer = { SentenceAnswer.Text("Cut off mid", cut = true) })
+        val next = FakeCompleterBackend(id = "gemini", priority = 20)
+        TranslationBackendRegistry.init(listOf(cut, next))
+
+        val result = TranslationBackendRegistry.complete(question())
+
+        assertEquals(SentenceAnswer.Text("Cut off mid", cut = true), result.answer)
+        assertSame(cut, result.backend)
+        assertEquals("an answer, so nobody else is asked", 0, next.completeCalls.get())
+        assertEquals(1, cut.recordSuccessCalls.get())
+
+        TranslationBackendRegistry.init(listOf(next))
+        assertEquals(SentenceAnswer.Text("answer-from-gemini", cut = false), TranslationBackendRegistry.complete(question()).answer)
+    }
+
+    @Test fun `out of scope is an answer, so the pass ends with it and nobody else is asked`() = runBlocking<Unit> {
+        val named = mutableListOf<String>()
+        val answerer = FakeAnswererBackend(id = "cloud", priority = 10, answer = { SentenceAnswer.OutOfScope })
+        val next = FakeCompleterBackend(id = "gemini", priority = 20)
+        TranslationBackendRegistry.init(listOf(answerer, next))
+
+        val result = TranslationBackendRegistry.complete(question()) { named += it.id }
+
+        assertEquals(SentenceAnswer.OutOfScope, result.answer)
+        assertSame(answerer, result.backend)
+        assertEquals("no fall-through to the next service", 0, next.completeCalls.get())
+        assertEquals(listOf("cloud"), named)
+        assertEquals("the service answered", 1, answerer.recordSuccessCalls.get())
+    }
+
+    @Test fun `a blank text from an answerer is a failure and falls through`() = runBlocking<Unit> {
+        val blank = FakeAnswererBackend(id = "cloud", priority = 10, answer = { SentenceAnswer.Text("  \n") })
+        val next = FakeCompleterBackend(id = "gemini", priority = 20)
+        TranslationBackendRegistry.init(listOf(blank, next))
+
+        assertSame(next, TranslationBackendRegistry.complete(question()).backend)
+        assertEquals(1, blank.answerCalls.get())
+        assertEquals(0, blank.recordSuccessCalls.get())
+    }
+
+    @Test fun `an answerer is skipped, unnamed, while its answers are paused or its cooldown runs, and asked once neither does`() = runBlocking<Unit> {
+        val named = mutableListOf<String>()
+        val answerer = FakeAnswererBackend(id = "cloud", priority = 10)
+        val next = FakeCompleterBackend(id = "gemini", priority = 20)
+        TranslationBackendRegistry.init(listOf(answerer, next))
+        suspend fun ask() = TranslationBackendRegistry.complete(question()) { named += it.id }.backend
+
+        // A pause of its answers alone: no cooldown, so a translation still
+        // goes to it.
+        answerer.pausedUntil = System.currentTimeMillis() + 60_000
+        assertSame(next, ask())
+        assertEquals(0, answerer.answerCalls.get())
+        assertEquals(listOf("gemini"), named)
+        assertNull("the pause is no cooldown", answerer.unavailableUntil())
+        assertSame(answerer, TranslationBackendRegistry.translate("hi", "ja", "en").backend)
+
+        // A pause that has passed skips nothing.
+        named.clear()
+        answerer.pausedUntil = System.currentTimeMillis() - 1
+        assertSame(answerer, ask())
+        assertEquals(listOf("cloud"), named)
+
+        // The cooldown its translations share skips it too, the pause that
+        // has passed still standing beside it: the later of the two decides.
+        named.clear()
+        answerer.cooldownState.recordParsedFailure(System.currentTimeMillis() + 60_000, "Rate limited")
+        assertSame(next, ask())
+        assertEquals(1, answerer.answerCalls.get())
+        assertEquals(listOf("gemini"), named)
     }
 
     // ── naming who is asked ──────────────────────────────────────────────
@@ -163,7 +286,7 @@ class TranslationBackendRegistryCompleteTest {
             FakeOnlineBackend(id = "deepl", priority = 5), cannot, cooled, broken, blank, answering, unused,
         ))
 
-        val result = TranslationBackendRegistry.complete("s", "u") { named += it.id }
+        val result = TranslationBackendRegistry.complete(question()) { named += it.id }
 
         assertSame(answering, result.backend)
         assertEquals("the tried, in order; never the skipped or the unreached", listOf("broken", "blank", "answering"), named)
@@ -174,7 +297,7 @@ class TranslationBackendRegistryCompleteTest {
         // A pass with nothing to try names nobody.
         TranslationBackendRegistry.init(listOf(cannot, cooled))
         named.clear()
-        val thrown = runCatching { TranslationBackendRegistry.complete("s", "u") { named += it.id } }.exceptionOrNull()
+        val thrown = runCatching { TranslationBackendRegistry.complete(question()) { named += it.id } }.exceptionOrNull()
         assertTrue("$thrown", thrown is CompletionFailedException)
         assertEquals(emptyList<String>(), named)
     }
@@ -186,7 +309,7 @@ class TranslationBackendRegistryCompleteTest {
         TranslationBackendRegistry.init(listOf(first, second))
 
         val thrown = runCatching {
-            runBlocking { TranslationBackendRegistry.complete("s", "u") { throw CancellationException("put away") } }
+            runBlocking { TranslationBackendRegistry.complete(question()) { throw CancellationException("put away") } }
         }.exceptionOrNull()
 
         assertTrue("$thrown", thrown is CancellationException)
@@ -203,10 +326,10 @@ class TranslationBackendRegistryCompleteTest {
         val answering = FakeCompleterBackend(id = "answering", priority = 30, requiresInternet = false)
         TranslationBackendRegistry.init(listOf(broken, crashing, answering))
 
-        val result = TranslationBackendRegistry.complete("s", "u")
+        val result = TranslationBackendRegistry.complete(question())
 
         assertSame(answering, result.backend)
-        assertEquals("answer-from-answering", result.text)
+        assertEquals(SentenceAnswer.Text("answer-from-answering"), result.answer)
         assertEquals(1, broken.completeCalls.get())
         assertEquals(1, crashing.completeCalls.get())
     }
@@ -217,7 +340,7 @@ class TranslationBackendRegistryCompleteTest {
         val answering = FakeCompleterBackend(id = "answering", priority = 30)
         TranslationBackendRegistry.init(listOf(blank, empty, answering))
 
-        val result = TranslationBackendRegistry.complete("s", "u")
+        val result = TranslationBackendRegistry.complete(question())
 
         assertSame(answering, result.backend)
         assertEquals(1, blank.completeCalls.get())
@@ -243,7 +366,7 @@ class TranslationBackendRegistryCompleteTest {
         val unused = FakeCompleterBackend(id = "unused", priority = 30)
         TranslationBackendRegistry.init(listOf(broken, winner, unused))
 
-        TranslationBackendRegistry.complete("s", "u")
+        TranslationBackendRegistry.complete(question())
 
         assertEquals(0, broken.recordSuccessCalls.get())
         assertEquals(1, winner.recordSuccessCalls.get())
@@ -263,7 +386,7 @@ class TranslationBackendRegistryCompleteTest {
         assertNull("precondition: the cooldown has run out", winner.unavailableUntil())
         TranslationBackendRegistry.init(listOf(winner))
 
-        TranslationBackendRegistry.complete("s", "u")
+        TranslationBackendRegistry.complete(question())
 
         // Without the clear, the next failure would take the second rung
         // (10 minutes); after it, the first (1 minute).
@@ -355,7 +478,7 @@ class TranslationBackendRegistryCompleteTest {
         assertEquals("a translation pass reports", 1, reports.size)
         reports.clear()
 
-        runBlocking { TranslationBackendRegistry.complete("s", "u") }
+        runBlocking { TranslationBackendRegistry.complete(question()) }
         assertTrue("a winning completion reports nothing: $reports", reports.isEmpty())
 
         TranslationBackendRegistry.init(listOf(

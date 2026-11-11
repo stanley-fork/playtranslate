@@ -40,9 +40,11 @@ import com.playtranslate.translation.TranslationError
  * nothing is asked, the questions: the presets as chips, a hairline, then
  * the field and its send button. Otherwise, the question on screen: its
  * title with an X that puts it away, in a row as tall as the chips', then
- * who is being asked, the answer and who gave it, or the failure and Try
- * again. An answer takes the questions' place rather than sitting under
- * them; X brings them back.
+ * who is being asked, the answer and who gave it (and that it was cut
+ * short, when the service says so), the service's word that
+ * the question is not one it answers, or the failure and Try again. An
+ * answer takes the questions' place rather than sitting under them; X
+ * brings them back.
  *
  * Hidden is DERIVED, never stored ([isHidden]): the eye's pref AND a session
  * with nothing on screen. A collapsed section shows its card exactly while a
@@ -262,8 +264,12 @@ class AskSectionBinder(
                 R.attr.ptText,
             )
             is AskState.Answered -> showQuestion(
-                state.question, state.text, R.attr.ptText,
-                footer = ctx.getString(R.string.ask_answered_by, state.answeredBy),
+                state.question, state.text, R.attr.ptText, footer = answerFooter(state),
+            )
+            // The service's word on the question, in the app's own words:
+            // no Try again, since asking again would get the same.
+            is AskState.OutOfScope -> showQuestion(
+                state.question, ctx.getString(R.string.ask_out_of_scope, state.answeredBy), R.attr.ptTextMuted,
             )
             is AskState.Failed -> showQuestion(
                 state.question, failureText(state), R.attr.ptTextMuted, retry = true,
@@ -390,6 +396,14 @@ class AskSectionBinder(
         text.codePoints().noneMatch {
             Character.isLetter(it) && Character.UnicodeScript.of(it) != Character.UnicodeScript.LATIN
         }
+
+    /** The lines under an answer: who gave it, and first, for an answer the
+     *  service cut at its length limit, a line saying so, so that a text
+     *  that stops mid-sentence does not read as the whole answer. */
+    private fun answerFooter(answered: AskState.Answered): String {
+        val by = ctx.getString(R.string.ask_answered_by, answered.answeredBy)
+        return if (answered.cut) ctx.getString(R.string.ask_answer_cut) + "\n" + by else by
+    }
 
     /** The failure in words: the generic line, and under it the service's
      *  reason when the session says which online service refused and how. */

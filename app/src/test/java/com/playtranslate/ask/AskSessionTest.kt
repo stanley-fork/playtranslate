@@ -5,6 +5,8 @@ import com.playtranslate.translation.BackendFailureKind
 import com.playtranslate.translation.CompletionFailedException
 import com.playtranslate.translation.FakeCompleterBackend
 import com.playtranslate.translation.OpenAiRateLimitException
+import com.playtranslate.translation.SentenceAnswer
+import com.playtranslate.translation.SentenceQuestion
 import com.playtranslate.translation.StructuralFailureException
 import com.playtranslate.translation.TranslationBackend
 import com.playtranslate.translation.TranslationBackendRegistry.Completion
@@ -28,9 +30,10 @@ import org.junit.Test
  * [AskSession], one surface's question and answer, keyed by its sentence:
  *  - the states a question goes through (Idle, Asking while the LLM works,
  *    naming each service the pass starts asking and nobody once the request
- *    is cancelled, Answered with the reply trimmed and the service named, Failed with the
- *    online service and failure worth naming, or nothing), and the prompt
- *    the LLM is sent ([AskPrompts.build]);
+ *    is cancelled, Answered with the reply trimmed and the service named,
+ *    OutOfScope when the service says the question is not one it answers, Failed with the
+ *    online service and failure worth naming, or nothing), and the question
+ *    the pass is put, in both its forms ([AskPrompts.build]);
  *  - at most one request in flight: a new question, [AskSession.close] or
  *    another sentence cancels it, and a cancelled request writes nothing,
  *    INCLUDING when the LLM ignores the cancel and returns its answer late
@@ -47,9 +50,14 @@ import org.junit.Test
  */
 class AskSessionTest {
 
-    /** One prompt the session put to its LLM, and the gate the test
+    /** A pass's result whose answer is [text]. */
+    private fun Completion(text: String, backend: TranslationBackend) = Completion(SentenceAnswer.Text(text), backend)
+
+    /** One question the session put to its LLM, and the gate the test
      *  answers it through. */
-    private class Call(val system: String, val user: String) {
+    private class Call(val asked: SentenceQuestion) {
+        val system: String get() = asked.system
+        val user: String get() = asked.user
         val reply = CompletableDeferred<Completion>()
 
         /** Completed when the call's own coroutine saw its cancellation (a
@@ -73,8 +81,8 @@ class AskSessionTest {
         val calls = mutableListOf<Call>()
         var ignoreCancellation = false
 
-        val complete: suspend (String, String, (TranslationBackend) -> Unit) -> Completion = { system, user, _ ->
-            val call = Call(system, user).also { calls += it }
+        val complete: suspend (SentenceQuestion, (TranslationBackend) -> Unit) -> Completion = { asked, _ ->
+            val call = Call(asked).also { calls += it }
             if (ignoreCancellation) {
                 val answer = withContext(NonCancellable) { call.reply.await() }
                 call.activeWhenReturning = currentCoroutineContext().isActive
@@ -133,6 +141,10 @@ class AskSessionTest {
         val expected = AskPrompts.build(grammar, sentence)
         assertEquals("the system message", expected.system, call.system)
         assertEquals("the user message", expected.user, call.user)
+        assertEquals("the question whole: its parts beside its messages", expected, call.asked)
+        assertEquals("ja", call.asked.source)
+        assertEquals("en", call.asked.target)
+        assertEquals("猫が好きです", call.asked.sentence)
 
         call.reply.complete(Completion("  \n The answer.\n\n ", online))
 
@@ -149,6 +161,54 @@ class AskSessionTest {
         assertEquals(AskState.Answered(custom, "Because.", "Qwen 3.5"), session.state.value)
     }
 
+    @Test fun `an answer the service cut at its length limit is Answered and says so, where any other is not cut`() {
+        val session = newSession()
+        session.bind(sentence)
+
+        session.ask(custom)
+        llm.calls.last().reply.complete(Completion(SentenceAnswer.Text("  Cut off mid \n", cut = true), online))
+        assertEquals(AskState.Answered(custom, "Cut off mid", "OpenAI", cut = true), session.state.value)
+
+        session.ask(custom)
+        llm.calls.last().reply.complete(Completion("Whole.", online))
+        assertEquals(AskState.Answered(custom, "Whole.", "OpenAI", cut = false), session.state.value)
+    }
+
+    @Test fun `a service's word that the question is out of scope is its own state, naming the service`() {
+        val session = newSession()
+        session.bind(sentence)
+        session.ask(custom)
+
+        llm.calls.single().reply.complete(Completion(SentenceAnswer.OutOfScope, online))
+
+        assertEquals(AskState.OutOfScope(custom, "OpenAI"), session.state.value)
+
+        // Not a failure: there is nothing to try again.
+        session.retry()
+        assertEquals(AskState.OutOfScope(custom, "OpenAI"), session.state.value)
+        assertEquals(1, llm.calls.size)
+
+        // Put away like an answer, and another question can follow.
+        session.close()
+        assertEquals(AskState.Idle, session.state.value)
+        session.ask(grammar)
+        assertEquals(AskState.Asking(grammar), session.state.value)
+    }
+
+    @Test fun `an out of scope word from a cancelled request writes nothing`() {
+        val session = newSession()
+        session.bind(sentence)
+        llm.ignoreCancellation = true
+        session.ask(custom)
+        val call = llm.calls.single()
+        session.close()
+
+        call.reply.complete(Completion(SentenceAnswer.OutOfScope, online))
+
+        assertEquals("precondition: returned normally, cancelled", false, call.activeWhenReturning)
+        assertEquals(AskState.Idle, session.state.value)
+    }
+
     // ── naming who is asked ──────────────────────────────────────────────
 
     @Test fun `the question in flight names the completer the pass asks, then the next one when it falls through`() {
@@ -156,7 +216,7 @@ class AskSessionTest {
         val reply = CompletableDeferred<Completion>()
         // As the registry's pass does: the first pick is named before the
         // pass first waits, the next one when the first has failed.
-        val session = AskSession(scope) { _, _, onAttempt ->
+        val session = AskSession(scope) { _, onAttempt ->
             onAttempt(online)
             fellThrough.await()
             onAttempt(onDevice)
@@ -180,7 +240,7 @@ class AskSessionTest {
         // through and would name, then ask, the next one.
         val gates = mutableListOf<CompletableDeferred<Unit>>()
         var askedAfterFallingThrough = 0
-        val session = AskSession(scope) { _, _, onAttempt ->
+        val session = AskSession(scope) { _, onAttempt ->
             onAttempt(online)
             val gate = CompletableDeferred<Unit>().also { gates += it }
             withContext(NonCancellable) { gate.await() }
