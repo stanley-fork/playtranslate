@@ -440,8 +440,11 @@ $DOCUMENT_JS
   background: var(--pt-divider);
 }
 [dir=rtl] .row + .row::before { left: 0; right: 16px; }
-.cell { padding: 14px 4px 14px 16px; }
-[dir=rtl] .cell { padding: 14px 16px 14px 4px; }
+/* 10px over the head, 4 under the 14 below the definitions: the head is a
+   40px line (its buttons' height) around the headword, which already stands
+   the word off the row's top edge. */
+.cell { padding: 10px 4px 14px 16px; }
+[dir=rtl] .cell { padding: 10px 16px 14px 4px; }
 /* Pressed only when the press is the row's own (the page marks the others
    np): an element is :active while anything inside it is, so the row would
    light up behind its own button. */
