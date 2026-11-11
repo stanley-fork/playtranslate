@@ -96,6 +96,12 @@ internal class DefinitionDocument(
     private val scope: CoroutineScope,
     private val theme: () -> DefinitionsDocument.DocTheme,
     private val onAction: (row: DefRow, action: String) -> Unit,
+    /** What stands in the slot has changed: the page laid its rows out, or
+     *  no layout will follow for these rows, because the notice took the
+     *  page's place after its renderer died a second time ([showsNotice]) or
+     *  their first chunk could not be built ([buildFailed]). A notice put up
+     *  inside [setRows] (no usable WebView) is not announced: the caller
+     *  reads [showsNotice] when the call returns. */
     private val onLayout: () -> Unit = {},
     /** Where a chunk's content is fetched and its markup built. */
     private val buildOn: CoroutineDispatcher = Dispatchers.Default,
@@ -152,6 +158,12 @@ internal class DefinitionDocument(
     /** True when the notice stands where the definitions would be. */
     @get:VisibleForTesting
     val showsNotice: Boolean get() = notice?.parent != null
+
+    /** True when the first chunk of the rows could not be built: the page
+     *  draws none of this row set and reports no layout for it. Until the
+     *  next row set, or a later send of the chunk that goes through. */
+    var buildFailed = false
+        private set
 
     // ── Rows ─────────────────────────────────────────────────────────────
 
@@ -247,6 +259,7 @@ internal class DefinitionDocument(
         gen++
         rows = emptyList()
         fed = 0
+        buildFailed = false
         targets = emptyList()
         cursor = null
         shell?.destroy()
@@ -257,6 +270,8 @@ internal class DefinitionDocument(
             slot.removeView(it)
         }
         view = null
+        // No view, no height: the next one starts at 1 px.
+        height = 1
         notice?.let { slot.removeView(it) }
         notice = null
         if (holding) {
@@ -270,6 +285,7 @@ internal class DefinitionDocument(
         feedJob = null
         gen++
         fed = 0
+        buildFailed = false
         domIds.clear()
         rowIds.clear()
         patchSeq.clear()
@@ -305,6 +321,13 @@ internal class DefinitionDocument(
             } catch (e: Exception) {
                 // Class only: no message (it may carry a path), no content.
                 Log.w(TAG, "chunk build failed: ${e.javaClass.simpleName}")
+                // Nothing sends a first chunk again, so nothing of these
+                // rows will be drawn: a host holding a loading state up for
+                // their layout is told that none is coming.
+                if (g == gen && from == 0) {
+                    buildFailed = true
+                    onLayout()
+                }
                 return@launch
             }
             if (g != gen) return@launch
@@ -356,6 +379,7 @@ internal class DefinitionDocument(
         }
         s.exec(if (from == 0) "ptSet(${quote(sb.toString())},$g)" else "ptAppend(${quote(sb.toString())},$g)")
         fed = from + chunk.size
+        buildFailed = false
     }
 
     private fun patch(index: Int) {
@@ -413,6 +437,7 @@ internal class DefinitionDocument(
     private fun showNotice() {
         view?.let { slot.removeView(it) }
         view = null
+        height = 1
         if (notice?.parent != null) return
         val t = theme().tokens
         val pad = (16 * density).roundToInt()
@@ -452,6 +477,9 @@ internal class DefinitionDocument(
             if (recoveredContent == content) {
                 Log.w(TAG, "renderer died twice on one content; showing the notice")
                 showNotice()
+                // The host may be holding something up until these rows are
+                // drawn, and no layout will come to say so.
+                this@DefinitionDocument.onLayout()
                 return
             }
             recoveredContent = content
@@ -531,7 +559,13 @@ internal class DefinitionDocument(
     val hostView: View? get() = view
 
     /** The view's height as the page last reported it, in px; 1 before
-     *  the first layout and for an empty document. */
+     *  the first layout, for an empty document and while there is no view
+     *  (released, or the notice standing in). The view keeps its height
+     *  across a new row set and across a new shell, until the next layout:
+     *  more than 1 says a layout was once reported to this view, not that
+     *  rows are on screen now. After a new row set the last one's still
+     *  are; after a renderer death the view is blank at that height until
+     *  the new shell has drawn them. */
     val heightPx: Int get() = height
 
     internal fun rectOnScreen(rowId: String, act: String, out: Rect): Boolean {

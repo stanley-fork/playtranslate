@@ -42,7 +42,9 @@ internal class WordRowList<T>(
      *  true where the row is where the word is read, false for a list whose
      *  rows tap through to the word's own page. */
     private val full: Boolean = false,
-    /** The page laid the rows out. */
+    /** The page laid the rows out, or no layout will follow for them: the
+     *  notice took the page's place after the renderer died twice
+     *  ([showsNotice]), or their first chunk could not be built. */
     onLayout: () -> Unit = {},
 ) {
     /** What a row shows of its word. [data]'s Anki decks are the list's to
@@ -339,6 +341,22 @@ internal class WordRowList<T>(
      *  WebView): no layout report will come. */
     val showsNotice: Boolean get() = document.showsNotice
 
+    /** True while the list has rows to show and its page's view has had no
+     *  layout: from the rows being set, or the list being shown again, until
+     *  the page's first layout. Never true for a list that is not shown,
+     *  that has nothing to draw, whose notice stands in for the page or
+     *  whose first rows could not be built, since no layout is on its way to
+     *  any of them. A new row set over rows already on screen is not a wait:
+     *  the old ones stay up until it is laid out.
+     *
+     *  It is read off the view's height ([DefinitionDocument.heightPx]), so
+     *  it is also false, with nothing on screen, while a page that had drawn
+     *  its rows recovers from a renderer death: the view keeps its height
+     *  and is blank until the new shell draws them. */
+    val awaitsFirstLayout: Boolean
+        get() = !released && shown && !(rows.isEmpty() && footer == null) &&
+            !document.showsNotice && !document.buildFailed && document.heightPx <= 1
+
     /** The word rows as last published, in drawn order. */
     @get:VisibleForTesting
     val shownRows: List<DefRow.Word> get() = document.shownRows.filterIsInstance<DefRow.Word>()
@@ -414,7 +432,7 @@ internal fun wordRowList(
      *  ([DefinitionsDocument.DocTheme.twoColumnsWhenWide]): the results'
      *  Words card only. */
     twoColumnsWhenWide: Boolean = false,
-    /** The page laid the rows out. */
+    /** The page laid the rows out ([WordRowList]'s own `onLayout`). */
     onLayout: () -> Unit = {},
 ) = WordRowList(
     ctx, slot, scope, host,

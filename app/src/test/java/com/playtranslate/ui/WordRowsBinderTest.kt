@@ -2,6 +2,8 @@ package com.playtranslate.ui
 
 import android.app.Activity
 import android.content.Context
+import android.content.ContextWrapper
+import android.content.res.Resources
 import android.os.Bundle
 import android.os.Looper
 import android.view.LayoutInflater
@@ -55,6 +57,14 @@ import org.robolectric.android.controller.ActivityController
  * showing and spends the auto-hide; and the header's label recedes to the
  * hint colour while the card is hidden (by the eye or the auto-hide) and is
  * muted while it shows.
+ *
+ * And the wait for the page: rows are never shown as an empty card. The
+ * loading line is up while a lookup runs and until the page has drawn the
+ * rows, a lookup's or those of a card revealed with its rows looked up; a
+ * reveal shows the card (and the line) at once and takes its page, or
+ * starts one for a running lookup, on the main thread's next turn, which a
+ * hide or a release before it calls off; and a page that cannot draw ends
+ * the wait with its notice, as rows that cannot be built end it with none.
  *
  * And what a controller reaches here: the header's eye first, then, while
  * the card shows, one action per tappable target the rows' page reported,
@@ -364,6 +374,7 @@ class WordRowsBinderTest {
         assertEquals(View.VISIBLE, card.visibility)
         assertFalse(hidePref)
         assertEquals(1, rowsWanted)
+        idle()
         assertEquals(3, shown().size)
     }
 
@@ -446,6 +457,243 @@ class WordRowsBinderTest {
         assertEquals(1, rowsWanted)
         binder.setLiveMode(false)
         assertEquals(View.VISIBLE, card.visibility)
+    }
+
+    // ── The wait for the page ───────────────────────────────────────────
+
+    private val loading: View get() = root.findViewById(R.id.tvMainWordsLoading)
+
+    /** The main thread's next turn: where a reveal takes its page. */
+    private fun idle() = shadowOf(Looper.getMainLooper()).idle()
+
+    /** The render process of the card's page dies, as the platform tells it. */
+    private fun killRenderer() {
+        val web = (binder.container.getChildAt(0) as ViewGroup).getChildAt(0) as WebView
+        shadowOf(web).webViewClient.onRenderProcessGone(web, null)
+        idle()
+    }
+
+    @Test
+    fun `a lookup's loading line stays up until the page has drawn its rows`() {
+        binder.applyWordsVisibility()
+        binder.render(WordLookupsState.Loading)
+        assertEquals(View.VISIBLE, loading.visibility)
+        binder.render(settled())
+        assertEquals("up over rows the page has not drawn", View.VISIBLE, loading.visibility)
+        // The same state again (a collector that restarts) lets nothing go.
+        binder.render(settled())
+        assertEquals(View.VISIBLE, loading.visibility)
+        list.layoutForTest(50)
+        assertEquals("the rows are drawn", View.GONE, loading.visibility)
+
+        // The next sentence: the page is emptied for its lookup, and the
+        // line is up over its rows the same way.
+        binder.render(analyzed())
+        assertEquals(View.VISIBLE, loading.visibility)
+        binder.render(settled())
+        assertEquals(View.VISIBLE, loading.visibility)
+        list.layoutForTest(50)
+        assertEquals(View.GONE, loading.visibility)
+    }
+
+    @Test
+    fun `rows taken with no lookup before them show the loading line until they are drawn`() {
+        // A page built over a lookup that had already settled.
+        binder.applyWordsVisibility()
+        binder.render(settled())
+        assertEquals(View.VISIBLE, loading.visibility)
+        list.layoutForTest(50)
+        assertEquals(View.GONE, loading.visibility)
+        // A new row set over rows on screen is no wait: they stay up.
+        binder.render(WordLookupsState.Settled(rows.reversed(), emptyList(), emptyMap()))
+        assertEquals(View.GONE, loading.visibility)
+    }
+
+    @Test
+    fun `a reveal draws the card and its loading line first and takes the page on the next turn`() {
+        binder.applyWordsVisibility()
+        binder.render(settled())
+        list.layoutForTest(50)
+        eye.performClick()
+        assertEquals(View.GONE, card.visibility)
+        assertEquals("the page went with the hide", 0, binder.container.childCount)
+
+        eye.performClick()
+        assertEquals(View.VISIBLE, card.visibility)
+        assertEquals("the line shows where the rows will be", View.VISIBLE, loading.visibility)
+        assertEquals("no page inside the tap", 0, binder.container.childCount)
+        assertNull(DefinitionShells.spareForTest)
+        assertTrue(shown().isEmpty())
+        idle()
+        assertEquals("the page, a turn later", 1, binder.container.childCount)
+        assertEquals(3, shown().size)
+        assertEquals("until its rows are drawn", View.VISIBLE, loading.visibility)
+        list.layoutForTest(50)
+        assertEquals(View.GONE, loading.visibility)
+    }
+
+    @Test
+    fun `rows that settled on a hidden card are revealed under the loading line`() {
+        Prefs(app).hideWordsSection = true
+        binder.applyWordsVisibility()
+        binder.render(analyzed())
+        binder.render(settled())
+        assertEquals("a hidden card waits for no page", View.GONE, loading.visibility)
+        eye.performClick()
+        assertEquals(View.VISIBLE, card.visibility)
+        assertEquals(View.VISIBLE, loading.visibility)
+        idle()
+        assertEquals(View.VISIBLE, loading.visibility)
+        list.layoutForTest(50)
+        assertEquals(View.GONE, loading.visibility)
+    }
+
+    @Test
+    fun `the reveal of a card whose lookup is running starts the page a turn later, and one with no lookup takes none`() {
+        Prefs(app).hideWordsSection = true
+        binder.applyWordsVisibility()
+        // Nothing looked up: a reveal has no rows on their way, so no line
+        // for even a turn, and no page.
+        eye.performClick()
+        assertEquals(View.GONE, loading.visibility)
+        idle()
+        assertNull(DefinitionShells.spareForTest)
+        assertEquals(View.GONE, loading.visibility)
+        eye.performClick()
+
+        binder.render(analyzed())
+        assertNull("a hidden card asks for no page", DefinitionShells.spareForTest)
+        rowsWanted = 0
+        eye.performClick()
+        assertEquals("the lookup's line, at once", View.VISIBLE, loading.visibility)
+        assertEquals("and the lookup itself", 1, rowsWanted)
+        assertNull("no page inside the tap", DefinitionShells.spareForTest)
+        idle()
+        assertNotNull("the page loads beside the lookup", DefinitionShells.spareForTest)
+        // Its rows land: the line lasts until they are drawn.
+        binder.render(settled())
+        assertEquals(View.VISIBLE, loading.visibility)
+        list.layoutForTest(50)
+        assertEquals(View.GONE, loading.visibility)
+    }
+
+    @Test
+    fun `rows that land between a reveal and its page are drawn by that page`() {
+        Prefs(app).hideWordsSection = true
+        binder.applyWordsVisibility()
+        binder.render(analyzed())
+        eye.performClick()
+        binder.render(settled())
+        assertEquals(View.VISIBLE, loading.visibility)
+        assertTrue("the list is not shown yet", shown().isEmpty())
+        idle()
+        assertEquals(3, shown().size)
+        assertEquals(View.VISIBLE, loading.visibility)
+        list.layoutForTest(50)
+        assertEquals(View.GONE, loading.visibility)
+    }
+
+    @Test
+    fun `a reveal undone before its page starts takes no page, and neither does a released card`() {
+        binder.applyWordsVisibility()
+        binder.render(settled())
+        eye.performClick()
+        eye.performClick()
+        assertEquals(View.VISIBLE, loading.visibility)
+        eye.performClick()
+        assertEquals(View.GONE, card.visibility)
+        idle()
+        assertEquals(0, binder.container.childCount)
+        assertNull(DefinitionShells.spareForTest)
+        assertTrue(shown().isEmpty())
+
+        // Revealed for good: one page, however many times the state is applied.
+        eye.performClick()
+        binder.applyWordsVisibility()
+        idle()
+        assertEquals(1, binder.container.childCount)
+
+        // Released with a reveal's page still to start: nothing runs after.
+        eye.performClick()
+        eye.performClick()
+        var heightChanges = 0
+        binder.onHeightChanged = { heightChanges++ }
+        binder.release()
+        idle()
+        assertEquals(0, binder.container.childCount)
+        assertTrue(shown().isEmpty())
+        assertEquals("the host hears nothing from a released card", 0, heightChanges)
+    }
+
+    @Test
+    fun `a page that cannot draw ends the wait`() {
+        binder.applyWordsVisibility()
+        binder.render(settled())
+        assertEquals(View.VISIBLE, loading.visibility)
+        killRenderer()
+        assertFalse("recovered once", list.showsNotice)
+        assertEquals("still waiting, on the new page", View.VISIBLE, loading.visibility)
+        killRenderer()
+        assertTrue(list.showsNotice)
+        assertEquals("no layout will come: the notice stands alone", View.GONE, loading.visibility)
+    }
+
+    @Test
+    fun `rows that cannot be built end the wait with no rows`() {
+        // The rows' markup is built off the main thread and reads the
+        // context's resources: a context that fails there fails the build
+        // and nothing the card itself reads.
+        var failing = false
+        val ctx = object : ContextWrapper(activity) {
+            override fun getResources(): Resources {
+                if (failing && Looper.myLooper() != Looper.getMainLooper()) throw IllegalStateException("no resources")
+                return super.getResources()
+            }
+        }
+        // A page of its own: a header takes its actions from one binder.
+        val page = LayoutInflater.from(activity).inflate(R.layout.fragment_translation_result, null)
+        val line = page.findViewById<View>(R.id.tvMainWordsLoading)
+        val failingBinder = WordRowsBinder(
+            page, ctx, Prefs(activity),
+            object : WordRowsBinder.Host {
+                override val isAlive: Boolean get() = true
+                override val scope: CoroutineScope get() = this@WordRowsBinderTest.scope
+                override val ttsAlertTarget: TtsAlertTarget get() = TtsAlertTarget.InActivity(activity)
+                override fun onWordTapped(row: RowState) {}
+            },
+        )
+        try {
+            failingBinder.applyWordsVisibility()
+            failing = true
+            failingBinder.render(WordLookupsState.Loading)
+            failingBinder.render(settled())
+            assertEquals("waiting for the rows' layout", View.VISIBLE, line.visibility)
+            for (i in 0 until 300) {
+                idle()
+                if (line.visibility == View.GONE) break
+                Thread.sleep(10)
+            }
+            assertEquals("no layout is coming: the line goes", View.GONE, line.visibility)
+            assertEquals("the rows are still the card's", 3, failingBinder.shownRows.size)
+
+            // The next rows are a new wait, from the moment they are set.
+            failing = false
+            failingBinder.render(WordLookupsState.Loading)
+            failingBinder.render(settled())
+            assertEquals(View.VISIBLE, line.visibility)
+        } finally {
+            failing = false
+            failingBinder.release()
+        }
+    }
+
+    @Test
+    fun `a lookup that finds no words waits for no page`() {
+        binder.applyWordsVisibility()
+        binder.render(WordLookupsState.Loading)
+        binder.render(WordLookupsState.Settled(emptyList(), emptyList(), emptyMap()))
+        assertEquals(View.GONE, loading.visibility)
+        assertEquals(View.VISIBLE, root.findViewById<View>(R.id.tvNoWords).visibility)
     }
 
     // ── The controller's targets ────────────────────────────────────────

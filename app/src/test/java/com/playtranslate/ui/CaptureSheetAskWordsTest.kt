@@ -982,14 +982,20 @@ class CaptureSheetAskWordsTest {
         val o = open(screen, text(4), text(3), askHidden = true, wordsHidden = false)
         showRows(o, words)
         val card = o.v(R.id.cardWords)
+        // Rows the page has not drawn: the card holds the loading line over
+        // the page's one pixel.
+        val line = o.v(R.id.tvMainWordsLoading)
+        assertTrue("precondition: the loading line stands in for the rows", line.isShown)
         val needBefore = o.need
         val cardBefore = card.height
+        val lineBefore = line.height
 
         list(o).layoutForTest(ROW_CSS_PX)
         settle()
+        assertEquals("precondition: the line went with the rows drawn", View.GONE, line.visibility)
         val grown = card.height - cardBefore
-        assertEquals("precondition: the rows laid out at their reported height",
-            words.size * dp(ROW_CSS_PX) - 1, grown)
+        assertEquals("precondition: the rows took the line's place at their reported height",
+            words.size * dp(ROW_CSS_PX) - 1 - lineBefore, grown)
         assertEquals("the need re-fit by the card's growth", needBefore + grown, o.need)
 
         // Per belowNeed(): every header and card down to the last card shown.

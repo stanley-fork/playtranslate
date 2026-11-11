@@ -1,6 +1,8 @@
 package com.playtranslate.ui
 
 import android.content.Context
+import android.os.Handler
+import android.os.Looper
 import android.view.View
 import android.widget.LinearLayout
 import android.widget.TextView
@@ -62,6 +64,26 @@ import kotlinx.coroutines.launch
  * were requested, then the user hid the card before they settled) is kept
  * and drawn when the card is shown: the lookup was already paid, and the
  * next text starts lazy again.
+ *
+ * Rows are never shown as an empty card. A page takes a moment to draw the
+ * rows it is handed (longer when it has to load first), and the card around
+ * a page that has drawn nothing is a hairline. So the loading line is up for
+ * the whole wait, whatever it is a wait for ([syncWaiting]): while a lookup
+ * runs, and while the card has rows its page has not drawn ([rowsUndrawn]),
+ * which is where a lookup's line stays until its rows are on screen and
+ * what a card revealed with its rows already looked up shows meanwhile.
+ * The wait ends without rows when none will be drawn: the page's notice
+ * stands in, or its first rows could not be built, and then the card is as
+ * empty as the page. One wait has no line: a page that had drawn its rows
+ * and lost its renderer is blank at its old height until the new one has
+ * drawn them, as on every surface ([WordRowList.awaitsFirstLayout]).
+ *
+ * A reveal draws the card first and takes its page after ([startPage]):
+ * building a WebView holds the main thread (most of a second for a process's
+ * first one on a slow phone), and a card that took its page inside the tap
+ * would open, loading line and all, only once that was over. The page of a
+ * card revealed while its lookup runs is started then too, so it loads
+ * beside the lookup and not after it.
  *
  * Live mode auto-hides the card for its whole session: a dual-screen live
  * session lands a result on every panel emission, and the list is rarely
@@ -136,7 +158,10 @@ class WordRowsBinder(
         },
         WordRowList.COMPACT_SCALE,
         twoColumnsWhenWide = true,
-        onLayout = { onHeightChanged?.invoke() },
+        onLayout = {
+            syncWaiting()
+            onHeightChanged?.invoke()
+        },
     )
 
     /** The rows of the last Settled render as the lookup gave them, and the
@@ -155,6 +180,44 @@ class WordRowsBinder(
 
     /** The last live state [setLiveMode] saw; the edge detector. */
     private var liveRunning = false
+
+    /** The last state rendered was a lookup still on its way (Loading or
+     *  Analyzed): the loading line is its sign. */
+    private var lookupRunning = false
+
+    /** A reveal has shown the card and its page is to start once that frame
+     *  is drawn ([startPage]); the list is not shown yet. */
+    private var pagePending = false
+
+    private val mainHandler = Handler(Looper.getMainLooper())
+
+    /**
+     * The second half of a reveal: the list takes its page (drawing the rows
+     * it holds), or starts loading one for the rows a running lookup will
+     * bring. A card with neither takes none.
+     *
+     * Posted as an ordinary message, which is what puts it after the card's
+     * frame: the reveal's visibility change schedules a layout pass, and the
+     * main queue holds ordinary messages back until that pass has run and
+     * handed its frame to the render thread. With no pass pending (a card
+     * not on screen) it runs at once. Never a coroutine: Dispatchers.Main
+     * posts asynchronous messages, which are not held back.
+     */
+    private val startPage = Runnable {
+        if (!pagePending) return@Runnable
+        pagePending = false
+        if (!host.isAlive) return@Runnable
+        list.shown = true
+        if (lookupRunning) list.prepare()
+        syncWaiting()
+        onHeightChanged?.invoke()
+    }
+
+    /** The card has rows to show that its page has not drawn: the rows of a
+     *  reveal whose page has yet to start, or of a page still to lay them
+     *  out ([WordRowList.awaitsFirstLayout]). */
+    private val rowsUndrawn: Boolean
+        get() = if (pagePending) !list.isEmpty else list.awaitsFirstLayout
 
     /** Asks the VM for the current analysis's rows
      *  ([TranslationResultViewModel.requestWordRows]). Invoked whenever the
@@ -193,15 +256,39 @@ class WordRowsBinder(
 
     /** Reflect the effective hidden state ([isHidden]): the card and the eye
      *  icon; a shown card asks for its rows ([onRowsWanted]) and draws the
-     *  ones it has, a hidden card lets its page go (class doc). */
+     *  ones it has, a hidden card lets its page go (class doc). A card that
+     *  goes from hidden to shown is drawn first and takes its page after
+     *  ([startPage]). */
     fun applyWordsVisibility() {
         val hidden = isHidden
         card.visibility = if (hidden) View.GONE else View.VISIBLE
         eye.icon = if (hidden) R.drawable.ic_visibility_off else R.drawable.ic_visibility
         header.labelDimmed = hidden
-        list.shown = !hidden
+        if (hidden) {
+            cancelPageStart()
+            list.shown = false
+        } else if (!list.shown && !pagePending) {
+            pagePending = true
+            mainHandler.post(startPage)
+        }
+        syncWaiting()
         syncLabel()
         if (!hidden) onRowsWanted?.invoke()
+    }
+
+    private fun cancelPageStart() {
+        pagePending = false
+        mainHandler.removeCallbacks(startPage)
+    }
+
+    /**
+     * The loading line, from where the lookup and the page stand (class
+     * doc): up while a lookup runs and while the card has rows its page has
+     * not drawn. Called wherever either may have moved: a render, a change
+     * of the card's visibility, the start of its page, the page's layout.
+     */
+    private fun syncWaiting() {
+        loadingText.isVisible = lookupRunning || rowsUndrawn
     }
 
     /** The header's label: the section's name, with the number of rows
@@ -249,7 +336,7 @@ class WordRowsBinder(
     fun render(state: WordLookupsState) {
         when (state) {
             is WordLookupsState.Idle -> {
-                loadingText.isGone = true
+                lookupRunning = false
                 noWordsText.isGone = true
                 clearRows()
             }
@@ -257,18 +344,19 @@ class WordRowsBinder(
             // still on their way (they start on the request below, or on the
             // reveal that makes the card visible).
             is WordLookupsState.Loading, is WordLookupsState.Analyzed -> {
+                lookupRunning = true
                 clearRows()
-                loadingText.isVisible = true
                 loadingText.text = ctx.getString(R.string.words_loading)
                 noWordsText.isGone = true
                 if (state is WordLookupsState.Analyzed && !isHidden) onRowsWanted?.invoke()
             }
             is WordLookupsState.Settled -> {
+                lookupRunning = false
                 renderRows(state.rows, state.definitionLang)
-                loadingText.isGone = true
                 noWordsText.visibility = if (state.rows.isEmpty()) View.VISIBLE else View.GONE
             }
         }
+        syncWaiting()
         onHeightChanged?.invoke()
     }
 
@@ -281,7 +369,10 @@ class WordRowsBinder(
     /** Host teardown: the page and its shell go. Must be called when the
      *  view tree goes away ([TranslationResultContent.release]); terminal
      *  and idempotent. */
-    fun release() = list.release()
+    fun release() {
+        cancelPageStart()
+        list.release()
+    }
 
     private fun renderRows(rows: List<RowState>, lang: String) {
         lastRows = rows

@@ -1,8 +1,11 @@
 package com.playtranslate.ui
 
 import android.app.Activity
+import android.content.ContextWrapper
+import android.content.res.Resources
 import android.os.Bundle
 import android.os.Looper
+import android.view.KeyEvent
 import android.webkit.WebView
 import android.widget.FrameLayout
 import com.playtranslate.R
@@ -58,6 +61,8 @@ class DefinitionDocumentTest {
     private lateinit var doc: DefinitionDocument
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
     private val actions = mutableListOf<Pair<String, String>>()
+    /** The host's `onLayout` calls. */
+    private var layouts = 0
 
     @Before fun setUp() {
         DefinitionShells.reset()
@@ -72,6 +77,7 @@ class DefinitionDocumentTest {
                 )
             },
             onAction = { row, act -> actions += row.id to act },
+            onLayout = { layouts++ },
             // Inline, so a step's sends have happened when it returns.
             buildOn = Dispatchers.Main.immediate,
         )
@@ -296,6 +302,21 @@ class DefinitionDocumentTest {
         assertTrue(sent().contains("meaning of fresh"))
     }
 
+    @Test fun `the notice after a second renderer death is announced, since no layout will be`() {
+        doc.setRows(rows(2), "ja")
+        pageReady()
+        layout(1, 100)
+        assertEquals(1, layouts)
+        assertTrue(doc.heightPx > 1)
+        killRenderer()
+        assertEquals("a recovery is not announced: its layout will be", 1, layouts)
+        assertTrue("the view keeps its height for the new shell", doc.heightPx > 1)
+        killRenderer()
+        assertTrue(doc.showsNotice)
+        assertEquals(2, layouts)
+        assertEquals("no view, no height", 1, doc.heightPx)
+    }
+
     @Test fun `a renderer death takes the spare with it, so one death is one death`() {
         doc.setRows(rows(2), "ja")
         pageReady()
@@ -345,6 +366,77 @@ class DefinitionDocumentTest {
         }
     }
 
+    @Test fun `a first chunk that cannot be built is announced, since no layout will be, and new rows are a new attempt`() {
+        // A context whose resources fail on demand: a row's markup reads them.
+        var failing = false
+        val ctx = object : ContextWrapper(activity) {
+            override fun getResources(): Resources {
+                if (failing) throw IllegalStateException("no resources")
+                return super.getResources()
+            }
+        }
+        val own = FrameLayout(activity).also { slot.addView(it) }
+        var told = 0
+        val failingDoc = DefinitionDocument(
+            ctx, own, scope,
+            theme = {
+                DefinitionsDocument.DocTheme(
+                    DefinitionsDocument.Tokens(-1, -2, -3, -4, -5, 16.5f), divider = -6, band = -7,
+                )
+            },
+            onAction = { _, _ -> },
+            onLayout = { told++ },
+            buildOn = Dispatchers.Main.immediate,
+        )
+        try {
+            failingDoc.setRows(rows(2), "ja")
+            assertFalse(failingDoc.buildFailed)
+            assertEquals(0, told)
+
+            failing = true
+            failingDoc.setRows(listOf(row("other")), "ja")
+            failing = false
+            assertTrue("nothing of these rows will be drawn", failingDoc.buildFailed)
+            assertEquals("the host is told: no layout is coming", 1, told)
+            assertEquals(1, failingDoc.heightPx)
+
+            // The same chunk asked for again (a D-pad step past the rows the
+            // page holds) and built this time: no longer failed.
+            val down = KeyEvent(KeyEvent.ACTION_DOWN, KeyEvent.KEYCODE_DPAD_DOWN)
+            val docView = own.getChildAt(0) as DefinitionDocumentView
+            docView.onKeyDown(KeyEvent.KEYCODE_DPAD_DOWN, down)
+            assertFalse("the chunk went through", failingDoc.buildFailed)
+
+            failing = true
+            failingDoc.setRows(listOf(row("again")), "ja")
+            failing = false
+            assertTrue(failingDoc.buildFailed)
+            assertEquals(2, told)
+            failingDoc.setRows(listOf(row("third")), "ja")
+            assertFalse("new rows are a new attempt", failingDoc.buildFailed)
+            assertEquals(2, told)
+
+            // A later chunk that fails is not this: the rows before it are
+            // the page's, and their layout is what a host waits for.
+            failingDoc.setRows(rows(20), "ja")
+            failing = true
+            docView.onKeyDown(KeyEvent.KEYCODE_DPAD_DOWN, down)
+            failing = false
+            assertFalse("the first rows were built", failingDoc.buildFailed)
+            assertEquals(2, told)
+
+            // A release forgets the rows, and their failure with them.
+            failing = true
+            failingDoc.setRows(listOf(row("last")), "ja")
+            failing = false
+            assertTrue(failingDoc.buildFailed)
+            failingDoc.release()
+            assertFalse(failingDoc.buildFailed)
+        } finally {
+            failingDoc.release()
+        }
+    }
+
     @Test fun `a row that gains dictionary content under its id is a new row set`() {
         // Each sense kept a structured glossary under its rowid, which only
         // feeding fetches.
@@ -384,10 +476,15 @@ class DefinitionDocumentTest {
     @Test fun `release drops the view and a later rebind starts over`() {
         doc.setRows(rows(2), "ja")
         pageReady()
+        layout(1, 100)
+        assertTrue(doc.heightPx > 1)
         doc.release()
         assertEquals(0, slot.childCount)
         assertTrue(doc.shownRows.isEmpty())
+        assertEquals("the height went with the view", 1, doc.heightPx)
         doc.setRows(rows(1), "ja")
         assertEquals(1, slot.childCount)
+        assertEquals("the new view has drawn nothing", 1, doc.heightPx)
+        assertEquals(1, view.layoutParams.height)
     }
 }
