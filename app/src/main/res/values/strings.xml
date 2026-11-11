@@ -1938,30 +1938,37 @@
     <string name="llm_backend_invalid_key_alert_button">OK</string>
 
     <!-- ═══════════════════════════════════════════════════════════════
-         ADVANCED LLM CONFIGURATION — user-editable prompt templates.
+         ADVANCED AI CONFIGURATION — user-editable prompt templates.
          The {token} keywords and the default prompt templates themselves
          are Kotlin constants (LlmPromptTemplates), deliberately English
          and NOT localized; keep every {token} verbatim in translations.
          ═══════════════════════════════════════════════════════════════ -->
 
     <!-- Group header above the prompt-templates card on the Translation
-         services page (rendered uppercase by the header style). -->
-    <string name="settings_header_advanced_llm">Advanced LLM configuration</string>
+         services page (rendered uppercase by the header style). "AI" here
+         is the app's one user-facing word for a large language model: the
+         word on the service_llm_badge chip, and the one in "AI model"
+         (ask_no_llm_title). Use the same word in all of them. -->
+    <string name="settings_header_advanced_llm">Advanced AI configuration</string>
 
-    <!-- Toggle row title in Translation services → Advanced LLM Configuration:
+    <!-- Toggle row title in Translation services → Advanced AI configuration:
          feeds recent translated lines to LLM backends as prompt context. -->
     <string name="settings_llm_context_title">Use recent lines as context</string>
     <!-- Subtitle under the recent-lines-as-context toggle row. Leads with the
          online-only scope: the extra prompt tokens are near-free on a server but
          cost ~9 ms each at on-device prefill, which would roughly double
-         on-device LLM latency. -->
-    <string name="settings_llm_context_subtitle">Online only. Give online LLM translators the last few lines of recorded text for more consistent pronouns and names.</string>
+         on-device LLM latency. "AI translators" are the services that carry
+         the service_llm_badge chip, not every translation service: use the
+         chip's word for "AI". -->
+    <string name="settings_llm_context_subtitle">Online only. Give online AI translators the last few lines of recorded text for more consistent pronouns and names.</string>
     <!-- Title of the System-prompt row on the Translation services page;
          also the editor screen's toolbar title. -->
     <string name="llm_prompt_row_system_title">System prompt</string>
     <!-- Subtitle under the System-prompt row on the Translation services
-         page, explaining what that prompt does. -->
-    <string name="llm_prompt_row_system_subtitle">The persona and instructions sent to LLM translators, cloud and on-device.</string>
+         page, explaining what that prompt does. "AI translators" are the
+         services that carry the service_llm_badge chip: use the chip's
+         word for "AI". -->
+    <string name="llm_prompt_row_system_subtitle">The persona and instructions sent to AI translators, cloud and on-device.</string>
     <!-- Title of the Translation-prompt row on the Translation services
          page; also the editor screen's toolbar title. -->
     <string name="llm_prompt_row_translation_title">Translation prompt</string>
@@ -2072,12 +2079,19 @@
          it ("Custom") is translated at its own key, llm_backend_preset_custom. -->
     <string name="add_service_openai_providers_fmt" translatable="false">%1$s (%2$s)</string>
     <!-- Chip beside a provider's name, on the Translation services page and
-         in the add-service picker, marking it as a large-language-model
-         backend — the rows the Advanced LLM Configuration prompts govern.
-         An acronym: most languages keep the Latin "LLM"; translate only where
-         the acronym genuinely isn't used. Must stay very short — it rides on
-         the title's line. -->
-    <string name="service_llm_badge">LLM</string>
+         in the add-service picker, marking it as a service that translates
+         with a large language model (the ChatGPT kind, online or on-device)
+         and not with a classic translation engine: the rows the Advanced AI
+         configuration prompts govern. It says "AI" because that is the
+         everyday word for these models; the technical "LLM" means nothing
+         to most users. Use the short form of "AI" that consumer apps in
+         your language actually show (a local acronym where one is in
+         everyday use, the Latin "AI" where that is what people see), and
+         the same word as in "AI model" (ask_no_llm_title) and "AI
+         translators" (settings_llm_context_subtitle). Never a spelled-out
+         "artificial intelligence": it must stay very short, since it
+         rides on the title's line. -->
+    <string name="service_llm_badge">AI</string>
     <!-- A service's credential requirement, worded once for both surfaces that
          state it: the subtitle under its row in the add-service picker, and
          the status line under its cell on the Translation services page. Both
