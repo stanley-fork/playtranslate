@@ -4,10 +4,13 @@ import android.os.SystemClock
 import android.util.Log
 import com.playtranslate.PtJson
 import com.playtranslate.net.PtHttp
+import com.playtranslate.translation.BackendFailure
 import com.playtranslate.translation.CooldownState
 import com.playtranslate.translation.HttpCallClock
 import com.playtranslate.translation.HttpTimingLogger
 import com.playtranslate.translation.OnlineAttempt
+import com.playtranslate.translation.SentenceAnswer
+import com.playtranslate.translation.blockingOn
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Deferred
@@ -19,7 +22,6 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.isActive
-import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlinx.coroutines.withContext
 import kotlinx.serialization.decodeFromString
 import okhttp3.Call
@@ -105,13 +107,13 @@ sealed interface HealthStatus {
 
 /**
  * The HTTP client for PlayTranslate Cloud's `POST /v1/frame`,
- * `POST /v1/translate`, `GET /v1/warm`, `GET /v1/key`, `GET /health`, the
+ * `POST /v1/translate`, `POST /v1/ask`, `GET /v1/warm`, `GET /v1/key`, `GET /health`, the
  * two sign-in calls, `POST /v1/signin` and `POST /v1/signin/verify`, and the
  * two terms calls, `GET /v1/terms` and `POST /v1/terms/accept`, all under
  * [BASE_URL] (the contract: docs/api.md, docs/client-integration-brief.md
  * and docs/client-signin-handoff.md in the playtranslate-cloud repository).
  *
- * A 403 on either route that withholds service from the account
+ * A 403 on any of the three routes that withholds service from the account
  * (`no_entitlement`, `terms_required`) is handed to the service with the
  * key the call carried and the account record's generation it was built
  * against ([recordFailure], [PtCloudService.onAccountWithheld]), which
@@ -127,7 +129,12 @@ sealed interface HealthStatus {
  * attempt are its job, with [FrameResponse]'s stamps. On the translate route
  * [postTranslate] records every failure and reports nothing: its caller is a
  * registry backend ([PtCloudBackend]), and the registry reports an attempt
- * for every online backend it calls and records the success. The settings
+ * for every online backend it calls and records the success. On the Ask
+ * route [postAsk] records what a failure says of the whole service (the
+ * answers every route shares) and of its answers (their daily cap), and
+ * nothing for a failure that is the question's or the connection's; it
+ * reports only a withholding 403, since the registry's pass over the
+ * services that answer questions reports nothing. The settings
  * page's calls, [checkKey], [health], [requestCode], [verifyCode],
  * [fetchTerms] and [acceptTerms], record no cooldown, report nothing and
  * retry nothing: none is a capture. The two sign-in calls and the terms'
@@ -147,7 +154,8 @@ sealed interface HealthStatus {
  * sign-in's email, code or label.
  * Each frame that reaches part 1 logs two clock lines ([PtCloudClocks]): one
  * at part 1 and one when the read after it ends, unless that read was
- * cancelled; each translate call that was not cancelled logs one.
+ * cancelled; each translate call and each Ask that was not cancelled logs
+ * one.
  */
 class PtCloudClient(
     private val config: PtCloudConfig,
@@ -171,6 +179,24 @@ class PtCloudClient(
         client.newBuilder()
             .readTimeout(TRANSLATE_READ_TIMEOUT_S, TimeUnit.SECONDS)
             .callTimeout(TRANSLATE_CALL_TIMEOUT_S, TimeUnit.SECONDS)
+            .build()
+    }
+
+    /**
+     * The Ask route's client: [client] rebuilt with the route's own wait,
+     * as [translateClient] is. The server's deadline for an answer is 30 s
+     * for the whole call ("Clocks and the retry" in docs/api.md), and an
+     * answer that is not streamed sends nothing until it is whole, so the
+     * read waits as long as the call: both sit above that deadline, where
+     * the frame client's 8 s read would end nearly every answer as a
+     * transport TIMEOUT. Not the 120 s the other services' answers get
+     * ([com.playtranslate.translation.PromptCompleter.ANSWER_TIMEOUT_SECONDS]):
+     * the server's own deadline ends the call first.
+     */
+    private val askClient: OkHttpClient by lazy {
+        client.newBuilder()
+            .readTimeout(ASK_TIMEOUT_S, TimeUnit.SECONDS)
+            .callTimeout(ASK_TIMEOUT_S, TimeUnit.SECONDS)
             .build()
     }
 
@@ -374,6 +400,99 @@ class PtCloudClient(
         val outcome = PtCloudErrors.classifyTranslation(part)
         if (outcome is TranslationOutcome.Failed) throw recordedFailure(outcome.classified, cooldown, sentKey, sentGeneration, null)
         return outcome
+    }
+
+    /**
+     * `POST {BASE_URL}/v1/ask` ("Ask" in docs/api.md): [request]'s sentence
+     * and question in, the service's answer out
+     * ([com.playtranslate.translation.SentenceAnswer]: the model's text, or
+     * its word that the question is about something else). The answer is
+     * asked for as one JSON object: the route's delta lines are for a client
+     * that shows an answer as it is written, which the app does not.
+     *
+     * Every failure is thrown as [PtCloudReadException]: a non-200
+     * ([PtCloudErrors.classifyAskHttp]), a transport failure
+     * ([PtCloudErrors.classifyTransport]), a 200 that does not decode
+     * ([PtCloudErrors.unreadableAnswer]) and a `failed` answer
+     * ([PtCloudErrors.classifyAsk]). The one recorder of the route's
+     * failures, and it records less than a translate call does, since
+     * nothing the route itself answers may start the cooldown translation
+     * and OCR share:
+     *  - An answer the edge gives on every route (a 401, a withholding
+     *    403, a 410, its own 429, a 502) is recorded as on the other routes
+     *    ([recordFailure]): its cooldown on [PtCloudService.cooldown], and
+     *    the account a 403 withholds handed to the service, which turns
+     *    both switches off. That 403 alone is also reported
+     *    ([PtCloudService.report]), as a frame's is: the switch-off is
+     *    silent by itself, the registry's pass over the services that
+     *    answer questions reports nothing, and a question that then falls
+     *    through to another service would leave the user never told that
+     *    the cloud stopped serving them.
+     *  - The route's own `429 ask_limit` is recorded as a pause of the
+     *    service's answers alone ([PtCloudService.onAskLimit]).
+     *  - Nothing else: a `failed` answer of any class, the 404 of an edge
+     *    without the route, a 500, a 503, a 200 that does not decode, and a
+     *    transport failure, which an answer never counts against a service
+     *    ([com.playtranslate.translation.PromptCompleter]).
+     * A success records nothing here: the registry's `recordSuccess` does.
+     *
+     * The response is read and closed inside the call's blocking step.
+     * Cancelling the calling coroutine cancels the call, which is how the
+     * server learns to stop the model; it throws [CancellationException]
+     * with nothing recorded. Logs one clock line per call that was not
+     * cancelled ([PtCloudClocks.askLine]): sizes, the status, the count
+     * against the cap, never the sentence, the question or the answer.
+     */
+    suspend fun postAsk(request: AskRequest): SentenceAnswer {
+        val callerContext = currentCoroutineContext()
+        val cooldown = PtCloudService.cooldown
+        val clock = HttpCallClock()
+        // The key the request carried and the record generation it was
+        // built against, as on a frame ([recordFailure]).
+        var sentKey = ""
+        var sentGeneration = 0L
+        val sentAtMs = SystemClock.elapsedRealtime()
+        val answer: AskAnswer = try {
+            withContext(Dispatchers.IO) {
+                // Built here, as a frame is: off the caller's thread, and a
+                // key [bearer] refuses fails below as a transport failure.
+                sentKey = config.clientKey
+                sentGeneration = PtCloudService.accountGeneration
+                val call = askClient.newCall(askRequest(request, clock, sentKey))
+                blockingOn(call) { call.execute().use(::readAsk) }
+            }
+        } catch (e: CancellationException) {
+            // A call cancelled while it ran was cancelled by blockingOn, and
+            // one that finished was read and closed inside it.
+            throw e
+        } catch (e: IOException) {
+            if (!callerContext.isActive) {
+                throw CancellationException("PlayTranslate Cloud ask cancelled").apply { initCause(e) }
+            }
+            val refused = e as? Refused
+            val failure = refused?.classified?.failure ?: PtCloudErrors.classifyTransport(e).failure
+            val status = refused?.let { failure.httpCode?.let { code -> "http$code" } ?: UNREADABLE }
+                ?: e.javaClass.simpleName
+            logAsk(request, sentAtMs, status, answer = null, clock)
+            // Only what the server answered is recorded; the transport's
+            // failure is not the service's.
+            if (refused != null) {
+                recordFailure(refused.classified, cooldown, sentKey, sentGeneration)
+                if (refused.classified.withheldAccount != null) {
+                    PtCloudService.report(
+                        OnlineAttempt(
+                            PtCloudService.ID, PtCloudService.DISPLAY_NAME, failure, sentAtMs, reachedServer = true,
+                        ),
+                    )
+                }
+            }
+            throw readException(ROUTE_ASK, failure, e)
+        }
+        logAsk(request, sentAtMs, answer.status, answer, clock)
+        return when (val outcome = PtCloudErrors.classifyAsk(answer)) {
+            is AskOutcome.Answered -> outcome.answer
+            is AskOutcome.Failed -> throw readException(ROUTE_ASK, outcome.failure, null)
+        }
     }
 
     /** `GET {BASE_URL}/health`, no auth, its answer read by
@@ -696,9 +815,25 @@ class PtCloudClient(
             .build()
     }
 
+    /** The Ask request: [request] as one JSON object in UTF-8, typed
+     *  `application/json` (any other type is a 415) and sent as a byte
+     *  array, so its length is known (the edge answers 411 without one). No
+     *  `Accept`: the route then answers one JSON object, never delta lines.
+     *  [clock] and [key] as on a translate call ([translateRequest]). */
+    private fun askRequest(request: AskRequest, clock: HttpCallClock, key: String): Request {
+        val body = PtJson.lenient.encodeToString(AskRequest.serializer(), request)
+            .toByteArray(Charsets.UTF_8).toRequestBody(JSON.toMediaType())
+        return Request.Builder()
+            .url(BASE_URL.newBuilder().addPathSegments("v1/ask").build())
+            .bearer(key)
+            .tag(HttpCallClock::class.java, clock)
+            .post(body)
+            .build()
+    }
+
     /**
      * [key] as the bearer token, the one place every authenticated request
-     * ([frameRequest], [translateRequest], [warm], [checkKey], [acceptTerms])
+     * ([frameRequest], [translateRequest], [askRequest], [warm], [checkKey], [acceptTerms])
      * sets it; the sign-in calls ([postSignIn]) and the terms' fetch
      * ([fetchTerms]) never do. Each request reads the stored key once
      * ([PtCloudConfig.clientKey]; the key check and the terms acceptance take
@@ -732,9 +867,29 @@ class PtCloudClient(
         }
     }
 
+    /** Reads an Ask's answer, blocking: the decoded body of a 200, else
+     *  [Refused] with its classification (a non-200 by its status, body and
+     *  `Retry-After`, [PtCloudErrors.classifyAskHttp]; a 200 that is not an
+     *  [AskAnswer] as [PtCloudErrors.unreadableAnswer]). The caller closes
+     *  [response]. */
+    private fun readAsk(response: Response): AskAnswer {
+        if (response.code != 200) {
+            val classified = PtCloudErrors.classifyAskHttp(
+                response.code, response.peekBody(ERROR_BODY_LIMIT).string(), response.header("Retry-After"),
+            )
+            throw Refused(classified, "HTTP ${response.code}")
+        }
+        val body = response.body.string()
+        return try {
+            PtJson.lenient.decodeFromString<AskAnswer>(body)
+        } catch (e: IllegalArgumentException) {
+            // kotlinx's SerializationException is one.
+            throw Refused(PtCloudErrors.unreadableAnswer, "answer did not decode", e)
+        }
+    }
+
     /** Records [classified] ([recordFailure]) and returns the exception the
-     *  translate route throws for it; its message names the kind and the
-     *  code only. */
+     *  translate route throws for it ([readException]). */
     private fun recordedFailure(
         classified: Classified,
         cooldown: CooldownState,
@@ -743,9 +898,15 @@ class PtCloudClient(
         cause: Throwable?,
     ): PtCloudReadException {
         recordFailure(classified, cooldown, sentKey, sentGeneration)
-        val failure = classified.failure
+        return readException(ROUTE_TRANSLATE, classified.failure, cause)
+    }
+
+    /** The exception the translate route and the Ask route throw for
+     *  [failure]; its message names the [route], the kind and the code
+     *  only. */
+    private fun readException(route: String, failure: BackendFailure, cause: Throwable?): PtCloudReadException {
         val code = failure.httpCode?.let { " $it" }.orEmpty()
-        return PtCloudReadException(failure, "PlayTranslate Cloud translate ${failure.kind}$code", cause)
+        return PtCloudReadException(failure, "PlayTranslate Cloud $route ${failure.kind}$code", cause)
     }
 
     /** What a failed call's answer says of the service, recorded: its
@@ -755,11 +916,14 @@ class PtCloudClient(
      *  the key the call carried, and [sentGeneration], the account record's
      *  generation when the call was built, so it acts only while that key is
      *  still the stored one and no check has written the record since
-     *  ([PtCloudService.onAccountWithheld]). The one recording step of both
-     *  routes. */
+     *  ([PtCloudService.onAccountWithheld]). An Ask's daily cap
+     *  ([Classified.askLimitedForS]) goes to the service too, with the key
+     *  it was answered for ([PtCloudService.onAskLimit]). The one recording
+     *  step of the three routes. */
     private fun recordFailure(classified: Classified, cooldown: CooldownState, sentKey: String, sentGeneration: Long) {
         classified.record(cooldown)
         classified.withheldAccount?.let { PtCloudService.onAccountWithheld(sentKey, sentGeneration, it) }
+        classified.askLimitedForS?.let { PtCloudService.onAskLimit(sentKey, it) }
     }
 
     private fun logTranslate(request: TranslateRequest, sentAtMs: Long, status: String, clock: HttpCallClock) {
@@ -771,6 +935,24 @@ class PtCloudClient(
                 codePoints = request.texts.sumOf(PtCloudBatches::codePoints),
                 totalMs = SystemClock.elapsedRealtime() - sentAtMs,
                 status = status,
+                connectionReused = clock.connectionReused,
+            ),
+        )
+    }
+
+    /** One Ask's clock line; [answer] is the decoded 200, null for a call
+     *  that got none. */
+    private fun logAsk(request: AskRequest, sentAtMs: Long, status: String, answer: AskAnswer?, clock: HttpCallClock) {
+        Log.i(
+            TAG,
+            PtCloudClocks.askLine(
+                askId = request.askId,
+                sentenceCodePoints = PtCloudBatches.codePoints(request.sentence),
+                questionCodePoints = PtCloudBatches.codePoints(request.question),
+                totalMs = SystemClock.elapsedRealtime() - sentAtMs,
+                status = status,
+                finish = answer?.finishReason,
+                limits = answer?.limits,
                 connectionReused = clock.connectionReused,
             ),
         )
@@ -873,8 +1055,8 @@ class PtCloudClient(
         response.code, response.peekBody(ERROR_BODY_LIMIT).string(), response.header("Retry-After"),
     )
 
-    /** The server answered, but not with a usable part 1 or translate
-     *  answer. */
+    /** The server answered, but not with a usable part 1, translate
+     *  answer or Ask answer. */
     private class Refused(
         val classified: Classified,
         message: String,
@@ -894,6 +1076,15 @@ class PtCloudClient(
          *  deadline, the 25 s call the brief sets for the backend. */
         private const val TRANSLATE_READ_TIMEOUT_S = 22L
         private const val TRANSLATE_CALL_TIMEOUT_S = 25L
+
+        /** The Ask route's read and whole-call timeout ([askClient]): above
+         *  the server's 30 s deadline for an answer, the 35 s the brief
+         *  sets. */
+        private const val ASK_TIMEOUT_S = 35L
+
+        /** The route's name in an exception's message ([readException]). */
+        private const val ROUTE_TRANSLATE = "translate"
+        private const val ROUTE_ASK = "ask"
 
         /** The service's root: the Cloudflare Worker in front of it, at the
          *  same address whether the service is running or not. Fixed: there
@@ -957,18 +1148,5 @@ class PtCloudClient(
          *  measures against the body cap is the size that goes out. */
         internal fun translateBody(request: TranslateRequest): ByteArray =
             PtJson.lenient.encodeToString(TranslateRequest.serializer(), request).toByteArray(Charsets.UTF_8)
-
-        /**
-         * Runs [read], a blocking step of [call], so that cancelling the
-         * calling coroutine cancels [call] at once: OkHttp then fails the
-         * blocked read, and the continuation, already cancelled, throws
-         * [CancellationException]. A `Job.invokeOnCompletion` hook could not
-         * do this: it fires only after the blocked read returns by itself.
-         */
-        private suspend fun <T> blockingOn(call: Call, read: () -> T): T =
-            suspendCancellableCoroutine { cont ->
-                cont.invokeOnCancellation { call.cancel() }
-                cont.resumeWith(runCatching(read))
-            }
     }
 }

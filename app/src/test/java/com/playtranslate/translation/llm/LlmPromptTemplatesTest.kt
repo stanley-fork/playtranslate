@@ -21,6 +21,10 @@ import org.junit.Test
  *   - **Validation/normalization matrix**: fatal vs advisory issue
  *     classification and the store-null-when-default rule the editor
  *     relies on.
+ *   - **[LlmPromptTemplates.fill]**, the Ask prompts' entry: the same
+ *     language substitution as the translation builders plus the caller's
+ *     values, in the same literal single pass; and `{question}`, a token
+ *     no translation builder fills, passing through a translation template.
  *
  * Pure JUnit; no Robolectric. The override seam defaults to `{ null }`,
  * so built-ins resolve deterministically; tests that install a provider
@@ -181,6 +185,74 @@ class LlmPromptTemplatesTest {
         assertEquals(
             "Translate {text} from Japanese.",
             LlmPromptTemplates.systemPrompt("ja", "en"),
+        )
+    }
+
+    // ── fill: a caller's own template (the Ask prompts) ─────────────────
+
+    @Test
+    fun `fill replaces the language tokens as the translation builders do`() {
+        assertEquals(
+            "Japanese English ja en",
+            LlmPromptTemplates.fill("{source} {target} {source_code} {target_code}", "JA", "en"),
+        )
+        // The same substitution the translation prompts get, on their own
+        // default templates.
+        assertEquals(
+            LlmPromptTemplates.systemPrompt("ja", "fr"),
+            LlmPromptTemplates.fill(LlmPromptTemplates.DEFAULT_SYSTEM, "ja", "fr"),
+        )
+        assertEquals(
+            LlmPromptTemplates.translationUserMessage("猫", "ja", "fr", includeContext = false),
+            LlmPromptTemplates.fill(
+                LlmPromptTemplates.DEFAULT_TRANSLATION, "ja", "fr",
+                mapOf(LlmPromptTemplates.TOKEN_TEXT to "猫", LlmPromptTemplates.TOKEN_CONTEXT to ""),
+            ),
+        )
+    }
+
+    @Test
+    fun `fill replaces each key of values with its value`() {
+        assertEquals(
+            "Q: why? / S: 猫が好き / in Japanese",
+            LlmPromptTemplates.fill(
+                "Q: {question} / S: {text} / in {source}", "ja", "en",
+                mapOf(LlmPromptTemplates.TOKEN_QUESTION to "why?", LlmPromptTemplates.TOKEN_TEXT to "猫が好き"),
+            ),
+        )
+    }
+
+    @Test
+    fun `fill is one literal pass - a value naming another token stays as written`() {
+        val out = LlmPromptTemplates.fill(
+            "{question}\n{text}", "ja", "en",
+            mapOf(
+                LlmPromptTemplates.TOKEN_QUESTION to "What does {text} mean in {source}?",
+                LlmPromptTemplates.TOKEN_TEXT to "a {question} b {target}",
+            ),
+        )
+        assertEquals("What does {text} mean in {source}?\na {question} b {target}", out)
+    }
+
+    @Test
+    fun `fill keeps dollar signs and backslashes in a value verbatim`() {
+        val value = "costs \$100 \\ path C:\\tmp \$1 \\1"
+        assertEquals(
+            "[$value]",
+            LlmPromptTemplates.fill("[{text}]", "ja", "en", mapOf(LlmPromptTemplates.TOKEN_TEXT to value)),
+        )
+    }
+
+    @Test
+    fun `question token in a translation template passes through unchanged`() {
+        // No translation builder gives {question} a value, so an edited
+        // translation template that contains it sends it as written.
+        LlmPromptTemplates.overrideProvider = { kind ->
+            if (kind == PromptKind.TRANSLATION) "{question} Translate {text} into {target}." else null
+        }
+        assertEquals(
+            "{question} Translate 猫 into English.",
+            LlmPromptTemplates.translationUserMessage("猫", "ja", "en", includeContext = true),
         )
     }
 

@@ -603,10 +603,77 @@ class DefinitionsDocumentTest {
         assertTrue(css.contains(".w { font-size: 1.636em; font-weight: 700;"))
     }
 
+    // ── Two columns on a wide page (the results' Words card) ────────────
+
+    @Test
+    fun `the theme says whether the rows take two columns, and says it when they do not`() {
+        // Catches: the flag left out of the call when false (a kept shell
+        // would then keep the last surface's columns), and a theme that asks
+        // sending false.
+        assertTrue(theme(), theme().contains("cols:false"))
+        val asking = theme(twoColumnsWhenWide = true)
+        assertTrue(asking, asking.contains("cols:true"))
+        assertFalse(asking, asking.contains("cols:false"))
+    }
+
+    @Test
+    fun `ptTheme sets or clears the columns class on every call`() {
+        // Catches: a class that is only ever added. A loaded shell is kept
+        // and handed to another surface, which must not inherit the columns.
+        val ptTheme = shell().substringAfter("window.ptTheme = function (t) {").substringBefore("\n  };")
+        assertTrue(ptTheme, ptTheme.contains("document.documentElement.classList.toggle('cols', !!t.cols);"))
+    }
+
+    @Test
+    fun `the two-column rule sits in the 560px media query alone and reaches only a page marked cols`() {
+        // Catches: a rule that applies at any width, or to every surface's
+        // rows, and the gap's grid-only name (what an engine at the floor
+        // knows) dropped.
+        val style = shell().substringAfter("<style>").substringBefore("</style>")
+            .replace(Regex("""/\*.*?\*/""", RegexOption.DOT_MATCHES_ALL), "")
+        val open = "@media (min-width: 560px) {"
+        assertEquals("one such block", 1, Regex(Regex.escape(open)).findAll(style).count())
+        val start = style.indexOf(open)
+        var depth = 1
+        var end = start + open.length
+        while (depth > 0) {
+            when (style[end]) {
+                '{' -> depth++
+                '}' -> depth--
+            }
+            end++
+        }
+        val inside = Regex("""([^{}]+)\{([^{}]*)\}""").findAll(style.substring(start + open.length, end - 1))
+            .associate { m ->
+                m.groupValues[1].trim() to m.groupValues[2].split(';').map { it.trim() }.filter { it.isNotEmpty() }
+            }
+        assertTrue(
+            "every selector is under .cols: ${inside.keys}",
+            inside.keys.flatMap { it.split(',') }.all { it.trim().startsWith(".cols ") },
+        )
+        assertEquals(
+            listOf(
+                "display: grid", "grid-template-columns: minmax(0, 1fr) minmax(0, 1fr)",
+                "grid-column-gap: 8px", "column-gap: 8px",
+            ),
+            inside[".cols #root"],
+        )
+        // The second row starts its column: no hairline. The action row
+        // spans both columns.
+        assertEquals(listOf("content: none"), inside[".cols #root > .row:nth-child(2):not(.more)::before"])
+        assertEquals(listOf("grid-column: 1 / -1"), inside[".cols #root > .more"])
+        // Outside the block nothing is a grid and nothing reads the class:
+        // one column is what it always was.
+        val outside = style.removeRange(start, end)
+        assertFalse(outside.contains("grid"))
+        assertFalse(outside.contains(".cols"))
+    }
+
     private fun shell() = DefinitionsDocument.documentShellHtml()
 
-    /** The `ptTheme` call a surface gives a loaded shell. */
-    private fun theme() = DefinitionsDocument.themeJs(
+    /** The `ptTheme` call a surface gives a loaded shell; the Words card's
+     *  asks for [twoColumnsWhenWide]. */
+    private fun theme(twoColumnsWhenWide: Boolean = false) = DefinitionsDocument.themeJs(
         DefinitionsDocument.DocTheme(
             DefinitionsDocument.Tokens(
                 text = 0xFFECEFF1.toInt(),
@@ -617,6 +684,7 @@ class DefinitionsDocumentTest {
                 baseFontSizePx = 14f,
             ),
             divider = 0, band = 0,
+            twoColumnsWhenWide = twoColumnsWhenWide,
         ),
         rtl = false,
     )

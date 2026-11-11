@@ -18,6 +18,7 @@ import kotlinx.serialization.decodeFromString
 import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.JsonObjectBuilder
 import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.add
 import kotlinx.serialization.json.addJsonObject
@@ -66,6 +67,11 @@ class OpenAiRateLimitException(override val failure: BackendFailure) :
  * via `stream: true`, but [TranslationBackend.translate] returns a full
  * String. Adding streaming would require a `Flow<String>` overload across
  * the interface; deferred.
+ *
+ * Every chat call (a translation, a batch, a free-form answer) is one
+ * round trip through [exchange], which owns the request, the reading of
+ * the reply's status and all cooldown and usage bookkeeping; the three
+ * differ only in the few ways [ChatCall] names.
  */
 class OpenAiBackend(
     override val id: BackendId,
@@ -111,6 +117,10 @@ class OpenAiBackend(
      *  sends no Authorization at all, as its own client doesn't, and a blank
      *  stored key does not make it unconfigured. */
     private val account: () -> AccountRequirement = { ServiceType.OPENAI.account },
+    /** Whether the endpoint's models answer a free-form prompt
+     *  ([OpenAiPreset.answersPrompts]); an endpoint serving a
+     *  translation-only model is not offered one ([canComplete]). */
+    private val answersPrompts: () -> Boolean = { true },
     /** Extra top-level fields for the chat-completions body, chosen per
      *  model: the instance's thinking pick as its preset's
      *  [ReasoningControls] entry sends it, or nothing
@@ -136,7 +146,8 @@ class OpenAiBackend(
      *  return null/no-op and the registry's skip check never fires. */
     private val cooldownState: CooldownState? = null,
     private val client: OkHttpClient = defaultClient(),
-) : TranslationBackend, BatchTranslator, ModelLister, KeyValidator, Cooldownable, ThinkingReporter {
+) : TranslationBackend, BatchTranslator, PromptCompleter, ModelLister, KeyValidator, Cooldownable,
+    ThinkingReporter {
 
     override val requiresInternet: Boolean = true
     override val isDegradedFallback: Boolean = false
@@ -240,7 +251,161 @@ class OpenAiBackend(
         // the meter be informational only.
         enabledProvider() && credential() != null
 
-    override suspend fun translate(text: String, source: String, target: String): String =
+    override suspend fun translate(text: String, source: String, target: String): String {
+        val system = QwenChatTemplate.systemPrompt(source, target)
+        // Online backend: {context} is affordable here (server-side prefill)
+        // and is gated off for the on-device tiers. See TOKEN_CONTEXT.
+        val user = QwenChatTemplate.userMessage(text, source, target, includeContext = true)
+        return cleanLlmOutput(exchange(system, user, textCall))
+    }
+
+    override suspend fun translateBatch(
+        texts: List<String>,
+        source: String,
+        target: String,
+    ): List<String> {
+        val system = LlmBatchPrompt.systemPrompt(source, target)
+        val user = LlmBatchPrompt.userMessage(texts, source, target, includeContext = true)
+        val rawJson = exchange(system, user, batchCall)
+        // Anthropic's compatibility layer IGNORES response_format
+        // (documented), so there the JSON shape rests on the prompt's own
+        // contract, and the parse unwraps a code fence first rather than
+        // letting a fenced reply trip the per-text retry.
+        val wrapper = try {
+            PtJson.lenient.decodeFromString<BatchTranslationsWrapper>(stripCodeFence(rawJson))
+        } catch (e: SerializationException) {
+            throw BatchParseException("OpenAI batch: response JSON parse failed", e)
+        }
+        val arr = wrapper.translations
+            ?: throw BatchParseException("OpenAI batch: missing translations[]")
+        if (arr.size != texts.size) {
+            throw BatchParseException(
+                "OpenAI batch: returned ${arr.size} translations for ${texts.size} inputs"
+            )
+        }
+        return arr.map { cleanLlmOutput(it) }
+    }
+
+    override fun canComplete(): Boolean =
+        answersPrompts() && enabledProvider() && credential() != null
+
+    override suspend fun complete(system: String, user: String): String =
+        exchange(system, user, answerCall)
+
+    /** How one kind of chat call differs from the others; everything else
+     *  about the round trip is [exchange]'s. */
+    private class ChatCall(
+        /** Names the call in the log. */
+        val label: String,
+        /** Body fields beside the model, the messages and [requestExtras]. */
+        val bodyExtras: JsonObjectBuilder.() -> Unit = {},
+        /** What a 400 that is not a billing refusal means, from its body. */
+        val on400: (body: String) -> IOException,
+        /** What a reply with no message in it means. */
+        val onEmptyReply: () -> IOException,
+        /** An answer to a free-form prompt ([PromptCompleter]), not a
+         *  translation. Three things follow, all in [exchange]: it goes out
+         *  on [answerClient] (an answer's wait), it is cancelled with its
+         *  coroutine, and a failure of the transport is not counted against
+         *  the service. */
+        val isAnswer: Boolean = false,
+    )
+
+    private val textCall = ChatCall(
+        label = "translate",
+        on400 = { body ->
+            StructuralFailureException(
+                "OpenAI error 400: ${body.take(300).replace('\n', ' ')}", httpStatusFailure(400),
+            )
+        },
+        onEmptyReply = {
+            StructuralFailureException("No translation in OpenAI response", BackendFailure.BAD_RESPONSE)
+        },
+    )
+
+    private val batchCall = ChatCall(
+        label = "translate batch",
+        // OpenAI strict mode: requires additionalProperties:false +
+        // required[] + strict:true together. Some OpenAI-compatible
+        // endpoints (older models, some proxies) reject strict mode
+        // with HTTP 400, which [on400] turns into a per-text retry.
+        bodyExtras = {
+            putJsonObject("response_format") {
+                put("type", "json_schema")
+                putJsonObject("json_schema") {
+                    put("name", "translations")
+                    put("strict", true)
+                    putJsonObject("schema") {
+                        put("type", "object")
+                        put("additionalProperties", false)
+                        putJsonObject("properties") {
+                            putJsonObject("translations") {
+                                put("type", "array")
+                                putJsonObject("items") { put("type", "string") }
+                            }
+                        }
+                        putJsonArray("required") { add("translations") }
+                    }
+                }
+            }
+        },
+        // A 400 on the batch path is most often "this endpoint doesn't
+        // support strict json_schema" — common on OpenAI-compatible
+        // endpoints (older OpenRouter / LM Studio / non-`o` model
+        // families). Surface as BatchParseException so the registry
+        // retries this same backend's per-text translate() (which doesn't
+        // send response_format) before skipping to a degraded fallback.
+        // (A billing 400 never gets here: [exchange] cools down on it
+        // first, or the per-text retry would pay one more rejected call
+        // per string for it, every frame.)
+        on400 = { body ->
+            Log.w(TAG, "batch 400 body=${body.take(500)} — retrying per-text on same backend")
+            BatchParseException("OpenAI batch 400: ${body.take(500)}")
+        },
+        onEmptyReply = { BatchParseException("OpenAI batch: empty message content") },
+    )
+
+    private val answerCall = ChatCall(
+        label = "complete",
+        on400 = { body ->
+            StructuralFailureException(
+                "OpenAI error 400: ${body.take(300).replace('\n', ' ')}", httpStatusFailure(400),
+            )
+        },
+        onEmptyReply = {
+            StructuralFailureException("No answer in OpenAI response", BackendFailure.BAD_RESPONSE)
+        },
+        isAnswer = true,
+    )
+
+    /** The client an answer goes out on: this backend's own (its pool, its
+     *  endpoint policy) with an answer's wait for the reply
+     *  ([PromptCompleter.ANSWER_TIMEOUT_SECONDS]). */
+    private val answerClient: OkHttpClient by lazy {
+        client.newBuilder()
+            .readTimeout(PromptCompleter.ANSWER_TIMEOUT_SECONDS, TimeUnit.SECONDS)
+            .build()
+    }
+
+    /**
+     * One chat-completions round trip: [system] and [user] out, the reply's
+     * text back. The ONE place a chat request is built, its status read and
+     * the service's standing recorded, for every kind of call ([ChatCall]):
+     *  - 401 is the key; a keyless provider's 401/403 is a block
+     *    ([throwIfKeylessRefusal]).
+     *  - 429 records a cooldown from whatever the reply says about when to
+     *    come back ([recordOpenAi429]).
+     *  - A 400 that says the account cannot pay is a billing cooldown
+     *    (Anthropic reports a dead balance as a 400); any other 400 is the
+     *    call's own to interpret ([ChatCall.on400]).
+     *  - A 5xx climbs the rate-limit ladder.
+     *  - A failure of the transport (no connection, a timeout) climbs the
+     *    network ladder, except for an answer ([ChatCall.isAnswer]). Every
+     *    exception thrown on purpose here is a [ClassifiedFailure] and has
+     *    done its own bookkeeping, so that is the test, never the catch
+     *    order (they are all IOExceptions).
+     */
+    private suspend fun exchange(system: String, user: String, call: ChatCall): String =
         withContext(Dispatchers.IO) {
             clearCooldownIfCredentialsChanged()
             val credential = credential()
@@ -249,12 +414,8 @@ class OpenAiBackend(
                 )
             val baseUrl = baseUrlProvider().trim().trimEnd('/')
             val model = modelProvider()
-            val system = QwenChatTemplate.systemPrompt(source, target)
-            // Online backend: {context} is affordable here (server-side prefill)
-            // and is gated off for the on-device tiers. See TOKEN_CONTEXT.
-            val user = QwenChatTemplate.userMessage(text, source, target, includeContext = true)
-            val translateStart = System.nanoTime()
-            Log.i(TAG, "translate begin model=$model textLen=${text.length}")
+            val startNs = System.nanoTime()
+            Log.i(TAG, "${call.label} begin model=$model inLen=${user.length}")
 
             val bodyJson = buildJsonObject {
                 put("model", model)
@@ -262,6 +423,7 @@ class OpenAiBackend(
                     addJsonObject { put("role", "system"); put("content", system) }
                     addJsonObject { put("role", "user"); put("content", user) }
                 }
+                call.bodyExtras(this)
                 requestExtras(model).forEach { (name, value) -> put(name, value) }
             }.toString()
 
@@ -273,7 +435,14 @@ class OpenAiBackend(
                 .build()
 
             try {
-                client.newCall(request).execute().use { response ->
+                val http = (if (call.isAnswer) answerClient else client).newCall(request)
+                // An answer is long and its user may put it away, so its
+                // coroutine's cancel cancels the call wherever the exchange
+                // stands, the reply's body included ([blockingOn] over
+                // [executeToEnd]); a translation is short and runs to its
+                // end.
+                val reply = if (call.isAnswer) blockingOn(http) { http.executeToEnd() } else http.execute()
+                reply.use { response ->
                     throwIfKeylessRefusal(credential, response)
                     when (response.code) {
                         401 -> throw OpenAiAuthException()
@@ -286,11 +455,18 @@ class OpenAiBackend(
                         else -> if (!response.isSuccessful) {
                             val fullBody = response.body.string()
                             val errBody = fullBody.take(300).replace('\n', ' ')
-                            Log.w(TAG, "translate error code=${response.code} body=$errBody")
-                            val billing = response.code == 400 && isBillingExhausted(fullBody)
-                            if (billing) {
-                                recordBillingExhausted()
-                            } else if (response.code >= 500) {
+                            Log.w(TAG, "${call.label} error code=${response.code} body=$errBody")
+                            if (response.code == 400) {
+                                if (isBillingExhausted(fullBody)) {
+                                    recordBillingExhausted()
+                                    throw StructuralFailureException(
+                                        "OpenAI error 400: $errBody",
+                                        BackendFailure(BackendFailureKind.BILLING, 400),
+                                    )
+                                }
+                                throw call.on400(fullBody)
+                            }
+                            if (response.code >= 500) {
                                 cooldownState?.recordLadderFailure(
                                     CooldownLadder.RateLimit, "Server error",
                                     CooldownCause.SERVER_ERROR,
@@ -298,184 +474,24 @@ class OpenAiBackend(
                             }
                             throw StructuralFailureException(
                                 "OpenAI error ${response.code}: $errBody",
-                                if (billing) BackendFailure(BackendFailureKind.BILLING, 400)
-                                else httpStatusFailure(response.code),
+                                httpStatusFailure(response.code),
                             )
                         }
                     }
-                    val bodyStr = response.body.string()
-                    val parsed = PtJson.lenient.decodeFromString<OpenAiChatResponse>(bodyStr)
-                    val raw = parsed.choices.firstOrNull()?.message?.text
-                        ?: throw StructuralFailureException(
-                            "No translation in OpenAI response", BackendFailure.BAD_RESPONSE,
-                        )
+                    val parsed = PtJson.lenient.decodeFromString<OpenAiChatResponse>(response.body.string())
+                    val text = parsed.choices.firstOrNull()?.message?.text ?: throw call.onEmptyReply()
                     parsed.usage?.let { usageTracker.addTokens(it.prompt_tokens, it.completion_tokens) }
-                    val totalMs = (System.nanoTime() - translateStart) / 1_000_000
-                    Log.i(TAG, "translate ok totalMs=$totalMs outLen=${raw.length}")
-                    cleanLlmOutput(raw)
+                    val totalMs = (System.nanoTime() - startNs) / 1_000_000
+                    Log.i(TAG, "${call.label} ok totalMs=$totalMs outLen=${text.length}")
+                    text
                 }
-            } catch (e: OpenAiAuthException) { throw e }
-            catch (e: OpenAiRateLimitException) { throw e }
-            catch (e: StructuralFailureException) {
-                // 4xx / 5xx (already recorded above) / empty payload —
-                // deterministic upstream, no network-ladder bump.
-                throw e
-            }
-            catch (e: IOException) {
-                cooldownState?.recordNetworkFailure("Connection failed")
+            } catch (e: IOException) {
+                if (e !is ClassifiedFailure && !call.isAnswer) {
+                    cooldownState?.recordNetworkFailure("Connection failed")
+                }
                 throw e
             }
         }
-
-    override suspend fun translateBatch(
-        texts: List<String>,
-        source: String,
-        target: String,
-    ): List<String> = withContext(Dispatchers.IO) {
-        clearCooldownIfCredentialsChanged()
-        val credential = credential()
-            ?: throw StructuralFailureException(
-                "OpenAI API key not configured", BackendFailure(BackendFailureKind.AUTH),
-            )
-        val baseUrl = baseUrlProvider().trim().trimEnd('/')
-        val model = modelProvider()
-        val system = LlmBatchPrompt.systemPrompt(source, target)
-        val user = LlmBatchPrompt.userMessage(texts, source, target, includeContext = true)
-        val translateStart = System.nanoTime()
-        Log.i(TAG, "translate batch begin model=$model batchSize=${texts.size} totalLen=${texts.sumOf { it.length }}")
-
-        // OpenAI strict mode: requires additionalProperties:false +
-        // required[] + strict:true together. Some OpenAI-compatible
-        // endpoints (older models, some proxies) reject strict mode
-        // with HTTP 400 — registry handles that by falling through.
-        // Anthropic's compatibility layer instead IGNORES response_format
-        // (documented), so there the JSON shape rests on the prompt's own
-        // contract, and the parse below unwraps a code fence first rather
-        // than letting a fenced reply trip the per-text retry.
-        val schema = buildJsonObject {
-            put("type", "object")
-            put("additionalProperties", false)
-            putJsonObject("properties") {
-                putJsonObject("translations") {
-                    put("type", "array")
-                    putJsonObject("items") { put("type", "string") }
-                }
-            }
-            putJsonArray("required") { add("translations") }
-        }
-        val bodyJson = buildJsonObject {
-            put("model", model)
-            putJsonArray("messages") {
-                addJsonObject { put("role", "system"); put("content", system) }
-                addJsonObject { put("role", "user"); put("content", user) }
-            }
-            putJsonObject("response_format") {
-                put("type", "json_schema")
-                putJsonObject("json_schema") {
-                    put("name", "translations")
-                    put("strict", true)
-                    put("schema", schema)
-                }
-            }
-            requestExtras(model).forEach { (name, value) -> put(name, value) }
-        }.toString()
-
-        val request = Request.Builder()
-            .url("$baseUrl/chat/completions")
-            .apply { credential.chatAuthHeaders().forEach { (name, value) -> addHeader(name, value) } }
-            .addHeader("Content-Type", "application/json")
-            .post(bodyJson.toRequestBody("application/json".toMediaType()))
-            .build()
-
-        try {
-            client.newCall(request).execute().use { response ->
-                throwIfKeylessRefusal(credential, response)
-                when (response.code) {
-                    401 -> throw OpenAiAuthException()
-                    429 -> {
-                        val hints = RateLimitHints.from(response)
-                        val body = response.body.string()
-                        Log.w(TAG, "429 $hints body=${body.take(500)}")
-                        throw OpenAiRateLimitException(recordOpenAi429(body, hints))
-                    }
-                    400 -> {
-                        val fullBody = response.body.string()
-                        val body = fullBody.take(500)
-                        if (isBillingExhausted(fullBody)) {
-                            // Anthropic reports a dead balance as a 400, and
-                            // the per-text retry below would pay one more
-                            // rejected call per string for it, every frame.
-                            // Cool down instead, as the OpenAI 429 path does.
-                            Log.w(TAG, "batch 400 billing body=$body")
-                            recordBillingExhausted()
-                            throw StructuralFailureException(
-                                "OpenAI error 400: $body", BackendFailure(BackendFailureKind.BILLING, 400),
-                            )
-                        }
-                        // Otherwise a 400 on the batch path is most often
-                        // "this endpoint doesn't support strict json_schema"
-                        // — common on OpenAI-compatible endpoints (older
-                        // OpenRouter / LM Studio / non-`o` model families).
-                        // Surface as BatchParseException so the registry
-                        // retries this same backend's per-text translate()
-                        // (which doesn't send response_format) before
-                        // skipping to a degraded fallback.
-                        Log.w(TAG, "batch 400 body=$body — retrying per-text on same backend")
-                        throw BatchParseException("OpenAI batch 400: $body")
-                    }
-                    else -> if (!response.isSuccessful) {
-                        val errBody = response.body.string()
-                            .take(300).replace('\n', ' ')
-                        Log.w(TAG, "translate batch error code=${response.code} body=$errBody")
-                        if (response.code >= 500) {
-                            cooldownState?.recordLadderFailure(
-                                CooldownLadder.RateLimit, "Server error",
-                                CooldownCause.SERVER_ERROR,
-                            )
-                        }
-                        throw StructuralFailureException(
-                            "OpenAI error ${response.code}: $errBody", httpStatusFailure(response.code),
-                        )
-                    }
-                }
-                val bodyStr = response.body.string()
-                val parsed = PtJson.lenient.decodeFromString<OpenAiChatResponse>(bodyStr)
-                val rawJson = parsed.choices.firstOrNull()?.message?.text
-                    ?: throw BatchParseException("OpenAI batch: empty message content")
-                parsed.usage?.let { usageTracker.addTokens(it.prompt_tokens, it.completion_tokens) }
-                val wrapper = try {
-                    PtJson.lenient.decodeFromString<BatchTranslationsWrapper>(stripCodeFence(rawJson))
-                } catch (e: SerializationException) {
-                    throw BatchParseException("OpenAI batch: response JSON parse failed", e)
-                }
-                val arr = wrapper.translations
-                    ?: throw BatchParseException("OpenAI batch: missing translations[]")
-                if (arr.size != texts.size) {
-                    throw BatchParseException(
-                        "OpenAI batch: returned ${arr.size} translations for ${texts.size} inputs"
-                    )
-                }
-                val totalMs = (System.nanoTime() - translateStart) / 1_000_000
-                Log.i(TAG, "translate batch ok totalMs=$totalMs batchSize=${arr.size}")
-                arr.map { cleanLlmOutput(it) }
-            }
-        } catch (e: OpenAiAuthException) { throw e }
-        catch (e: OpenAiRateLimitException) { throw e }
-        catch (e: BatchParseException) {
-            // Intra-backend retry signal — registry re-tries per-text on
-            // this same backend; no cooldown.
-            throw e
-        }
-        catch (e: StructuralFailureException) {
-            // 4xx / 5xx (already recorded above) / empty payload —
-            // deterministic upstream, no network-ladder bump.
-            throw e
-        }
-        catch (e: IOException) {
-            cooldownState?.recordNetworkFailure("Connection failed")
-            throw e
-        }
-    }
 
     /**
      * Verify the API key by hitting `/models` on the configured endpoint.

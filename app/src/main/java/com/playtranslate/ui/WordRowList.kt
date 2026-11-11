@@ -329,6 +329,12 @@ internal class WordRowList<T>(
     /** What a tap on [act] of row [rowId] does (a controller's press). */
     fun activate(rowId: String, act: String) = document.activate(rowId, act)
 
+    /** The tappable targets the page last reported, as actions for a
+     *  controller cursor that walks them with the host's own controls (the
+     *  capture sheet's): each a target inside the document's view
+     *  ([NavAction.target]). None while the list holds no page. */
+    fun navActions(): List<NavAction> = document.navActions()
+
     /** True when the notice stands where the rows would be (no usable
      *  WebView): no layout report will come. */
     val showsNotice: Boolean get() = document.showsNotice
@@ -404,8 +410,15 @@ internal fun wordRowList(
     scope: CoroutineScope,
     host: WordRowList.Host<RowState>,
     scale: Float,
+    /** Two columns on a wide page
+     *  ([DefinitionsDocument.DocTheme.twoColumnsWhenWide]): the results'
+     *  Words card only. */
+    twoColumnsWhenWide: Boolean = false,
+    /** The page laid the rows out. */
+    onLayout: () -> Unit = {},
 ) = WordRowList(
     ctx, slot, scope, host,
     describe = RowState::toWordEntry,
-    theme = { cardDocTheme(ctx, WordRowList.GLOSS_SP * scale) },
+    theme = { cardDocTheme(ctx, WordRowList.GLOSS_SP * scale, twoColumnsWhenWide) },
+    onLayout = onLayout,
 )

@@ -10,7 +10,11 @@ import org.junit.Test
  * overflow. No Android. Pins: everything inline while it fits; strict order
  * (what stays inline is a prefix, the tail folds first); ⋯ never takes a
  * lone action it costs as much as; the name keeps its width until nothing
- * fits beside it; wider never folds more.
+ * fits beside it; wider never folds more. Without ⋯ (the Ask header's
+ * ready-made questions): what does not fit is not shown, still a prefix in
+ * order; ⋯ never shows and keeps no slot or gap, so one action more can fit
+ * than with it; the name is cut only when the pinned actions alone don't
+ * fit beside it; wider never shows fewer.
  */
 class HeaderFitTest {
 
@@ -134,5 +138,75 @@ class HeaderFitTest {
         val noGap = HeaderFit.plan(280, 100, 0, List(4) { icon }, listOf(eye), more)
         assertEquals(4, noGap.inlineCount)
         assertEquals(1, source(280).inlineCount)
+    }
+
+    // ── Without ⋯: the Ask header's ready-made questions ────────────────
+
+    private val pillWidths = listOf(120, 90, 110)
+
+    /** The Ask header's shape: worded pills with no ⋯, then the pinned eye. */
+    private fun pills(width: Int?, widths: List<Int> = pillWidths, label: Int = 40) =
+        HeaderFit.plan(width, label, gap, widths, listOf(eye), more, overflow = false)
+
+    // Pill action side, gap to the label included:
+    //   all three + eye: 120 + 90 + 110 + 36 + 4 * 16 = 420
+    //   two + eye:       120 + 90 + 36 + 3 * 16       = 294
+    //   one + eye:       120 + 36 + 2 * 16            = 188
+    //   the eye alone:   36 + 16                      = 52
+
+    @Test fun `without more, an action that does not fit is not shown, at each exact boundary`() {
+        assertEquals(HeaderFit.Plan(3, showMore = false, labelWidth = 40), pills(460))
+        assertEquals(HeaderFit.Plan(2, showMore = false, labelWidth = 40), pills(459))
+        assertEquals(HeaderFit.Plan(2, showMore = false, labelWidth = 40), pills(334))
+        assertEquals(HeaderFit.Plan(1, showMore = false, labelWidth = 40), pills(333))
+        assertEquals(HeaderFit.Plan(1, showMore = false, labelWidth = 40), pills(228))
+        assertEquals(HeaderFit.Plan(0, showMore = false, labelWidth = 40), pills(227))
+        assertEquals(HeaderFit.Plan(0, showMore = false, labelWidth = 40), pills(92))
+    }
+
+    @Test fun `without more, more never shows at any width`() {
+        for (w in 0..600) assertFalse("at $w", pills(w).showMore)
+        assertFalse(pills(null).showMore)
+    }
+
+    @Test fun `without more, no slot or gap is kept for it, so one action more fits than with it`() {
+        // Two pills and the eye need 294 beside the 40 name. With ⋯ the
+        // same two need its 36 and a gap as well (346), so only one stays.
+        assertEquals(HeaderFit.Plan(2, showMore = false, labelWidth = 40), pills(334))
+        assertEquals(
+            "the same row with ⋯",
+            HeaderFit.Plan(1, showMore = true, labelWidth = 40),
+            HeaderFit.plan(334, 40, gap, pillWidths, listOf(eye), more),
+        )
+    }
+
+    @Test fun `without more, what shows is still a prefix, a narrower later action never jumps the queue`() {
+        // 120 fits (228 with the name), 120 + 200 does not (444), and
+        // 120 + 30 would (274): the 30 waits behind the 200 all the same.
+        assertEquals(
+            HeaderFit.Plan(1, showMore = false, labelWidth = 40),
+            pills(300, widths = listOf(120, 200, 30)),
+        )
+    }
+
+    @Test fun `without more, the name is cut only when the eye alone does not fit beside it`() {
+        assertEquals(HeaderFit.Plan(0, showMore = false, labelWidth = 40), pills(92))
+        assertEquals(HeaderFit.Plan(0, showMore = false, labelWidth = 39), pills(91))
+        assertEquals(HeaderFit.Plan(0, showMore = false, labelWidth = 0), pills(52))
+        assertEquals(HeaderFit.Plan(0, showMore = false, labelWidth = 0), pills(10))
+    }
+
+    @Test fun `without more, wider never shows fewer or cuts the name shorter`() {
+        var last = pills(0)
+        for (w in 1..600) {
+            val p = pills(w)
+            assertTrue("inline at $w", p.inlineCount >= last.inlineCount)
+            assertTrue("name at $w", p.labelWidth >= last.labelWidth)
+            last = p
+        }
+    }
+
+    @Test fun `without more, an unmeasured row shows everything`() {
+        assertEquals(HeaderFit.Plan(3, showMore = false, labelWidth = 40), pills(null))
     }
 }

@@ -5,6 +5,7 @@ import android.content.Context
 import androidx.annotation.StringRes
 import com.playtranslate.R
 import com.playtranslate.translation.BackendStatus
+import com.playtranslate.translation.PromptCompleter
 import com.playtranslate.translation.Tone
 import com.playtranslate.translation.TranslationBackend
 import com.playtranslate.translation.mnn.MnnTranslator
@@ -100,6 +101,15 @@ abstract class OnDeviceLlmBackend(
     final override val isDegradedFallback: Boolean = false
 
     final override fun isUsable(source: String, target: String): Boolean {
+        if (!canRun()) return false
+        if (source.equals(target, ignoreCase = true)) return false
+        return supportsPair(source, target)
+    }
+
+    /** Whether the model can be run at all right now, whatever it is asked:
+     *  the device can host it, the user has it switched on, and it is on
+     *  disk. The part of [isUsable] that is not about a language pair. */
+    protected fun canRun(): Boolean {
         // Hardware gate is the cheapest check and a hard prerequisite — a
         // device that can't even host the native library never proceeds. This
         // mirrors the UI's row-disabling logic so the waterfall can never
@@ -107,9 +117,7 @@ abstract class OnDeviceLlmBackend(
         // across an OS / device change.
         if (!meetsHardwareRequirements()) return false
         if (!enabledProvider()) return false
-        if (!modelHelper.isInstalled(context)) return false
-        if (source.equals(target, ignoreCase = true)) return false
-        return supportsPair(source, target)
+        return modelHelper.isInstalled(context)
     }
 
     /**
@@ -274,6 +282,30 @@ abstract class OnDeviceLlmBackend(
                     )
             }
         }
+}
+
+/**
+ * An on-device LLM that is a general chat model (Qwen, Gemma), as opposed to
+ * one fine-tuned for translation alone (Hunyuan-MT, which extends
+ * [OnDeviceLlmBackend] directly): besides translating, it answers a
+ * free-form prompt ([PromptCompleter]), through the same [MnnTranslator]
+ * and with its own chat envelope ([promptStyle]).
+ */
+abstract class OnDeviceChatLlmBackend(
+    context: Context,
+    enabledProvider: () -> Boolean,
+) : OnDeviceLlmBackend(context, enabledProvider), PromptCompleter {
+
+    final override fun canComplete(): Boolean = canRun()
+
+    final override suspend fun complete(system: String, user: String): String =
+        MnnTranslator.getInstance(context).complete(
+            system = system,
+            user = user,
+            modelPath = modelHelper.file(context).absolutePath,
+            promptStyle = promptStyle,
+            availMemFloorBytes = availMemFloorBytes,
+        )
 }
 
 /**

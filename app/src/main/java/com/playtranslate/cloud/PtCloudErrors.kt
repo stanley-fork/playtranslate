@@ -7,6 +7,7 @@ import com.playtranslate.translation.ClassifiedFailure
 import com.playtranslate.translation.CooldownCause
 import com.playtranslate.translation.CooldownLadder
 import com.playtranslate.translation.CooldownState
+import com.playtranslate.translation.SentenceAnswer
 import com.playtranslate.translation.classifyBackendFailure
 import com.playtranslate.translation.httpStatusFailure
 import com.playtranslate.translation.nextMidnightPacific
@@ -14,15 +15,19 @@ import com.playtranslate.translation.parseIso8601
 import kotlinx.serialization.decodeFromString
 import java.io.IOException
 import java.io.InterruptedIOException
+import kotlin.math.ceil
 
 /**
  * A PlayTranslate Cloud call that failed before a usable answer arrived: an
  * HTTP error, a transport failure, a part 1 this client cannot read
- * ([PtCloudClient.postFrame]), or a translate call whose answer was not a
- * translation ([PtCloudClient.postTranslate]). The capture falls back to the
- * device reader, a waterfall pass to its next backend; [failure] is what the
- * translation-error pill words. By the time this is thrown the failure's
- * cooldown is recorded, an account it says the server withholds service
+ * ([PtCloudClient.postFrame]), a translate call whose answer was not a
+ * translation ([PtCloudClient.postTranslate]), or an Ask whose answer was
+ * none ([PtCloudClient.postAsk]). The capture falls back to the
+ * device reader, a waterfall pass to its next backend, a question to the
+ * next service that answers one; [failure] is what the
+ * translation-error pill words, and the Ask section's reason line. By the time this is thrown the failure's
+ * cooldown is recorded where it records one (an Ask records fewer,
+ * [PtCloudErrors.classifyAskHttp]), an account it says the server withholds service
  * from is handed to the service ([Classified.withheldAccount]), and, on the
  * frame route, its attempt
  * is reported (the registry reports the translate route's). The message names the kind and
@@ -150,8 +155,31 @@ data class Classified(
     val failure: BackendFailure,
     val cooldown: CooldownAction,
     val withheldAccount: KeyCheck.Withheld? = null,
+    /** For an Ask's own `429 ask_limit`, the seconds until the account's
+     *  count of answers starts again; null for every other answer, and
+     *  always on the other two routes. Never the cooldown's to record
+     *  ([cooldown] is [CooldownAction.None] beside it): the service keeps
+     *  it apart, as a pause of its answers alone
+     *  ([PtCloudService.onAskLimit]). */
+    val askLimitedForS: Long? = null,
 ) {
     fun record(state: CooldownState) = cooldown.applyTo(state)
+}
+
+/** How a `POST /v1/ask` 200 settled ([PtCloudErrors.classifyAsk]). Neither
+ *  records a cooldown. */
+sealed interface AskOutcome {
+    /** The service answered: status `ok` with the answer's text, shown as
+     *  it is and marked when the server's output cap cut it
+     *  ([SentenceAnswer.Text]), or status `out_of_scope`, the model
+     *  having judged the question to be about something other than the
+     *  sentence ([SentenceAnswer.OutOfScope]), which the app says in words
+     *  of its own. */
+    data class Answered(val answer: SentenceAnswer) : AskOutcome
+
+    /** No whole answer; the question goes to the next service that answers
+     *  one. [failure] is for the reason line alone. */
+    data class Failed(val failure: BackendFailure) : AskOutcome
 }
 
 /** How a frame's part 2, or a translate call's one answer, settled:
@@ -190,10 +218,12 @@ sealed interface TranslationOutcome {
 }
 
 /**
- * The one failure table for PlayTranslate Cloud, for both of its routes:
- * `POST /v1/frame` ([PtCloudClient.postFrame]) and `POST /v1/translate`
+ * The one failure table for PlayTranslate Cloud, for its routes:
+ * `POST /v1/frame` ([PtCloudClient.postFrame]), `POST /v1/translate`
  * ([PtCloudClient.postTranslate], the registry backend [PtCloudBackend]'s
- * call), and the one reading of the cloud page's calls: the key check
+ * call) and `POST /v1/ask` ([PtCloudClient.postAsk], the same backend's
+ * answers: [classifyAskHttp], [classifyAsk]), and the one reading of the
+ * cloud page's calls: the key check
  * ([classifyKeyCheck]), the health check ([classifyHealth]), the two
  * sign-in calls ([classifyRequestCode], [classifyVerifyCode]) and the two
  * terms calls ([classifyTerms], [classifyTermsAccept]). Every row of
@@ -301,6 +331,96 @@ object PtCloudErrors {
         }
         503 -> Classified(BackendFailure(BackendFailureKind.SERVER_ERROR, code), CooldownAction.None)
         else -> Classified(httpStatusFailure(code), CooldownAction.None)
+    }
+
+    /**
+     * A non-200 answer to `POST /v1/ask` ("Ask" in docs/api.md). What the
+     * edge answers on every route means here what it means on the other
+     * two, so it is [classifyHttp]'s to read, cooldown and withheld account
+     * included: a 401, a 403 `no_entitlement` or `terms_required`, a 410
+     * `service_closed`, the edge's own 429 (`rate limited`) and a 502 (the
+     * edge cannot reach the host). Three answers are the route's own, and
+     * none may touch the cooldown translation and OCR share:
+     *  - 429 `ask_limit`: the account's answers for this UTC day are used
+     *    up. DAILY_QUOTA, with the seconds its body states until the count
+     *    starts again ([Classified.askLimitedForS]; none when the body
+     *    states no positive number, and the next question then asks and is
+     *    refused again). Told from the shared 429 by the body's `error`.
+     *  - 404, whatever its body: the cloud cannot answer questions (an edge
+     *    or a service from before the route). REJECTED with its code and no
+     *    cooldown, where an empty 404 on the other routes is the service
+     *    switched off: on this route it says nothing about them.
+     *  - 500: the service failed on this question, in the route's own code
+     *    and with its own model client. SERVER_ERROR with no cooldown, where
+     *    the other routes climb the ladder: a failure here is no word on
+     *    reading a capture or translating one, and a route that failed on
+     *    every question would otherwise keep both off the cloud.
+     * A 503, `ask_unavailable` (the route switched off) like any other, is
+     * [classifyHttp]'s SERVER_ERROR with no cooldown already, and a 413, 415
+     * or 422 its REJECTED (a request [PtCloudBackend] does not send).
+     */
+    fun classifyAskHttp(code: Int, body: String, retryAfter: String?): Classified {
+        val error = edgeError(body)
+        return when {
+            code == 429 && error?.error == ASK_LIMIT -> Classified(
+                BackendFailure(BackendFailureKind.DAILY_QUOTA, code),
+                CooldownAction.None,
+                askLimitedForS = error.retryAfterS?.takeIf { it > 0 }?.let { ceil(it).toLong() },
+            )
+            code == 404 -> Classified(BackendFailure(BackendFailureKind.REJECTED, code), CooldownAction.None)
+            code == 500 -> Classified(BackendFailure(BackendFailureKind.SERVER_ERROR, code), CooldownAction.None)
+            else -> classifyHttp(code, body, retryAfter)
+        }
+    }
+
+    /**
+     * An Ask's 200, by its status:
+     *  - an answer that is not `"part":"answer"` at
+     *    [PT_CLOUD_SCHEMA_VERSION]: a bad response.
+     *  - `ok`: the answer, as it is, cut ([SentenceAnswer.Text.cut]) when
+     *    its `finish_reason` is `length`, the server's output cap having
+     *    ended it: still the answer, which the app shows with a line saying
+     *    so. A blank one is a bad response (the server answers `ok` only
+     *    with a letter or a digit in the text).
+     *  - `out_of_scope`: an answer too, [SentenceAnswer.OutOfScope].
+     *  - `failed`, by its error's class, which is the translation routes'
+     *    object with their classes and one more: `rate_limited`
+     *    RATE_LIMITED, `quota` DAILY_QUOTA, `server_error` and `config` (the
+     *    server's own model credentials, never the user's key) SERVER_ERROR,
+     *    `deadline` TIMEOUT, `blocked` (the provider's filter stopped the
+     *    prompt or the answer) REJECTED, `bad_output` and anything else
+     *    BAD_RESPONSE. The kinds a translation's classes have
+     *    ([classifyTranslation]), without their cooldowns: the route has a
+     *    model client of its own, so its failure says nothing of the
+     *    translators. The error's `http_status` is the provider's answer to
+     *    the server, so it is carried for the log and left off REJECTED,
+     *    whose wording would show it as the app's own.
+     *  - any other status: a bad response.
+     */
+    fun classifyAsk(answer: AskAnswer): AskOutcome =
+        if (answer.part != PART_ANSWER || answer.schemaVersion != PT_CLOUD_SCHEMA_VERSION) {
+            AskOutcome.Failed(BackendFailure.BAD_RESPONSE)
+        } else when (answer.status) {
+            "ok" -> if (answer.answer.isBlank()) {
+                AskOutcome.Failed(BackendFailure.BAD_RESPONSE)
+            } else {
+                AskOutcome.Answered(SentenceAnswer.Text(answer.answer, cut = answer.finishReason == FINISH_LENGTH))
+            }
+            "out_of_scope" -> AskOutcome.Answered(SentenceAnswer.OutOfScope)
+            "failed" -> AskOutcome.Failed(askFailure(answer.error))
+            else -> AskOutcome.Failed(BackendFailure.BAD_RESPONSE)
+        }
+
+    private fun askFailure(err: WireTranslationError?): BackendFailure {
+        val code = err?.httpStatus
+        return when (err?.cls) {
+            "rate_limited" -> BackendFailure(BackendFailureKind.RATE_LIMITED, code)
+            "quota" -> BackendFailure(BackendFailureKind.DAILY_QUOTA, code)
+            "server_error", "config" -> BackendFailure(BackendFailureKind.SERVER_ERROR, code)
+            "deadline" -> BackendFailure(BackendFailureKind.TIMEOUT, code)
+            "blocked" -> BackendFailure(BackendFailureKind.REJECTED)
+            else -> BackendFailure(BackendFailureKind.BAD_RESPONSE, code)
+        }
     }
 
     /**
@@ -531,9 +651,9 @@ object PtCloudErrors {
      *  nothing usable. No cooldown. */
     val badPart1: Classified = Classified(BackendFailure.BAD_RESPONSE, CooldownAction.None)
 
-    /** A translate call's 200 whose body is not a [TranslationPart] (not
-     *  JSON, or missing a required field): the server answered, with
-     *  nothing usable. No cooldown. */
+    /** A translate call's 200 whose body is not a [TranslationPart], or an
+     *  Ask's that is not an [AskAnswer] (not JSON, or missing a required
+     *  field): the server answered, with nothing usable. No cooldown. */
     val unreadableAnswer: Classified = Classified(BackendFailure.BAD_RESPONSE, CooldownAction.None)
 
     /** True when [part] is a part 1 (`"part":"ocr"`) in the one schema this
@@ -632,11 +752,20 @@ object PtCloudErrors {
             }
         }
 
-    /** The `part` values this client reads: part 1's, the final part's, and
-     *  an item line's. */
+    /** The `part` values this client reads: part 1's, the final part's, an
+     *  item line's, and an Ask's answer's. */
     const val PART_OCR = "ocr"
     const val PART_TRANSLATION = "translation"
     const val PART_TRANSLATION_ITEM = "translation_item"
+    const val PART_ANSWER = "answer"
+
+    /** An Ask answer's `finish_reason` when the server's output cap ended
+     *  it; `stop` is the model ending it. */
+    private const val FINISH_LENGTH = "length"
+
+    /** An Ask's 429 `error` for the account's daily cap on answers; the 429
+     *  every route shares says `rate limited`. */
+    private const val ASK_LIMIT = "ask_limit"
 
     /** The edge's 403 `error` for a key whose account has no membership. */
     private const val NO_ENTITLEMENT = "no_entitlement"

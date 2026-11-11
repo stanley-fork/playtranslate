@@ -58,7 +58,7 @@ sealed interface TtsAlertTarget {
  */
 fun showTtsNoEngineDialog(target: TtsAlertTarget, onActionSelected: () -> Unit) {
     val themed = overlayThemedContext(target.context)
-    showTtsAlert(target) {
+    showAlertOn(target) {
         setTitle(themed.getString(R.string.tts_no_engine_dialog_title))
         setMessage(themed.getString(R.string.tts_no_engine_dialog_message))
         addButton(
@@ -97,7 +97,7 @@ fun showTtsLanguageUnsupportedDialog(
     } else {
         themed.getString(R.string.tts_language_unsupported_unknown_engine_message, langName)
     }
-    showTtsAlert(target) {
+    showAlertOn(target) {
         setTitle(themed.getString(R.string.tts_language_unsupported_dialog_title))
         setMessage(message)
         addButton(
@@ -109,8 +109,10 @@ fun showTtsLanguageUnsupportedDialog(
 }
 
 /** Build an [OverlayAlert] for [target], apply [configure], and show it on
- *  the matching surface — an accessibility overlay or an Activity. */
-private fun showTtsAlert(
+ *  the matching surface, an accessibility overlay or an Activity. For any
+ *  alert a surface that holds a [TtsAlertTarget] raises (the speak
+ *  buttons', the capture sheet's Ask section's). */
+internal fun showAlertOn(
     target: TtsAlertTarget,
     configure: OverlayAlert.Builder.() -> Unit,
 ) {

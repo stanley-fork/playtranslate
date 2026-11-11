@@ -54,7 +54,22 @@ object QwenChatTemplate {
      * from the GGUF's embedded jinja template.
      */
     fun systemBlock(source: String, target: String): String =
-        "<|im_start|>system\n${systemPrompt(source, target)}<|im_end|>\n"
+        systemEnvelope(systemPrompt(source, target))
+
+    /** [content] as the system turn, envelope and all: what [systemBlock]
+     *  wraps the translation prose in, for a caller with prose of its own
+     *  (a free-form prompt). */
+    fun systemEnvelope(content: String): String = "<|im_start|>system\n$content<|im_end|>\n"
+
+    /** [content] as the user turn plus the assistant role-open marker
+     *  ([userBlock]'s envelope). */
+    fun userEnvelope(content: String): String =
+        "<|im_start|>user\n$content<|im_end|>\n<|im_start|>assistant\n"
+
+    /** [userEnvelope] with Qwen 3.5's non-thinking marker
+     *  ([userBlockNoThink]'s envelope). */
+    fun userEnvelopeNoThink(content: String): String =
+        userEnvelope(content) + "<think>\n\n</think>\n\n"
 
     /**
      * The user turn with the full envelope plus the assistant role-open marker
@@ -67,8 +82,7 @@ object QwenChatTemplate {
      * on-device user turn is therefore byte-identical to its pre-{context} form.
      */
     fun userBlock(text: String, source: String, target: String): String =
-        "<|im_start|>user\n${userMessage(text, source, target, includeContext = false)}" +
-            "<|im_end|>\n<|im_start|>assistant\n"
+        userEnvelope(userMessage(text, source, target, includeContext = false))
 
     /**
      * Qwen 3.5 user turn — identical to [userBlock] but opens the assistant turn
@@ -80,5 +94,5 @@ object QwenChatTemplate {
      * ourselves. Used by [com.playtranslate.translation.llm.PromptStyle.Qwen35Chat].
      */
     fun userBlockNoThink(text: String, source: String, target: String): String =
-        userBlock(text, source, target) + "<think>\n\n</think>\n\n"
+        userEnvelopeNoThink(userMessage(text, source, target, includeContext = false))
 }

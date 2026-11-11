@@ -1,9 +1,7 @@
 package com.playtranslate.ui
 
 import android.content.Context
-import android.content.res.ColorStateList
 import android.view.View
-import android.widget.ImageButton
 import android.widget.LinearLayout
 import android.widget.TextView
 import android.widget.Toast
@@ -13,7 +11,6 @@ import androidx.core.view.isVisible
 import com.playtranslate.AnkiManager
 import com.playtranslate.Prefs
 import com.playtranslate.R
-import com.playtranslate.themeColor
 import com.playtranslate.vocab.HiddenWordsStore
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.flow.drop
@@ -27,11 +24,16 @@ import kotlinx.coroutines.launch
  * Host-agnostic: the in-app [TranslationResultFragment] and the floating
  * workspace's [WorkspaceSentencePage] both render through here, so the list
  * can't drift between the two surfaces. Views are found from [root]
- * (`fragment_translation_result.xml`'s Words card ids).
+ * (`section_words.xml`'s ids). The header is a [SectionHeaderRow] like the
+ * source and target sections': its eye is a pinned [HeaderAction], and its
+ * label carries the row count while rows are on screen ([syncLabel]).
  *
  * The rows are a [WordRowList] in [container]: ONE definitions document,
  * the pack's definitions and the imported dictionaries' alike drawn by its
  * page, with the deck badges and each row's speak spinner kept by the list.
+ * It is the one list whose rows take two columns where its page is at
+ * least 560px wide ([DefinitionsDocument.DocTheme.twoColumnsWhenWide]), as
+ * the card is at full width on a landscape screen.
  * This binder adds what is the card's own: the hidden-words eye as the
  * rows' second button, the hidden-last ordering, and the card's visibility.
  * The document feeds its rows on demand and fetches their structured
@@ -97,7 +99,15 @@ class WordRowsBinder(
     private val loadingText: TextView = root.findViewById(R.id.tvMainWordsLoading)
     private val noWordsText: TextView = root.findViewById(R.id.tvNoWords)
     private val card: View = root.findViewById(R.id.cardWords)
-    private val toggle: ImageButton = root.findViewById(R.id.btnToggleWords)
+    private val header: SectionHeaderRow = root.findViewById(R.id.wordsHeaderRow)
+    private val label: TextView = root.findViewById(R.id.labelWords)
+
+    /** The card's eye: pinned, so it sits at the header's end like the
+     *  other sections' eyes. The row tints and draws it from this model. */
+    private val eye = HeaderAction(
+        R.id.btnToggleWords, R.drawable.ic_visibility,
+        ctx.getString(R.string.cd_toggle_words_visibility), pinned = true,
+    )
 
     private val list = wordRowList(
         ctx, container, host.scope,
@@ -125,6 +135,8 @@ class WordRowsBinder(
             override fun onInteraction() = host.onInteraction()
         },
         WordRowList.COMPACT_SCALE,
+        twoColumnsWhenWide = true,
+        onLayout = { onHeightChanged?.invoke() },
     )
 
     /** The rows of the last Settled render as the lookup gave them, and the
@@ -153,16 +165,19 @@ class WordRowsBinder(
      *  so a redundant call costs nothing. */
     var onRowsWanted: (() -> Unit)? = null
 
+    /** The card's height may have changed: its page laid its rows out, a
+     *  lookup state changed what it shows, or its eye was tapped. For a host
+     *  that sizes itself to its content (the capture sheet); a page just
+     *  reflows. The change may not have laid out yet when this is called. */
+    var onHeightChanged: (() -> Unit)? = null
+
     /** The card's effective hidden state: the persisted pref or the live
      *  session's auto-hide. */
     val isHidden: Boolean get() = prefs.hideWordsSection || liveAutoHide
 
     init {
-        // Tint in code: the workspace inflates this layout with a plain
-        // (non-AppCompat) inflater that drops app:tint (the section binder's
-        // gear rule); the same color the XML asks for, so in-app matches.
-        toggle.imageTintList = ColorStateList.valueOf(ctx.themeColor(R.attr.ptTextMuted))
-        toggle.setOnClickListener {
+        header.setActions(listOf(eye), R.id.btnMoreWords)
+        eye.onClick = {
             // The opposite of what the card is SHOWING, whichever source hid
             // it: a tap on a live auto-hidden card reveals it (and clears a
             // stale hiding pref, since the reveal is what the user asked for),
@@ -172,6 +187,7 @@ class WordRowsBinder(
             prefs.hideWordsSection = hide
             liveAutoHide = false
             applyWordsVisibility()
+            onHeightChanged?.invoke()
         }
     }
 
@@ -181,9 +197,21 @@ class WordRowsBinder(
     fun applyWordsVisibility() {
         val hidden = isHidden
         card.visibility = if (hidden) View.GONE else View.VISIBLE
-        toggle.setImageResource(if (hidden) R.drawable.ic_visibility_off else R.drawable.ic_visibility)
+        eye.icon = if (hidden) R.drawable.ic_visibility_off else R.drawable.ic_visibility
+        header.labelDimmed = hidden
         list.shown = !hidden
+        syncLabel()
         if (!hidden) onRowsWanted?.invoke()
+    }
+
+    /** The header's label: the section's name, with the number of rows
+     *  while the card is showing rows. A hidden card builds none (class
+     *  doc), so it has no count to show. */
+    private fun syncLabel() {
+        val count = if (isHidden) 0 else lastRows.size
+        label.text =
+            if (count > 0) ctx.getString(R.string.section_words_count, count)
+            else ctx.getString(R.string.section_words)
     }
 
     /** The host's live-mode state. Edge-triggered: a start auto-hides the
@@ -198,6 +226,14 @@ class WordRowsBinder(
     }
 
     val isEmpty: Boolean get() = list.isEmpty
+
+    /** What a controller cursor can reach here, in visual order: the
+     *  header's shown actions (its eye, which stays whether the card shows
+     *  or not), then each tappable target the page reported for its rows (a
+     *  row, its speak button, its hidden-words eye), all inside the one
+     *  document view ([NavAction.target]). A hidden card holds no page, so
+     *  it has no such targets. */
+    fun navigableActions(): List<NavAction> = header.navActions() + list.navActions()
 
     /** The user is about to see this card's rows (the lookup for them is
      *  running): start loading the page now. A no-op for a hidden card.
@@ -233,11 +269,13 @@ class WordRowsBinder(
                 noWordsText.visibility = if (state.rows.isEmpty()) View.VISIBLE else View.GONE
             }
         }
+        onHeightChanged?.invoke()
     }
 
     private fun clearRows() {
         lastRows = emptyList()
         list.clear()
+        syncLabel()
     }
 
     /** Host teardown: the page and its shell go. Must be called when the
@@ -256,6 +294,7 @@ class WordRowsBinder(
         val sourceLang = prefs.sourceLangId
         hiddenOrderApplied = HiddenWordsStore.isLoaded(sourceLang)
         list.setRows(rows.hiddenLast(HiddenWordsStore.snapshot(ctx, sourceLang)), lang)
+        syncLabel()
     }
 
     private fun setHidden(row: RowState, hidden: Boolean) {

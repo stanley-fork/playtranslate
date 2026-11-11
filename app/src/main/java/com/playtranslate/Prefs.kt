@@ -1036,6 +1036,21 @@ class Prefs internal constructor(
         get() = sp.getBoolean(KEY_HIDE_WORDS_SECTION, true)
         set(v) = sp.edit { putBoolean(KEY_HIDE_WORDS_SECTION, v) }
 
+    /** Whether the results' Ask section is collapsed to its header. Shown
+     *  by default, for every install. */
+    var hideAskSection: Boolean
+        get() = sp.getBoolean(KEY_HIDE_ASK_SECTION, false)
+        set(v) = sp.edit { putBoolean(KEY_HIDE_ASK_SECTION, v) }
+
+    /** The ids of the Ask section's ready-made questions, most recently
+     *  asked first ([com.playtranslate.ask.AskPresets], which owns the
+     *  order and is the only reader and writer). Ids only, comma-joined: a
+     *  preset never asked is simply absent. */
+    var askPresetRecency: List<String>
+        get() = sp.getString(KEY_ASK_PRESET_RECENCY, null).orEmpty()
+            .split(",").filter { it.isNotEmpty() }
+        set(v) = sp.edit { putString(KEY_ASK_PRESET_RECENCY, v.joinToString(",")) }
+
     var showFuriganaInline: Boolean
         get() = sp.getBoolean(KEY_SHOW_FURIGANA_INLINE, false)
         set(v) = sp.edit { putBoolean(KEY_SHOW_FURIGANA_INLINE, v) }
@@ -1071,6 +1086,14 @@ class Prefs internal constructor(
     private val rawResultsFontMaxSp: Int
         get() = sp.getInt(KEY_RESULTS_FONT_MAX_SP, DEFAULT_RESULTS_FONT_MAX_SP)
             .coerceIn(FONT_SP_FLOOR, FONT_SP_CEIL)
+
+    /** The size of the Ask section's answer text (the "Asking…" line, the
+     *  answer, a failure), in sp, on every surface. One size, not a fitted
+     *  range: the section's own Text size picker sets it, on the same axis
+     *  as the range picker. */
+    var askFontSp: Int
+        get() = sp.getInt(KEY_ASK_FONT_SP, DEFAULT_ASK_FONT_SP).coerceIn(FONT_SP_FLOOR, FONT_SP_CEIL)
+        set(v) = sp.edit { putInt(KEY_ASK_FONT_SP, v.coerceIn(FONT_SP_FLOOR, FONT_SP_CEIL)) }
 
     /** Capture method chosen during onboarding: "" = not set, "accessibility", "media_projection" */
     var captureMethod: String
@@ -1960,11 +1983,13 @@ class Prefs internal constructor(
 
         /** Selectable bounds for the results text-size range picker, in sp.
          *  The picker's track spans exactly this; the binder clamps its fit to
-         *  whatever sub-range the user parks the two handles on. */
+         *  whatever sub-range the user parks the two handles on. The Ask
+         *  section's one-handle picker ([askFontSp]) spans the same. */
         const val FONT_SP_FLOOR = 12
         const val FONT_SP_CEIL = 28
         const val DEFAULT_RESULTS_FONT_MIN_SP = 16
         const val DEFAULT_RESULTS_FONT_MAX_SP = 24
+        const val DEFAULT_ASK_FONT_SP = 16
 
         /** Selectable bounds of [overlayMinTextSp], in sp. The default is also
          *  the range's low end: it is the overlay autosize floor, so the
@@ -2141,9 +2166,12 @@ class Prefs internal constructor(
         private const val KEY_HIDE_TRANSLATION_SECTION       = "hide_translation_section"
         private const val KEY_HIDE_ORIGINAL_SECTION          = "hide_original_section"
         private const val KEY_HIDE_WORDS_SECTION             = "hide_words_section"
+        private const val KEY_HIDE_ASK_SECTION               = "hide_ask_section"
+        private const val KEY_ASK_PRESET_RECENCY             = "ask_preset_recency"
         private const val KEY_SHOW_FURIGANA_INLINE          = "show_furigana_inline"
         private const val KEY_RESULTS_FONT_MIN_SP           = "results_font_min_sp"
         private const val KEY_RESULTS_FONT_MAX_SP           = "results_font_max_sp"
+        private const val KEY_ASK_FONT_SP                   = "ask_font_sp"
         private const val KEY_DEBUG_FORCE_SINGLE_SCREEN      = "debug_force_single_screen"
         private const val KEY_DEBUG_SHOW_OCR_BOXES           = "debug_show_ocr_boxes"
         private const val KEY_DEBUG_SHOW_DETECTION_LOG      = "debug_show_detection_log"

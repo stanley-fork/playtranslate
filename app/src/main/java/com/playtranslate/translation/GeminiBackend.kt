@@ -17,6 +17,7 @@ import kotlinx.serialization.decodeFromString
 import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.JsonObjectBuilder
 import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.add
 import kotlinx.serialization.json.addJsonObject
@@ -59,6 +60,9 @@ class GeminiRateLimitException(override val failure: BackendFailure) :
  *
  * Streaming note: Gemini supports `:streamGenerateContent`; deferred
  * for the same reason as [OpenAiBackend].
+ *
+ * Every generateContent call (a translation, a batch, a free-form answer)
+ * is one round trip through [exchange], as in [OpenAiBackend].
  */
 class GeminiBackend(
     // Identity is parameterized (defaults preserve the legacy singleton)
@@ -78,7 +82,7 @@ class GeminiBackend(
     private val usageTracker: UsageTracker,
     private val cooldownState: CooldownState,
     private val client: OkHttpClient = defaultClient(),
-) : TranslationBackend, BatchTranslator, ModelLister, KeyValidator, Cooldownable {
+) : TranslationBackend, BatchTranslator, PromptCompleter, ModelLister, KeyValidator, Cooldownable {
 
     override val requiresInternet: Boolean = true
     override val isDegradedFallback: Boolean = false
@@ -132,7 +136,146 @@ class GeminiBackend(
     override fun isUsable(source: String, target: String): Boolean =
         enabledProvider() && !keyProvider().isNullOrBlank()
 
-    override suspend fun translate(text: String, source: String, target: String): String =
+    override suspend fun translate(text: String, source: String, target: String): String {
+        val system = QwenChatTemplate.systemPrompt(source, target)
+        // Online backend: {context} is affordable here (server-side prefill)
+        // and is gated off for the on-device tiers. See TOKEN_CONTEXT.
+        val user = QwenChatTemplate.userMessage(text, source, target, includeContext = true)
+        return cleanLlmOutput(exchange(system, user, textCall))
+    }
+
+    override suspend fun translateBatch(
+        texts: List<String>,
+        source: String,
+        target: String,
+    ): List<String> {
+        val system = LlmBatchPrompt.systemPrompt(source, target)
+        val user = LlmBatchPrompt.userMessage(texts, source, target, includeContext = true)
+        val rawJson = exchange(system, user, batchCall)
+        val wrapper = try {
+            PtJson.lenient.decodeFromString<BatchTranslationsWrapper>(rawJson)
+        } catch (e: SerializationException) {
+            throw BatchParseException("Gemini batch: response JSON parse failed", e)
+        }
+        val arr = wrapper.translations
+            ?: throw BatchParseException("Gemini batch: missing translations[]")
+        if (arr.size != texts.size) {
+            throw BatchParseException(
+                "Gemini batch: returned ${arr.size} translations for ${texts.size} inputs"
+            )
+        }
+        return arr.map { cleanLlmOutput(it) }
+    }
+
+    override fun canComplete(): Boolean = enabledProvider() && !keyProvider().isNullOrBlank()
+
+    override suspend fun complete(system: String, user: String): String =
+        exchange(system, user, answerCall)
+
+    /** How one kind of generateContent call differs from the others;
+     *  everything else about the round trip is [exchange]'s. */
+    private class GenerateCall(
+        /** Names the call in the log. */
+        val label: String,
+        /** `generationConfig` fields beside the model's thinking config. */
+        val generationConfig: JsonObjectBuilder.() -> Unit = {},
+        /** What a 400 that is not a rejected key means, from its body. */
+        val on400: (body: String) -> IOException,
+        /** What a reply with no candidate text in it means. */
+        val onEmptyReply: () -> IOException,
+        /** An answer to a free-form prompt ([PromptCompleter]), not a
+         *  translation. Three things follow, all in [exchange]: it goes out
+         *  on [answerClient] (an answer's wait, not the translation calls'
+         *  8 s cap), it is cancelled with its coroutine, and a failure of
+         *  the transport is not counted against the service. */
+        val isAnswer: Boolean = false,
+    )
+
+    private val textCall = GenerateCall(
+        label = "translate",
+        generationConfig = { put("temperature", 0.2) },
+        on400 = { body ->
+            StructuralFailureException("Gemini 400: ${body.take(200)}", httpStatusFailure(400))
+        },
+        onEmptyReply = {
+            StructuralFailureException("No translation in Gemini response", BackendFailure.BAD_RESPONSE)
+        },
+    )
+
+    private val batchCall = GenerateCall(
+        label = "translate batch",
+        // generationConfig.responseSchema constrains the model to emit
+        // a JSON object of the exact shape we need — OpenAPI-style
+        // dialect, "OBJECT"/"ARRAY"/"STRING" type names (uppercase).
+        generationConfig = {
+            put("temperature", 0.2)
+            put("responseMimeType", "application/json")
+            putJsonObject("responseSchema") {
+                put("type", "OBJECT")
+                putJsonObject("properties") {
+                    putJsonObject("translations") {
+                        put("type", "ARRAY")
+                        putJsonObject("items") { put("type", "STRING") }
+                    }
+                }
+                putJsonArray("required") { add("translations") }
+            }
+        },
+        // Mirrors the OpenAI batch 400 handling: a non-auth 400 on the
+        // batch path is most likely the model rejecting the
+        // responseSchema / responseMimeType body fields the single-text
+        // path doesn't send. Surface as BatchParseException so the
+        // registry retries this same Gemini backend's per-text
+        // translate() (no schema) before skipping to a lower-priority
+        // backend like DeepL or Lingva.
+        on400 = { body ->
+            Log.w(TAG, "batch 400 body=${body.take(500)} — retrying per-text on same backend")
+            BatchParseException("Gemini batch 400: ${body.take(200)}")
+        },
+        onEmptyReply = { BatchParseException("Gemini batch: empty candidate payload") },
+    )
+
+    private val answerCall = GenerateCall(
+        label = "complete",
+        on400 = { body ->
+            StructuralFailureException("Gemini 400: ${body.take(200)}", httpStatusFailure(400))
+        },
+        onEmptyReply = {
+            StructuralFailureException("No answer in Gemini response", BackendFailure.BAD_RESPONSE)
+        },
+        isAnswer = true,
+    )
+
+    /** The client an answer goes out on: this backend's own (its pool)
+     *  with an answer's wait in place of the 8 s whole-call cap, which is
+     *  sized for a translation ([CALL_TIMEOUT_S]). */
+    private val answerClient: OkHttpClient by lazy {
+        client.newBuilder()
+            .callTimeout(PromptCompleter.ANSWER_TIMEOUT_SECONDS, TimeUnit.SECONDS)
+            .readTimeout(PromptCompleter.ANSWER_TIMEOUT_SECONDS, TimeUnit.SECONDS)
+            .build()
+    }
+
+    /**
+     * One generateContent round trip: [system] and [user] out, the reply's
+     * text back. The ONE place a request is built, its status read and the
+     * service's standing recorded, for every kind of call ([GenerateCall]):
+     *  - Gemini reports an invalid key as a 400 with
+     *    `error.status = "INVALID_ARGUMENT"` and a message containing "API
+     *    key not valid"; any other 400 (bad model id, malformed body) is the
+     *    call's own to interpret ([GenerateCall.on400]).
+     *  - 429 records a cooldown: the day's quota or a rate limit
+     *    ([recordGemini429]).
+     *  - A 5xx climbs the rate-limit ladder.
+     *  - A failure of the transport (no connection, the call timeout)
+     *    climbs the network ladder, whose first failure is forgiven, except
+     *    for an answer ([GenerateCall.isAnswer]). Every exception thrown on
+     *    purpose here is a [ClassifiedFailure] and has done its own
+     *    bookkeeping (a misconfigured key or model must not masquerade as
+     *    "Connection failed"), so that is the test, never the catch order
+     *    (they are all IOExceptions).
+     */
+    private suspend fun exchange(system: String, user: String, call: GenerateCall): String =
         withContext(Dispatchers.IO) {
             clearCooldownIfCredentialsChanged()
             val apiKey = keyProvider()?.takeIf { it.isNotBlank() }
@@ -140,12 +283,8 @@ class GeminiBackend(
                     "Gemini API key not configured", BackendFailure(BackendFailureKind.AUTH),
                 )
             val model = modelProvider()
-            val system = QwenChatTemplate.systemPrompt(source, target)
-            // Online backend: {context} is affordable here (server-side prefill)
-            // and is gated off for the on-device tiers. See TOKEN_CONTEXT.
-            val user = QwenChatTemplate.userMessage(text, source, target, includeContext = true)
-            val translateStart = System.nanoTime()
-            Log.i(TAG, "translate begin model=$model textLen=${text.length}")
+            val startNs = System.nanoTime()
+            Log.i(TAG, "${call.label} begin model=$model inLen=${user.length}")
 
             val bodyJson = buildJsonObject {
                 putJsonObject("systemInstruction") {
@@ -158,7 +297,7 @@ class GeminiBackend(
                     }
                 }
                 putJsonObject("generationConfig") {
-                    put("temperature", 0.2)
+                    call.generationConfig(this)
                     generationConfigExtras(model).forEach { (name, value) -> put(name, value) }
                 }
             }.toString()
@@ -171,21 +310,22 @@ class GeminiBackend(
                 .build()
 
             try {
-                client.newCall(request).execute().use { response ->
+                val http = (if (call.isAnswer) answerClient else client).newCall(request)
+                // An answer is long and its user may put it away, so its
+                // coroutine's cancel cancels the call wherever the exchange
+                // stands, the reply's body included ([blockingOn] over
+                // [executeToEnd]); a translation is short and runs to its
+                // end.
+                val reply = if (call.isAnswer) blockingOn(http) { http.executeToEnd() } else http.execute()
+                reply.use { response ->
                     val bodyStr = response.body.string()
                     when (response.code) {
                         400 -> {
-                            // Gemini reports invalid keys as 400 with
-                            // `error.status = "INVALID_ARGUMENT"` and a message
-                            // containing "API key not valid" — disambiguate from
-                            // other 400s (bad model id, malformed body).
                             if (bodyStr.contains("API_KEY_INVALID") ||
                                 bodyStr.contains("API key not valid")) {
                                 throw GeminiAuthException()
                             }
-                            throw StructuralFailureException(
-                                "Gemini 400: ${bodyStr.take(200)}", httpStatusFailure(400),
-                            )
+                            throw call.on400(bodyStr)
                         }
                         429 -> {
                             Log.w(TAG, "429 body=${bodyStr.take(500)}")
@@ -194,7 +334,9 @@ class GeminiBackend(
                         else -> if (!response.isSuccessful) {
                             // The error's own words (a 503 says why Gemini is
                             // unavailable), on debug builds only.
-                            if (BuildConfig.DEBUG) Log.d(TAG, "error ${response.code} body=${bodyStr.take(500)}")
+                            if (BuildConfig.DEBUG) {
+                                Log.d(TAG, "${call.label} error ${response.code} body=${bodyStr.take(500)}")
+                            }
                             if (response.code >= 500) {
                                 cooldownState.recordLadderFailure(
                                     CooldownLadder.RateLimit, "Server error",
@@ -212,173 +354,22 @@ class GeminiBackend(
                         )
                     }
                     val parsed = PtJson.lenient.decodeFromString<GeminiResponse>(bodyStr)
-                    val raw = parsed.candidates.firstOrNull()?.content?.parts?.firstOrNull()?.text
-                        ?: throw StructuralFailureException(
-                            "No translation in Gemini response", BackendFailure.BAD_RESPONSE,
-                        )
+                    val text = parsed.candidates.firstOrNull()?.content?.parts?.firstOrNull()?.text
+                        ?: throw call.onEmptyReply()
                     parsed.usageMetadata?.let {
                         usageTracker.addTokens(it.promptTokenCount, it.candidatesTokenCount)
                     }
-                    val totalMs = (System.nanoTime() - translateStart) / 1_000_000
-                    Log.i(TAG, "translate ok totalMs=$totalMs outLen=${raw.length}")
-                    cleanLlmOutput(raw)
+                    val totalMs = (System.nanoTime() - startNs) / 1_000_000
+                    Log.i(TAG, "${call.label} ok totalMs=$totalMs outLen=${text.length}")
+                    text
                 }
-            } catch (e: GeminiAuthException) { throw e }
-            catch (e: GeminiRateLimitException) { throw e }
-            catch (e: StructuralFailureException) {
-                // 4xx, 5xx (already recorded above), empty payload, missing
-                // translation — deterministic upstream failures. Skip the
-                // network-ladder bump so a misconfigured key/model doesn't
-                // masquerade as "Connection failed."
-                throw e
-            }
-            catch (e: IOException) {
-                // True network / connection failure path: the first one is
-                // forgiven inside recordNetworkFailure, the second within
-                // the window engages the network cooldown ladder.
-                cooldownState.recordNetworkFailure("Connection failed")
+            } catch (e: IOException) {
+                if (e !is ClassifiedFailure && !call.isAnswer) {
+                    cooldownState.recordNetworkFailure("Connection failed")
+                }
                 throw e
             }
         }
-
-    override suspend fun translateBatch(
-        texts: List<String>,
-        source: String,
-        target: String,
-    ): List<String> = withContext(Dispatchers.IO) {
-        clearCooldownIfCredentialsChanged()
-        val apiKey = keyProvider()?.takeIf { it.isNotBlank() }
-            ?: throw StructuralFailureException(
-                "Gemini API key not configured", BackendFailure(BackendFailureKind.AUTH),
-            )
-        val model = modelProvider()
-        val system = LlmBatchPrompt.systemPrompt(source, target)
-        val user = LlmBatchPrompt.userMessage(texts, source, target, includeContext = true)
-        val translateStart = System.nanoTime()
-        Log.i(TAG, "translate batch begin model=$model batchSize=${texts.size} totalLen=${texts.sumOf { it.length }}")
-
-        // generationConfig.responseSchema constrains the model to emit
-        // a JSON object of the exact shape we need — OpenAPI-style
-        // dialect, "OBJECT"/"ARRAY"/"STRING" type names (uppercase).
-        val responseSchema = buildJsonObject {
-            put("type", "OBJECT")
-            putJsonObject("properties") {
-                putJsonObject("translations") {
-                    put("type", "ARRAY")
-                    putJsonObject("items") { put("type", "STRING") }
-                }
-            }
-            putJsonArray("required") { add("translations") }
-        }
-        val bodyJson = buildJsonObject {
-            putJsonObject("systemInstruction") {
-                putJsonArray("parts") { addJsonObject { put("text", system) } }
-            }
-            putJsonArray("contents") {
-                addJsonObject {
-                    put("role", "user")
-                    putJsonArray("parts") { addJsonObject { put("text", user) } }
-                }
-            }
-            putJsonObject("generationConfig") {
-                put("temperature", 0.2)
-                put("responseMimeType", "application/json")
-                put("responseSchema", responseSchema)
-                generationConfigExtras(model).forEach { (name, value) -> put(name, value) }
-            }
-        }.toString()
-
-        val request = Request.Builder()
-            .url("$ENDPOINT_ROOT/models/$model:generateContent")
-            .addHeader("x-goog-api-key", apiKey)
-            .addHeader("Content-Type", "application/json")
-            .post(bodyJson.toRequestBody("application/json".toMediaType()))
-            .build()
-
-        try {
-            client.newCall(request).execute().use { response ->
-                val bodyStr = response.body.string()
-                when (response.code) {
-                    400 -> {
-                        if (bodyStr.contains("API_KEY_INVALID") ||
-                            bodyStr.contains("API key not valid")) {
-                            throw GeminiAuthException()
-                        }
-                        // Mirrors the OpenAI batch 400 handling: a non-auth
-                        // 400 on the batch path is most likely the model
-                        // rejecting the responseSchema / responseMimeType
-                        // body fields the single-text path doesn't send.
-                        // Surface as BatchParseException so the registry
-                        // retries this same Gemini backend's per-text
-                        // translate() (no schema) before skipping to a
-                        // lower-priority backend like DeepL or Lingva.
-                        Log.w(TAG, "batch 400 body=${bodyStr.take(500)} — retrying per-text on same backend")
-                        throw BatchParseException("Gemini batch 400: ${bodyStr.take(200)}")
-                    }
-                    429 -> {
-                        Log.w(TAG, "429 body=${bodyStr.take(500)}")
-                        throw GeminiRateLimitException(recordGemini429(bodyStr))
-                    }
-                    else -> if (!response.isSuccessful) {
-                        // The error's own words (a 503 says why Gemini is
-                        // unavailable), on debug builds only.
-                        if (BuildConfig.DEBUG) Log.d(TAG, "batch error ${response.code} body=${bodyStr.take(500)}")
-                        if (response.code >= 500) {
-                            cooldownState.recordLadderFailure(
-                                CooldownLadder.RateLimit, "Server error",
-                                CooldownCause.SERVER_ERROR,
-                            )
-                        }
-                        throw StructuralFailureException(
-                            "Gemini error ${response.code}", httpStatusFailure(response.code),
-                        )
-                    }
-                }
-                if (bodyStr.isEmpty()) {
-                    throw StructuralFailureException(
-                        "Empty response from Gemini", BackendFailure.BAD_RESPONSE,
-                    )
-                }
-                val parsed = PtJson.lenient.decodeFromString<GeminiResponse>(bodyStr)
-                val rawJson = parsed.candidates.firstOrNull()?.content?.parts?.firstOrNull()?.text
-                    ?: throw BatchParseException("Gemini batch: empty candidate payload")
-                parsed.usageMetadata?.let {
-                    usageTracker.addTokens(it.promptTokenCount, it.candidatesTokenCount)
-                }
-                val wrapper = try {
-                    PtJson.lenient.decodeFromString<BatchTranslationsWrapper>(rawJson)
-                } catch (e: SerializationException) {
-                    throw BatchParseException("Gemini batch: response JSON parse failed", e)
-                }
-                val arr = wrapper.translations
-                    ?: throw BatchParseException("Gemini batch: missing translations[]")
-                if (arr.size != texts.size) {
-                    throw BatchParseException(
-                        "Gemini batch: returned ${arr.size} translations for ${texts.size} inputs"
-                    )
-                }
-                val totalMs = (System.nanoTime() - translateStart) / 1_000_000
-                Log.i(TAG, "translate batch ok totalMs=$totalMs batchSize=${arr.size}")
-                arr.map { cleanLlmOutput(it) }
-            }
-        } catch (e: GeminiAuthException) { throw e }
-        catch (e: GeminiRateLimitException) { throw e }
-        catch (e: BatchParseException) {
-            // Intra-backend retry signal — do NOT cooldown. The registry
-            // re-tries this backend's per-text translate() on the same
-            // call, and that path's own cooldown wiring stands.
-            throw e
-        }
-        catch (e: StructuralFailureException) {
-            // 4xx / 5xx (already recorded above) / empty payload —
-            // deterministic upstream, no network-ladder bump.
-            throw e
-        }
-        catch (e: IOException) {
-            cooldownState.recordNetworkFailure("Connection failed")
-            throw e
-        }
-    }
 
     /**
      * Fetches the list of models the configured API key can call.

@@ -331,13 +331,19 @@ ruby > rt { font-size: .5em; }
         val outline: Int = tokens.textHint,
         /** The fill behind a row that is the card's target. */
         val wash: Int = 0,
+        /** Whether the rows take two columns on a page at least 560px wide
+         *  (a landscape screen). The results' Words card asks for it; every
+         *  other surface's rows are one column at any width. */
+        val twoColumnsWhenWide: Boolean = false,
     )
 
     /**
      * The `ptTheme` call that gives a loaded shell [theme]. Every colour is
      * a concrete value computed here, the washes included (see [cssAlpha]):
      * the stylesheet only ever reads a variable that already holds a colour
-     * the engine can use as is.
+     * the engine can use as is. The call also says whether the rows take
+     * two columns on a wide page ([DocTheme.twoColumnsWhenWide]), true or
+     * false, never left out.
      */
     fun themeJs(theme: DocTheme, rtl: Boolean): String {
         val t = theme.tokens
@@ -365,7 +371,8 @@ ruby > rt { font-size: .5em; }
             "--background-color" to panel,
             "--canvas" to panel,
         ).joinToString(",") { (k, v) -> "\"$k\":\"$v\"" }
-        return "ptTheme({vars:{$vars},dir:\"${if (rtl) "rtl" else "ltr"}\",fontPx:${t.baseFontSizePx}})"
+        return "ptTheme({vars:{$vars},dir:\"${if (rtl) "rtl" else "ltr"}\",fontPx:${t.baseFontSizePx}," +
+            "cols:${theme.twoColumnsWhenWide}})"
     }
 
     /**
@@ -499,6 +506,24 @@ button.act:active, .act.cur { background: var(--pt-press); }
   font-size: .985em; color: var(--pt-link); white-space: nowrap;
 }
 .more:active { background: var(--pt-press); }
+/* Two columns on a page at least 560px wide (a landscape screen), for the
+   surface whose theme asks (the results' Words card: ptTheme sets and
+   clears `cols`). The columns are equal, and a long word cannot widen one.
+   A word row is its own cell, and a grid item stretches to its line's
+   height, so a press, a stub's band and the controller's highlight cover
+   the whole cell beside a taller neighbour. Each row keeps its hairline at
+   the top of its own cell; the second row is the first of its column and
+   has none (unless it is the action row, which is no column's first). The gap is given by both its names: grid-column-gap, the old
+   one, is the one every engine with grid takes. The action row spans both
+   columns. */
+@media (min-width: 560px) {
+  .cols #root {
+    display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+    grid-column-gap: 8px; column-gap: 8px;
+  }
+  .cols #root > .row:nth-child(2):not(.more)::before { content: none; }
+  .cols #root > .more { grid-column: 1 / -1; }
+}
 /* A word's own page: the imported block in full, then one row per sense.
    Sizes are the native rows' sp, as px (the page's text zoom is the
    system's font scale). A numbered row's hairline starts at its gloss. */
@@ -711,6 +736,10 @@ button.act:active, .act.cur { background: var(--pt-press); }
     for (var k in t.vars) s.setProperty(k, t.vars[k]);
     document.documentElement.setAttribute('dir', t.dir);
     document.body.style.fontSize = t.fontPx + 'px';
+    // Set or cleared on every call, never only set: a loaded shell is made
+    // to fit any surface, and each call is a whole theme, so a surface whose
+    // rows are one column never keeps two from a theme before it.
+    document.documentElement.classList.toggle('cols', !!t.cols);
   };
 
   window.ptSet = function (html, g) {

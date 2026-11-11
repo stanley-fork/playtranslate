@@ -22,6 +22,7 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import org.json.JSONArray
 import org.json.JSONObject
+import kotlin.math.abs
 import kotlin.math.max
 import kotlin.math.min
 import kotlin.math.roundToInt
@@ -516,10 +517,14 @@ internal class DefinitionDocument(
         targets.firstOrNull { it.rowId == rowId }?.let { (it.top * density).roundToInt() }
 
     /** The id of the row at [y] (the view's own px), or of the first row
-     *  below it; null for none. */
+     *  below it; null for none. Rows that stand side by side share a top,
+     *  and the first of them stands for their line: a host that anchors its
+     *  scroll on this row is still on the line's start when the page is one
+     *  column again (a rotation). */
     fun rowAt(y: Int): String? {
         val rowTops = targets.distinctBy { it.rowId }
-        return (rowTops.lastOrNull { (it.top * density).roundToInt() <= y } ?: rowTops.firstOrNull())?.rowId
+        val at = rowTops.lastOrNull { (it.top * density).roundToInt() <= y } ?: rowTops.firstOrNull() ?: return null
+        return rowTops.first { it.top == at.top }.rowId
     }
 
     /** The document's view, for a host that measures against it. */
@@ -669,48 +674,86 @@ internal class DefinitionDocument(
 }
 
 /**
- * Moving a cursor over a document's targets with a D-pad. Pure.
+ * Moving a cursor over a document's targets with a D-pad, by where the page
+ * laid them out. Pure.
  *
  * The page reports targets in document order, a row before its buttons,
  * which is also their order along the line: the row, then each button toward
- * the line's end. Up and down move between rows, keeping the kind of target
- * the cursor is on when the next row has one (a column of eyes walks as a
- * column); left and right step along the row, toward the line's end being
- * right on a left-to-right page and left on a right-to-left one. Null means
- * there is nowhere further that way.
+ * the line's end. A row is where its first reported target is: its own
+ * element, reported whether or not it takes a tap itself. A line is a run of
+ * consecutive rows that share a top and stand side by side: in one column
+ * every row is a line of its own, in two (the results' Words card on a wide
+ * page) a line is the rows across. Up and down move to the previous or next
+ * line that holds a tap target, onto its row nearest the cursor's row across
+ * (the cursor keeps its column; a last line holding one row takes it from
+ * either), and in that row onto the kind of target the cursor is on when the
+ * row has one (a column of eyes walks as a column), else the row's first.
+ * Left and right step along the line's targets, a row's own and then its
+ * buttons, row after row, toward the line's end being right on a
+ * left-to-right page and left on a right-to-left one. Null means there is
+ * nowhere further that way.
  */
 internal object DocNav {
     enum class Dir { UP, DOWN, LEFT, RIGHT }
 
+    /** A row: where it is (its first reported target) and its targets that
+     *  take a tap, in page order. */
+    private class Row(val box: DocTarget) {
+        val taps = ArrayList<DocTarget>()
+    }
+
     fun next(targets: List<DocTarget>, cur: DocTarget?, dir: Dir, rtl: Boolean): DocTarget? {
-        val rows = LinkedHashMap<String, MutableList<DocTarget>>()
-        for (t in targets) if (t.act.isNotEmpty()) rows.getOrPut(t.rowId) { mutableListOf() }.add(t)
-        if (rows.isEmpty()) return null
-        val order = rows.keys.toList()
-        val at = cur?.let { c -> rows[c.rowId]?.firstOrNull { it.act == c.act } }
+        val rows = LinkedHashMap<String, Row>()
+        for (t in targets) {
+            val row = rows.getOrPut(t.rowId) { Row(t) }
+            if (t.act.isNotEmpty()) row.taps += t
+        }
+        val lines = ArrayList<MutableList<Row>>()
+        for (row in rows.values) {
+            val line = lines.lastOrNull()
+            if (line != null && onLine(line.last().box, row.box)) line += row else lines += mutableListOf(row)
+        }
+        // A target with no act is never a cursor position: a row without a
+        // tap target is passed over, and so is a line of such rows.
+        val reachable = lines.map { line -> line.filter { it.taps.isNotEmpty() } }.filter { it.isNotEmpty() }
+        if (reachable.isEmpty()) return null
+        val at = cur?.let { c -> rows[c.rowId]?.taps?.firstOrNull { it.act == c.act } }
         if (at == null) {
             // A fresh cursor: the first row coming down, the last going up.
-            val row = if (dir == Dir.UP) order.last() else order.first()
-            return rows.getValue(row).first()
+            val row = if (dir == Dir.UP) reachable.last().last() else reachable.first().first()
+            return row.taps.first()
         }
+        val i = reachable.indexOfFirst { line -> line.any { it.box.rowId == at.rowId } }
         return when (dir) {
             Dir.UP, Dir.DOWN -> {
-                val i = order.indexOf(at.rowId) + if (dir == Dir.DOWN) 1 else -1
-                val row = rows[order.getOrNull(i) ?: return null] ?: return null
-                row.firstOrNull { it.act == at.act } ?: row.first()
+                val line = reachable.getOrNull(i + if (dir == Dir.DOWN) 1 else -1) ?: return null
+                val left = rows.getValue(at.rowId).box.left
+                val row = line.minBy { abs(it.box.left - left) }
+                row.taps.firstOrNull { it.act == at.act } ?: row.taps.first()
             }
             Dir.LEFT, Dir.RIGHT -> {
-                val line = rows.getValue(at.rowId)
+                val line = reachable[i].flatMap { it.taps }
                 val towardEnd = (dir == Dir.RIGHT) != rtl
                 line.getOrNull(line.indexOf(at) + if (towardEnd) 1 else -1)
             }
         }
     }
+
+    /** Whether the row at [b], the one after the row at [a], is on [a]'s
+     *  line: the same top, and beside it, not over it. Rows reported at one
+     *  spot are therefore a column, in document order. */
+    private fun onLine(a: DocTarget, b: DocTarget): Boolean =
+        b.top == a.top && (b.left >= a.left + a.width || b.left + b.width <= a.left)
 }
 
 /** The theme of a document that sits in one of the app's cards, its text
- *  sized from [baseFontSizePx]. */
-internal fun cardDocTheme(ctx: Context, baseFontSizePx: Float) = DefinitionsDocument.DocTheme(
+ *  sized from [baseFontSizePx], its rows in two columns on a wide page when
+ *  [twoColumnsWhenWide] (the results' Words card only). */
+internal fun cardDocTheme(
+    ctx: Context,
+    baseFontSizePx: Float,
+    twoColumnsWhenWide: Boolean = false,
+) = DefinitionsDocument.DocTheme(
     DefinitionsDocument.Tokens(
         text = ctx.themeColor(R.attr.ptText),
         textMuted = ctx.themeColor(R.attr.ptTextMuted),
@@ -723,4 +766,5 @@ internal fun cardDocTheme(ctx: Context, baseFontSizePx: Float) = DefinitionsDocu
     band = hiddenWordBandColor(ctx),
     outline = ctx.themeColor(R.attr.ptOutline),
     wash = ctx.themeColor(R.attr.ptAccentTint),
+    twoColumnsWhenWide = twoColumnsWhenWide,
 )

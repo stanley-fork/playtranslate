@@ -1,0 +1,18 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- The Ask card's question chip (ask_preset_chip.xml): a ripple over a
+     7dp-radius fill one surface step above the card (ptElevated), filling the
+     chip's whole box. bg_toggle_text_button has the same fill and radius but
+     draws 10dp short of its view (an inset for a 32dp header button), which
+     would shrink this 26dp chip to a 16dp sliver. With no mask layer the
+     ripple is clipped to the fill, so press feedback matches the chip. Theme
+     attrs resolve at inflation, so it renders the same under the over-game
+     panel's plain inflater as on the results page. -->
+<ripple xmlns:android="http://schemas.android.com/apk/res/android"
+    android:color="?attr/ptDivider">
+    <item>
+        <shape android:shape="rectangle">
+            <corners android:radius="7dp" />
+            <solid android:color="?attr/ptElevated" />
+        </shape>
+    </item>
+</ripple>

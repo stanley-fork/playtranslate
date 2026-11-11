@@ -991,5 +991,13 @@ class TranslationResultFragment : Fragment() {
         override fun completeDeferredTranslation() {
             host?.completeDeferredTranslation()
         }
+
+        override fun onAskNeedsLlm() {
+            OverlayAlert.Builder(activity)
+                .askNeedsLlm(activity) {
+                    activity.startActivity(Intent(activity, TranslationServicesActivity::class.java))
+                }
+                .show()
+        }
     }
 }

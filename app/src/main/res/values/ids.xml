@@ -26,6 +26,30 @@
     <item name="btnFontSize" type="id" />
     <item name="btnToggleTranslation" type="id" />
     <item name="btnMoreTranslation" type="id" />
+    <!-- Show on screen and Text size in the Original header, where they sit
+         while the Translation section is hidden. -->
+    <item name="btnShowOnScreenOriginal" type="id" />
+    <item name="btnFontSizeOriginal" type="id" />
+    <!-- The Words header's eye and its (never shown) ⋯, built the same way
+         from WordRowsBinder's HeaderAction. -->
+    <item name="btnToggleWords" type="id" />
+    <item name="btnMoreWords" type="id" />
+    <!-- The Ask section's header and card. ResultSectionsLayout arranges the
+         sections by id, on surfaces with and without an Ask section, so the
+         two ids exist apart from section_ask.xml. -->
+    <item name="askHeaderRow" type="id" />
+    <item name="cardAsk" type="id" />
+    <!-- The Ask header's eye and its (never shown) ⋯, built from
+         AskSectionBinder's HeaderActions like the other headers'. The
+         header's ready-made questions get generated ids: they are a list. -->
+    <item name="btnToggleAsk" type="id" />
+    <item name="btnMoreAsk" type="id" />
+    <!-- The Ask header's Text size, offered while a question is on screen:
+         it opens the one-handle picker for the answer's text. -->
+    <item name="btnFontSizeAsk" type="id" />
+    <!-- The slider row of a text-size picker (SizePickerCard), so a test
+         can find it inside the popover. -->
+    <item name="sizePickerTrack" type="id" />
     <!-- An ActionOverflowMenu row's parts. -->
     <item name="overflowRowIcon" type="id" />
     <item name="overflowRowLabel" type="id" />

@@ -25,6 +25,7 @@ import kotlinx.coroutines.launch
  * The results page's content — `fragment_translation_result.xml` driven by
  * a [TranslationResultViewModel] — as a host-agnostic renderer: the status
  * screen, the source + target sections ([TranslationSectionBinder]), the
+ * Ask section ([AskSectionBinder]) over the view-model's [AskSession], the
  * Words card ([WordRowsBinder]), the tap-a-word lens ([SourceTextLens]),
  * the in-window popovers ([popovers]: the text-size picker, the section
  * headers' ⋯ menus), and the render funnel that ties them to the VM's
@@ -150,6 +151,11 @@ class TranslationResultContent(
          *  consumer needs it now — see [requestDeferredCompletion]. */
         fun completeDeferredTranslation() {}
 
+        /** The user reached for an Ask question with no LLM set up: show
+         *  the alert that says so ([askNeedsLlm]) on this surface, its
+         *  button opening Translation services from here. */
+        fun onAskNeedsLlm()
+
         /** The overlay mode the capture's boxes are painted in on the game
          *  screen right now (two screens), or null with none painted. In
          *  Translations they need the deferred translation whatever the
@@ -162,6 +168,10 @@ class TranslationResultContent(
     }
 
     val scrollView: ScrollView = root.findViewById(R.id.resultsContent)
+
+    /** The sections' layout: the scroll's content, and the owner of
+     *  whether Original and Translation are stacked or paired. */
+    private val sections: ResultSectionsLayout = root.findViewById(R.id.resultsScrollContent)
     private val statusContainer: View = root.findViewById(R.id.statusContainer)
     private val statusText: TextView = root.findViewById(R.id.tvStatus)
     private val statusHint: TextView = root.findViewById(R.id.tvStatusHint)
@@ -179,12 +189,12 @@ class TranslationResultContent(
     val wordRows: WordRowsBinder
     val sourceLens: SourceTextLens
 
+    /** The Ask section, over the view-model's session. */
+    val ask: AskSectionBinder
+    private val lookupsRenderer: WordLookupsRenderer
+
     /** Bumped on every [render]; see the class doc's reveal rule. */
     private var renderGeneration = 0
-
-    /** Bumped per word-lookup render so a settled build held at the
-     *  enter-settle gate lands only if no newer lookup state arrived. */
-    private var lookupGeneration = 0
 
     /** Source text of the last Translating/Ready render — the scroll
      *  preservation key (class doc). Null after status/idle/error. */
@@ -241,6 +251,13 @@ class TranslationResultContent(
             deckBadges = true,
             wireActions = { lens, resolved -> host.wireLensActions(lens, resolved) },
         )
+        lookupsRenderer = WordLookupsRenderer(
+            wordRows, sourceLens,
+            displayedSourceText = { binder.displayedSourceText() },
+            scope = { host.scope },
+            isAlive = { host.isAlive },
+            awaitEnterSettled = { host.awaitEnterSettled() },
+        )
         binder.tvOriginal.onTapAtOffset = { offset -> sourceLens.onTapAtOffset(offset) }
         binder.editAvailable = host.editAvailable
         // Copy / show-hide / furigana toggle / speak live in the binder; the
@@ -255,10 +272,12 @@ class TranslationResultContent(
             onAnkiOneTap = { host.onAnkiOneTap() },
         )
         val fontPicker = FontSizeRangePopover(ctx, prefs).apply {
-            // fitTextSizes fits each section to half the (unchanged) scroll
-            // height, so the sections resize in place and the anchor — the
-            // target header's button or ⋯, topmost in the scroll — never
-            // moves under the user's finger.
+            // fitTextSizes fits each section against the (unchanged) scroll
+            // height, so the sections resize in place and the anchor never
+            // moves under the user's finger: it is the button or ⋯ of the
+            // topmost header that still has a card (the Translation's, or
+            // the Original's while the Translation is hidden, whose bare
+            // header above it keeps its height).
             onRangeChanged = { fitTextSizes() }
         }
         binder.onChooseFontSize = { anchor -> popovers.toggle(fontPicker, anchor) }
@@ -267,11 +286,37 @@ class TranslationResultContent(
         }
         binder.onChooseLanguage = { isSource -> host.onChangeLanguage(isSource) }
         binder.setShowOnScreenAction { host.onShowOnScreenTapped() }
-        // This vertical page just reflows on an eye toggle (no re-layout
-        // work), but REVEALING the translation section on a deferred result
-        // must run the translation that was skipped while it was hidden.
-        binder.onSectionVisibilityChanged = { requestDeferredCompletion() }
+        ask = AskSectionBinder(
+            root, ctx, prefs, vm.ask, popovers,
+            object : AskSectionBinder.Host {
+                override fun onInteraction() = host.onInteraction()
+                override fun onLlmNeeded() = host.onAskNeedsLlm()
+            },
+        )
+        // The session is the view-model's and outlives this page: draw
+        // whatever it holds now, and every change after.
+        host.scope.launch { vm.ask.state.collect { if (host.isAlive) ask.render(it) } }
+        // The page just reflows on an eye toggle (no re-layout work), but
+        // REVEALING the translation section on a deferred result must run
+        // the translation that was skipped while it was hidden, and an
+        // answer on show says whether it may give a hidden translation away.
+        binder.onSectionVisibilityChanged = {
+            requestDeferredCompletion()
+            ask.syncSpoilerWarning()
+        }
         scrollView.setOnScrollChangeListener(scrollListener)
+        // A rotation or a resized window re-arranges the sections (their
+        // layout follows its width) without this page being rebuilt, and
+        // the text was fitted to the old arrangement: fit it again once the
+        // new one has laid out. Width only: a height change is the keyboard,
+        // which must not resize the text being asked about. The first
+        // layout of a reveal is not this path (the results are still
+        // INVISIBLE; [revealFitted] fits them).
+        scrollView.addOnLayoutChangeListener { _, left, _, right, _, oldLeft, _, oldRight, _ ->
+            if (right - left != oldRight - oldLeft && scrollView.isVisible) {
+                scrollView.post { if (host.isAlive) fitTextSizes() }
+            }
+        }
         root.findViewById<View>(R.id.btnResultClear).setOnClickListener { host.onClear() }
     }
 
@@ -316,6 +361,16 @@ class TranslationResultContent(
         }
         val generation = ++renderGeneration
         host.onRender(state)
+        // The Ask section's question is about the sentence on show. Saying
+        // which that is, here, on every render, is the whole of keeping an
+        // answer with its sentence: binding another one ends the question.
+        vm.ask.bind(
+            when (state) {
+                is ResultState.Translating -> askSentence(state.originalText, prefs.langContext())
+                is ResultState.Ready -> askSentence(state.result.originalText, state.result.langContext)
+                else -> null
+            },
+        )
         when (state) {
             is ResultState.Idle ->
                 showStatus(ctx.getString(R.string.status_idle), showHint = host.showsStartHint)
@@ -367,58 +422,11 @@ class TranslationResultContent(
         }
     }
 
-    /** Mirror a word-lookup state: the tap spans + the lens follow it
-     *  synchronously (from the analysis on, rows or not); the settled rows
-     *  build after the host's enter-settle gate (immediate in-app), unless a
-     *  newer lookup state arrived first. */
-    fun renderWordLookups(state: WordLookupsState) {
-        if (!host.isAlive) return
-        val generation = ++lookupGeneration
-        when (state) {
-            is WordLookupsState.Idle -> {
-                sourceLens.wordSpans = emptyList()
-                wordRows.render(state)
-            }
-            is WordLookupsState.Loading -> {
-                sourceLens.dismiss()
-                sourceLens.wordSpans = emptyList()
-                wordRows.render(state)
-            }
-            is WordLookupsState.Analyzed -> {
-                // No resolved readings yet: computeSpans falls back to the
-                // token's own lookup hint (TokenSpan.reading), which the lens
-                // passes to its resolve as the reading hint; the rows'
-                // resolved readings replace it when Settled lands.
-                sourceLens.wordSpans = SourceWordLookup.computeTapSpans(
-                    binder.displayedSourceText(), state.tokenSpans, emptyMap(), state.phrases,
-                )
-                // Drawn like Loading; asks for the rows when the card is shown.
-                wordRows.render(state)
-                // The rows are being looked up: load their page meanwhile,
-                // but never inside the page's entrance (the first WebView of
-                // a process blocks the main thread while it loads).
-                host.scope.launch {
-                    host.awaitEnterSettled()
-                    if (host.isAlive && generation == lookupGeneration) wordRows.prepareRows()
-                }
-            }
-            is WordLookupsState.Settled -> {
-                // Spans project against the displayed text (which may carry
-                // OCR newlines the result's text doesn't).
-                sourceLens.wordSpans = SourceWordLookup.computeTapSpans(
-                    binder.displayedSourceText(), state.tokenSpans, state.lookupToReading, state.phrases,
-                )
-                // Furigana is NOT applied here: it's driven by bindSource in
-                // render, so it paints with the source text (during the
-                // Translating placeholder), not after this heavier lookup settles.
-                host.scope.launch {
-                    host.awaitEnterSettled()
-                    if (!host.isAlive || generation != lookupGeneration) return@launch
-                    wordRows.render(state)
-                }
-            }
-        }
-    }
+    /** Mirror a word-lookup state ([WordLookupsRenderer]): the tap spans +
+     *  the lens follow it synchronously (from the analysis on, rows or
+     *  not); the settled rows build after the host's enter-settle gate
+     *  (immediate in-app), unless a newer lookup state arrived first. */
+    fun renderWordLookups(state: WordLookupsState) = lookupsRenderer.render(state)
 
     /** Deferred-translation trigger funnel, the over-game panel's rule
      *  ([deferredCompletionNeeded], which its maybeCompleteDeferred applies):
@@ -501,11 +509,14 @@ class TranslationResultContent(
 
     // ── Fit + reveal + scroll ────────────────────────────────────────────
 
-    /** Shrink translation and original text so each tries to fit within
-     *  half the visible scroll area. */
+    /** Shrink translation and original text to the visible scroll area:
+     *  half of it each when stacked, all of it each when paired
+     *  ([TranslationSectionBinder.fitToViewport]). */
     fun fitTextSizes() {
         val height = scrollView.height.takeIf { it > 0 } ?: return
-        binder.fitToViewport(height)
+        binder.fitToViewport(
+            height, paired = sections.arrangement == ResultSectionsLayout.Arrangement.PAIRED,
+        )
     }
 
     /**
@@ -533,11 +544,11 @@ class TranslationResultContent(
         }
     }
 
-    /** Fresh-result scroll reset: always the top. Deliberately NOT the
-     *  hidden-section park the over-game panel does: a page starts at its
-     *  top, and a self-inflicted scroll here reads as user intent (in
-     *  dual-screen live mode it tripped the scroll listener → pause on every
-     *  incoming result). */
+    /** Fresh-result scroll reset: always the top, a hidden section's header
+     *  included (a hidden section is its header, in place). Silent, because
+     *  a self-inflicted scroll here reads as user intent (in dual-screen
+     *  live mode it tripped the scroll listener → pause on every incoming
+     *  result). */
     private fun scrollToFreshResultStart() {
         scrollView.scrollToTopSilently(scrollListener)
     }

@@ -1,0 +1,235 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Ask section: header + card, questions about the sentence put to the
+     user's AI model, and the answer. Shared by every surface that shows the
+     results sections. merge-rooted like section_words.xml, so the header and
+     the card become direct children of the sections' parent. AskSectionBinder
+     owns both. The header's and the card's ids are declared in
+     values/ids.xml: ResultSectionsLayout arranges the sections by id, on
+     surfaces with and without this one. -->
+<merge xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:app="http://schemas.android.com/apk/res-auto"
+    xmlns:tools="http://schemas.android.com/tools"
+    tools:parentTag="android.widget.LinearLayout">
+
+    <!-- The header: the section's name, then, while the section is collapsed,
+         the ready-made questions as pills (as many as fit, never a ⋯), and
+         the pinned eye, all built by SectionHeaderRow from AskSectionBinder's
+         HeaderActions. The same row, paddings and height as the other
+         sections' headers. -->
+    <com.playtranslate.ui.SectionHeaderRow
+        android:id="@id/askHeaderRow"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:orientation="horizontal"
+        android:gravity="center_vertical"
+        android:paddingTop="@dimen/pt_group_gap"
+        android:paddingBottom="8dp"
+        android:paddingStart="4dp"
+        android:paddingEnd="4dp">
+
+        <TextView
+            android:id="@+id/labelAsk"
+            style="@style/Text.PT.GroupHeader"
+            android:layout_width="wrap_content"
+            android:layout_height="match_parent"
+            android:gravity="center_vertical"
+            android:maxLines="1"
+            android:ellipsize="end"
+            android:text="@string/section_ask" />
+
+    </com.playtranslate.ui.SectionHeaderRow>
+
+    <com.google.android.material.card.MaterialCardView
+        android:id="@id/cardAsk"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        app:cardBackgroundColor="?attr/ptCard"
+        app:cardCornerRadius="@dimen/pt_radius"
+        app:cardElevation="0dp"
+        app:strokeColor="?attr/ptDivider"
+        app:strokeWidth="1dp">
+
+        <!-- Exactly one of the two groups shows: the questions while nothing
+             is asked, the question on screen otherwise. The binder decides
+             from the session's state. -->
+        <LinearLayout
+            android:id="@+id/askContent"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:orientation="vertical">
+
+            <!-- Nothing asked: the ready-made questions, then the user's own. -->
+            <LinearLayout
+                android:id="@+id/askIdle"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:orientation="vertical">
+
+                <!-- One chip per ready-made question (ask_preset_chip.xml),
+                     added in code in their order, wrapping onto more lines. -->
+                <com.playtranslate.ui.FlowLayout
+                    android:id="@+id/askPresetChips"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:paddingHorizontal="16dp"
+                    android:paddingVertical="12dp" />
+
+                <View
+                    android:layout_width="match_parent"
+                    android:layout_height="1dp"
+                    android:background="?attr/ptDivider" />
+
+                <!-- The user's own question and its send button. The field
+                     fills the row's height, so the whole row takes the tap. -->
+                <LinearLayout
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:minHeight="48dp"
+                    android:orientation="horizontal"
+                    android:gravity="center_vertical"
+                    android:paddingStart="16dp"
+                    android:paddingEnd="4dp">
+
+                    <EditText
+                        android:id="@+id/etAskQuestion"
+                        android:layout_width="0dp"
+                        android:layout_height="match_parent"
+                        android:layout_weight="1"
+                        android:background="@null"
+                        android:gravity="center_vertical"
+                        android:maxLines="1"
+                        android:inputType="text|textCapSentences"
+                        android:imeOptions="actionSend|flagNoFullscreen|flagNoExtractUi"
+                        android:importantForAutofill="no"
+                        android:hint="@string/ask_question_hint"
+                        android:textColor="?attr/ptText"
+                        android:textColorHint="?attr/ptTextHint"
+                        android:textSize="16sp" />
+
+                    <ImageButton
+                        android:id="@+id/btnAskSend"
+                        android:layout_width="36dp"
+                        android:layout_height="32dp"
+                        android:background="?attr/selectableItemBackgroundBorderless"
+                        android:contentDescription="@string/cd_ask_send"
+                        android:src="@drawable/ic_send" />
+
+                </LinearLayout>
+
+            </LinearLayout>
+
+            <!-- A question on screen: its title with the X that puts it away
+                 and brings the questions back, then what has come of it,
+                 with no hairline between them. -->
+            <LinearLayout
+                android:id="@+id/askAnswer"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:orientation="vertical"
+                android:visibility="gone">
+
+                <!-- As tall as the chip row with one line of chips (a 26 dp
+                     chip, ask_preset_chip.xml, and the row's 12 dp above and
+                     below it), so the title takes the chips' place at their
+                     height. -->
+                <LinearLayout
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:minHeight="50dp"
+                    android:orientation="horizontal"
+                    android:gravity="center_vertical"
+                    android:paddingStart="16dp"
+                    android:paddingEnd="4dp">
+
+                    <!-- The preset's name, or the user's own words. Italic
+                         when every letter in it is Latin script, set in code
+                         with its text. -->
+                    <TextView
+                        android:id="@+id/tvAskTitle"
+                        android:layout_width="0dp"
+                        android:layout_height="wrap_content"
+                        android:layout_weight="1"
+                        android:maxLines="2"
+                        android:ellipsize="end"
+                        android:textColor="?attr/ptTextHint"
+                        android:textSize="15sp" />
+
+                    <ImageButton
+                        android:id="@+id/btnAskClose"
+                        android:layout_width="36dp"
+                        android:layout_height="32dp"
+                        android:background="?attr/selectableItemBackgroundBorderless"
+                        android:contentDescription="@string/cd_ask_close"
+                        android:src="@drawable/ic_close" />
+
+                </LinearLayout>
+
+                <LinearLayout
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:orientation="vertical"
+                    android:paddingHorizontal="16dp"
+                    android:paddingVertical="12dp">
+
+                    <!-- Shown while the Translation section is hidden. -->
+                    <TextView
+                        android:id="@+id/tvAskWarning"
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content"
+                        android:layout_marginBottom="6dp"
+                        android:text="@string/ask_spoiler_warning"
+                        android:textColor="?attr/ptTextHint"
+                        android:textSize="11sp"
+                        android:visibility="gone" />
+
+                    <!-- "Asking <service>…", the answer, or the failure; its
+                         colour is set in code with its text, and its size
+                         from Prefs.askFontSp (16 sp, the size here, unless
+                         the header's Text size changed it). -->
+                    <TextView
+                        android:id="@+id/tvAskBody"
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content"
+                        android:lineSpacingMultiplier="1.3"
+                        android:textColor="?attr/ptText"
+                        android:textSize="16sp" />
+
+                    <!-- A text button: asks the failed question again. -->
+                    <TextView
+                        android:id="@+id/btnAskRetry"
+                        android:layout_width="wrap_content"
+                        android:layout_height="wrap_content"
+                        android:layout_marginTop="4dp"
+                        android:minHeight="32dp"
+                        android:gravity="center_vertical"
+                        android:background="?attr/selectableItemBackground"
+                        android:clickable="true"
+                        android:focusable="true"
+                        android:fontFamily="sans-serif-medium"
+                        android:text="@string/ask_retry"
+                        android:textColor="?attr/ptAccent"
+                        android:textSize="13sp"
+                        android:visibility="gone" />
+
+                    <!-- "Answered by <service>", under a finished answer.
+                         Styled as the Translation card's "Translated by"
+                         (section_target.xml's tvTranslationNote, italic in
+                         TranslationSectionBinder). -->
+                    <TextView
+                        android:id="@+id/tvAskFooter"
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content"
+                        android:layout_marginTop="6dp"
+                        android:textColor="?attr/ptTextHint"
+                        android:textSize="11sp"
+                        android:textStyle="italic"
+                        android:visibility="gone" />
+
+                </LinearLayout>
+
+            </LinearLayout>
+
+        </LinearLayout>
+    </com.google.android.material.card.MaterialCardView>
+
+</merge>

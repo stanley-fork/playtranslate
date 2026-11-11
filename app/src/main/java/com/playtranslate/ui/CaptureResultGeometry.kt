@@ -22,17 +22,17 @@ object CaptureResultGeometry {
     const val MAX_AUTO_HEIGHT_FRACTION = 0.50f
 
     /**
-     * Fallback minimum width (dp) one section needs to render side-by-side when
-     * the source header can't be measured. The source header alone packs five
-     * 36dp buttons + four 16dp gaps = 244dp before the label, so this sits above
-     * that hard floor to leave the title room. Prefer the measured header min
-     * width at the call site; this is the guard for when it's unavailable.
+     * Minimum width (dp) one section needs before Original and Translation
+     * are put side by side: wide enough that each text still reads as a
+     * column. (A header no longer sets the floor; its actions fold behind ⋯
+     * when they don't fit.) Read by [shouldUseSideBySide]'s callers, the
+     * capture sheet and [ResultSectionsLayout].
      */
     const val SIDE_BY_SIDE_FALLBACK_SECTION_DP = 300
 
     /**
      * Clamp a desired panel height (px) to [[minFraction], [maxFraction]] of
-     * [screenHeightPx]. Used for the initial 40% height and every resize drag.
+     * [screenHeightPx]. Used for every resize drag.
      */
     fun clampPanelHeight(
         desiredPx: Int,
@@ -119,8 +119,7 @@ object CaptureResultGeometry {
     /**
      * True when the panel is wide enough to show source | divider | target
      * side-by-side: each column gets `(panelWidthPx - dividerPx) / 2`, which must
-     * be at least [perSectionMinPx]. Below that, the caller stacks them
-     * vertically in one scroll view.
+     * be at least [perSectionMinPx]. Below that, the sections stack.
      */
     fun shouldUseSideBySide(panelWidthPx: Int, dividerPx: Int, perSectionMinPx: Int): Boolean {
         if (panelWidthPx <= 0) return false

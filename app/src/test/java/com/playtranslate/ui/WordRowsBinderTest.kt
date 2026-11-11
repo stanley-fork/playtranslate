@@ -6,6 +6,9 @@ import android.os.Bundle
 import android.os.Looper
 import android.view.LayoutInflater
 import android.view.View
+import android.view.ViewGroup
+import android.webkit.WebView
+import android.widget.FrameLayout
 import androidx.test.core.app.ApplicationProvider
 import com.playtranslate.Prefs
 import com.playtranslate.R
@@ -13,6 +16,7 @@ import com.playtranslate.language.SentenceAnnotation
 import com.playtranslate.language.SourceLangId
 import com.playtranslate.model.ImportedSense
 import com.playtranslate.model.ImportedSenseGroup
+import com.playtranslate.themeColor
 import com.playtranslate.vocab.HiddenWordsStore
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -21,6 +25,7 @@ import kotlinx.coroutines.runBlocking
 import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNotEquals
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
@@ -47,7 +52,21 @@ import org.robolectric.android.controller.ActivityController
  * the live session's auto-hide; an Analyzed lookup asks for its rows only
  * while the card is shown; live start auto-hides without writing the pref
  * and is edge-triggered; the eye writes the opposite of what the card is
- * showing and spends the auto-hide.
+ * showing and spends the auto-hide; and the header's label recedes to the
+ * hint colour while the card is hidden (by the eye or the auto-hide) and is
+ * muted while it shows.
+ *
+ * And what a controller reaches here: the header's eye first, then, while
+ * the card shows, one action per tappable target the rows' page reported,
+ * each a target inside the one document view; the eye alone while the card
+ * is hidden. The page is played by its JVM stand-in
+ * ([WordRowList.layoutForTest]), since no engine lays anything out here.
+ *
+ * And the page it asks for: the card's theme asks for two columns on a wide
+ * page, and a word list built without asking (the dictionary search, a word
+ * page's sections) and a card's theme by default do not. The columns
+ * themselves are the shell's rule (DefinitionsDocumentTest), which no engine
+ * lays out here either.
  */
 @RunWith(RobolectricTestRunner::class)
 class WordRowsBinderTest {
@@ -279,6 +298,49 @@ class WordRowsBinderTest {
     private val card: View get() = root.findViewById(R.id.cardWords)
     private val eye: View get() = root.findViewById(R.id.btnToggleWords)
     private val hidePref: Boolean get() = Prefs(app).hideWordsSection
+    private val label: String get() = root.findViewById<android.widget.TextView>(R.id.labelWords).text.toString()
+
+    @Test
+    fun `the header counts the rows only while the card is showing them`() {
+        val plain = activity.getString(R.string.section_words)
+        assertEquals("nothing looked up yet", plain, label)
+        binder.render(WordLookupsState.Loading)
+        assertEquals("a lookup still running has no count", plain, label)
+        binder.render(settled())
+        assertEquals(activity.getString(R.string.section_words_count, 3), label)
+        // Hidden: the rows are kept for the reveal, but none are on screen.
+        eye.performClick()
+        assertEquals(View.GONE, card.visibility)
+        assertEquals(plain, label)
+        eye.performClick()
+        assertEquals(activity.getString(R.string.section_words_count, 3), label)
+        // A lookup that finds no words has nothing to count.
+        binder.render(WordLookupsState.Settled(emptyList(), emptyList(), emptyMap()))
+        assertEquals(plain, label)
+    }
+
+    @Test
+    fun `a hidden card's label recedes to the hint colour, and a shown one's is muted`() {
+        val muted = activity.themeColor(R.attr.ptTextMuted)
+        val hint = activity.themeColor(R.attr.ptTextHint)
+        assertNotEquals("the two colours differ in this theme", muted, hint)
+        val labelView = root.findViewById<android.widget.TextView>(R.id.labelWords)
+        binder.applyWordsVisibility()
+        assertEquals("shown", muted, labelView.currentTextColor)
+        eye.performClick()
+        assertEquals(View.GONE, card.visibility)
+        assertEquals("hidden by the eye", hint, labelView.currentTextColor)
+        eye.performClick()
+        assertEquals(View.VISIBLE, card.visibility)
+        assertEquals("shown again", muted, labelView.currentTextColor)
+        // The live session's auto-hide hides the card too, so the label
+        // recedes with it, and comes back when the session ends.
+        binder.setLiveMode(true)
+        assertEquals(View.GONE, card.visibility)
+        assertEquals("auto-hidden by live mode", hint, labelView.currentTextColor)
+        binder.setLiveMode(false)
+        assertEquals(muted, labelView.currentTextColor)
+    }
 
     @Test
     fun `a hidden card never asks for rows and holds no page, and a Settled landing while hidden is drawn on the reveal`() {
@@ -384,6 +446,102 @@ class WordRowsBinderTest {
         assertEquals(1, rowsWanted)
         binder.setLiveMode(false)
         assertEquals(View.VISIBLE, card.visibility)
+    }
+
+    // ── The controller's targets ────────────────────────────────────────
+
+    /** The binder's list, whose page the test plays. */
+    private val list: WordRowList<*>
+        get() = WordRowsBinder::class.java.getDeclaredField("list").apply { isAccessible = true }
+            .get(binder) as WordRowList<*>
+
+    /** The page on screen, as it is once a result is up, laid out at the
+     *  display's size: a header offers only the actions it shows, and it
+     *  decides which show while it measures. */
+    private fun showPage() {
+        root.findViewById<View>(R.id.statusContainer).visibility = View.GONE
+        root.findViewById<View>(R.id.resultsContent).visibility = View.VISIBLE
+        if (root.parent == null) activity.setContentView(root)
+        val dm = activity.resources.displayMetrics
+        root.measure(
+            View.MeasureSpec.makeMeasureSpec(dm.widthPixels, View.MeasureSpec.EXACTLY),
+            View.MeasureSpec.makeMeasureSpec(dm.heightPixels, View.MeasureSpec.EXACTLY),
+        )
+        root.layout(0, 0, dm.widthPixels, dm.heightPixels)
+    }
+
+    @Test
+    fun `the controller reaches the eye, then every tappable target of the rows while the card shows, and the eye alone while it is hidden`() {
+        binder.applyWordsVisibility()
+        binder.render(settled())
+        list.layoutForTest(50)
+        showPage()
+        val tappable = list.targets.filter { it.act.isNotEmpty() }
+        assertEquals(
+            "precondition: each row reports its tap, its speak button and its eye",
+            rows.flatMap { listOf(DefAction.OPEN, DefAction.SPEAK, DefAction.TRAILING) },
+            tappable.map { it.act },
+        )
+
+        val actions = binder.navigableActions()
+        assertEquals("the eye first", eye, actions.first().view)
+        assertNull("the eye is a view of its own", actions.first().target)
+        val rowActions = actions.drop(1)
+        assertTrue("every row action is a target", rowActions.all { it.target != null })
+        assertEquals(
+            "one per tappable target, in the page's order",
+            tappable.map { it.rowId to it.act },
+            rowActions.map { (it.target as DocNavTarget).let { t -> t.rowId to t.act } },
+        )
+        assertTrue("all inside the one document view", rowActions.all { it.view === list.view })
+
+        eye.performClick()
+        showPage()
+        assertEquals("precondition: the card is hidden", View.GONE, card.visibility)
+        assertEquals("the eye alone", listOf(eye), binder.navigableActions().map { it.view })
+    }
+
+    // ── The page it asks for ────────────────────────────────────────────
+
+    /** The script a list's page in [slot] has run once its shell finished
+     *  loading. Called right after the list took its shell, that is the
+     *  theme, the one script queued then: the rows are built off the main
+     *  thread and sent only once the main looper runs again. */
+    private fun firstScriptRunIn(slot: ViewGroup): String {
+        val web = (slot.getChildAt(0) as DefinitionDocumentView).getChildAt(0) as WebView
+        shadowOf(web).webViewClient.onPageFinished(web, "")
+        return shadowOf(web).lastEvaluatedJavascript.orEmpty()
+    }
+
+    @Test
+    fun `the card's page asks for two columns when wide, and a word list or a card theme that does not ask has one`() {
+        binder.render(settled())
+        val theme = firstScriptRunIn(binder.container)
+        assertTrue("precondition: the theme is what ran: ${theme.take(40)}", theme.startsWith("ptTheme("))
+        assertTrue(theme, theme.contains("cols:true"))
+
+        // The dictionary search and a word page's sections build their lists
+        // without asking.
+        val slot = FrameLayout(activity)
+        val other = wordRowList(
+            activity, slot, scope,
+            object : WordRowList.Host<RowState> {
+                override val isAlive: Boolean get() = true
+                override val deckBadges: Boolean get() = false
+                override fun trailing(row: RowState): DefRow.Trailing = DefRow.Trailing.ANKI
+                override fun onOpen(row: RowState) {}
+                override fun onTrailing(row: RowState, shown: DefRow.Trailing) {}
+                override suspend fun speak(row: RowState) {}
+            },
+            WordRowList.LARGE_SCALE,
+        )
+        other.setRows(rows, "ja")
+        val otherTheme = firstScriptRunIn(slot)
+        other.release()
+        assertTrue("precondition: the theme is what ran: ${otherTheme.take(40)}", otherTheme.startsWith("ptTheme("))
+        assertTrue(otherTheme, otherTheme.contains("cols:false"))
+        // Nor does a card's theme, by default.
+        assertFalse(cardDocTheme(activity, WordRowList.GLOSS_SP).twoColumnsWhenWide)
     }
 
     private fun clearPrefs() {

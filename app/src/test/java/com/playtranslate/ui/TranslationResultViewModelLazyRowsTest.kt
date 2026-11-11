@@ -81,13 +81,18 @@ class TranslationResultViewModelLazyRowsTest {
         }
     }
 
-    /** The VM's private row-tier job. A request that runs the row tier
-     *  replaces it, so its identity before and after a request is what
-     *  proves the tier did not run again: [TranslationResultViewModel.wordLookups]
-     *  can't show a re-run, since the re-run's Settled equals the first one
-     *  and the StateFlow conflates it (the value instance survives). */
-    private fun rowsJob(): Job? = TranslationResultViewModel::class.java
-        .getDeclaredField("rowsJob").apply { isAccessible = true }.get(vm) as Job?
+    /** The private row-tier job of the VM's lookup ([WordLookupPipeline]).
+     *  A request that runs the row tier replaces it, so its identity before
+     *  and after a request is what proves the tier did not run again:
+     *  [TranslationResultViewModel.wordLookups] can't show a re-run, since
+     *  the re-run's Settled equals the first one and the StateFlow conflates
+     *  it (the value instance survives). */
+    private fun rowsJob(): Job? {
+        val lookups = TranslationResultViewModel::class.java
+            .getDeclaredField("lookups").apply { isAccessible = true }.get(vm)
+        return WordLookupPipeline::class.java
+            .getDeclaredField("rowsJob").apply { isAccessible = true }.get(lookups) as Job?
+    }
 
     @Test
     fun `a result settles only the analysis, and the request settles the rows`() {

@@ -123,11 +123,12 @@ private fun tintSaveIcon(sendBtn: View, ctx: Context) {
 
 /** Window-level focus watcher: any EditText gaining focus flips the
  *  workspace into IME mode; focus landing anywhere else drops it. Attached
- *  per page while its view is up — this is what lets the editors' fields
- *  raise the keyboard from a normally non-focusable overlay window without
- *  touching the content's own focus listeners (the Original field's
- *  commit-on-focus-loss must survive). */
-private class ImeFocusWatcher(
+ *  per page while its view is up: this is what lets a page's fields (the
+ *  Anki editors', the Sentence page's Ask question) raise the keyboard from
+ *  a normally non-focusable overlay window without touching the content's
+ *  own focus listeners (the Original field's commit-on-focus-loss must
+ *  survive). */
+internal class ImeFocusWatcher(
     private val pageView: View,
     private val host: WorkspaceHost,
 ) : android.view.ViewTreeObserver.OnGlobalFocusChangeListener {

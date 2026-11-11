@@ -270,6 +270,99 @@ object TranslationBackendRegistry {
         }
     }
 
+    /** What [complete] returns: the answer, and who gave it. */
+    class Completion(val answer: SentenceAnswer, val backend: TranslationBackend)
+
+    /** Whether the user has a service that can be put a question about a
+     *  sentence: any registered backend that takes one and is switched on
+     *  and set up ([asking]). The Ask section asks this before it takes a
+     *  question. */
+    fun hasCompleter(): Boolean = orderedBackends().any { asking(it) != null }
+
+    /**
+     * How [backend] is put a question about a sentence, or null when it
+     * takes none or is not set up to ([SentenceAnswerer.canAnswer],
+     * [PromptCompleter.canComplete]): a [SentenceAnswerer] is given the
+     * question whole and reads its parts, a [PromptCompleter] the two
+     * messages made of them, its reply being the answer. The one statement
+     * of who answers and how, for [hasCompleter] and [complete].
+     */
+    private fun asking(backend: TranslationBackend): (suspend (SentenceQuestion) -> SentenceAnswer)? = when {
+        backend is SentenceAnswerer -> if (backend.canAnswer()) backend::answer else null
+        backend is PromptCompleter && backend.canComplete() ->
+            { question -> SentenceAnswer.Text(backend.complete(question.system, question.user)) }
+        else -> null
+    }
+
+    /**
+     * Put a question about a sentence to the user's services: one pass over
+     * those that can answer one ([asking]: the chat LLMs, and a service that
+     * writes the prompt itself) in the same order a translation tries its
+     * backends (the online services in the user's order, then the on-device
+     * models), skipping one in a cooldown, falling through on a failure,
+     * returning the first answer. A blank reply is a failure. A service
+     * saying the question is outside what it answers
+     * ([SentenceAnswer.OutOfScope]) is an answer: the pass ends with it.
+     *
+     * A service is skipped while the cooldown its translations share is
+     * active ([Cooldownable.unavailableUntil]) and while a pause of its
+     * answers alone is ([SentenceAnswerer.answersUnavailableUntil]).
+     *
+     * [onAttempt] hears of each service as the pass starts asking it, so a
+     * caller can say who is being asked: the first pick before the pass
+     * first suspends, then the next one each time it falls through. One
+     * skipped (unable, in a cooldown, or paused) is never named.
+     *
+     * A win clears the service's cooldown state as a translated text does
+     * ([Cooldownable.recordSuccess]): it answered. What a failure does to
+     * that state is the backend's own business ([PromptCompleter.complete],
+     * [SentenceAnswerer.answer]). Nothing here is reported to
+     * [onlineAttemptListener]: that feeds the translation error pill, and a
+     * question that got no answer says so where it was asked.
+     *
+     * Throws [CompletionFailedException] when nobody answered, carrying the
+     * first backend that was tried and what it threw (neither, when every
+     * one was skipped or none exists). Cancellation re-throws.
+     */
+    suspend fun complete(
+        question: SentenceQuestion,
+        onAttempt: (TranslationBackend) -> Unit = {},
+    ): Completion {
+        var firstTried: TranslationBackend? = null
+        var firstFailure: Exception? = null
+        for (backend in orderedBackends()) {
+            val ask = asking(backend) ?: continue
+            val now = System.currentTimeMillis()
+            val coolDown = listOfNotNull(
+                (backend as? Cooldownable)?.unavailableUntil(),
+                (backend as? SentenceAnswerer)?.answersUnavailableUntil(),
+            ).maxOrNull()
+            if (coolDown != null && coolDown > now) {
+                Log.d(TAG, "Completer ${backend.id} skipped (cooldown ${coolDown - now}ms remaining)")
+                continue
+            }
+            onAttempt(backend)
+            val attemptStartedAt = System.currentTimeMillis()
+            try {
+                val answer = ask(question)
+                if (answer is SentenceAnswer.Text && answer.text.isBlank()) {
+                    throw StructuralFailureException("Empty answer", BackendFailure.BAD_RESPONSE)
+                }
+                (backend as? Cooldownable)?.recordSuccess(attemptStartedAt)
+                return Completion(answer, backend)
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                Log.w(TAG, "Completer ${backend.id} failed (${e.javaClass.simpleName}), falling back")
+                if (firstTried == null) {
+                    firstTried = backend
+                    firstFailure = e
+                }
+            }
+        }
+        throw CompletionFailedException(firstTried, firstFailure)
+    }
+
     /** The report for an online backend's call that threw [e]: the server
      *  was reached when it answered the failure ([serverAnswered]). */
     private fun failedAttempt(backend: TranslationBackend, e: Exception, sentAt: Long): OnlineAttempt {

@@ -18,6 +18,10 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.launch
+import android.app.ActivityOptions
+import android.content.Intent
+import com.playtranslate.PlayTranslateApplication
+import com.playtranslate.capture.CaptureBackendResolver
 
 /**
  * The results page as a floating-workspace page — the Sentence tab of the
@@ -54,6 +58,10 @@ class WorkspaceSentencePage(
     private var hostRef: WorkspaceHost? = null
     private var content: TranslationResultContent? = null
     private var flow: SentenceTranslationFlow? = null
+
+    /** Raises the keyboard for the Ask section's question field: the
+     *  workspace's window takes none until a field has focus. */
+    private var imeWatcher: ImeFocusWatcher? = null
 
     private val isAlive: Boolean get() = pageView != null
 
@@ -95,6 +103,7 @@ class WorkspaceSentencePage(
         scope.launch { vm.result.collect { c.render(it) } }
         scope.launch { vm.wordLookups.collect { c.renderWordLookups(it) } }
         c.wordRows.attachCollectors(scope)
+        imeWatcher = ImeFocusWatcher(view, host).also { it.attach() }
         start()
         return view
     }
@@ -211,6 +220,22 @@ class WorkspaceSentencePage(
         override fun completeDeferredTranslation() {
             flow?.completeDeferred()
         }
+
+        /** In the workspace's own modal layer. Its button leaves the
+         *  workspace for the settings page, on the app's screen, the way a
+         *  word page's Anki launch does. */
+        override fun onAskNeedsLlm() {
+            host.alert()
+                .askNeedsLlm(ctx) {
+                    val intent = Intent(ctx.applicationContext, TranslationServicesActivity::class.java)
+                        .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                    val targetDisplay = PlayTranslateApplication.foregroundDisplayId() ?: host.displayId
+                    val opts = ActivityOptions.makeBasic().setLaunchDisplayId(targetDisplay).toBundle()
+                    CaptureBackendResolver.activeOverlayUi?.dismissWorkspace()
+                    ctx.applicationContext.startActivity(intent, opts)
+                }
+                .showInParent(host.modalLayer)
+        }
     }
 
     // ── Sentence Anki ────────────────────────────────────────────────────
@@ -295,6 +320,12 @@ class WorkspaceSentencePage(
     override fun onBack(): Boolean {
         val c = content ?: return false
         if (c.popovers.dismiss()) return true
+        // Out of the question field first (the keyboard goes with its
+        // focus), as the Anki editors' fields do.
+        if (c.ask.fieldHasFocus) {
+            c.ask.clearFieldFocus()
+            return true
+        }
         if (c.sourceLens.isShowing) {
             c.dismissLens()
             return true
@@ -303,6 +334,8 @@ class WorkspaceSentencePage(
     }
 
     override fun onDestroy() {
+        imeWatcher?.detach()
+        imeWatcher = null
         content?.release()
         content = null
         flow = null

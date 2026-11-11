@@ -46,7 +46,16 @@ object GemmaE2BChatTemplate {
      * so this is the only place the marker appears.
      */
     fun systemBlock(source: String, target: String): String =
-        "<bos><|turn>system\n${systemPrompt(source, target)}<turn|>\n"
+        systemEnvelope(systemPrompt(source, target))
+
+    /** [content] as the system turn, `<bos>` and envelope and all: what
+     *  [systemBlock] wraps the translation prose in, for a caller with
+     *  prose of its own (a free-form prompt). */
+    fun systemEnvelope(content: String): String = "<bos><|turn>system\n$content<turn|>\n"
+
+    /** [content] as the user turn plus the model role-open marker
+     *  ([userBlock]'s envelope). */
+    fun userEnvelope(content: String): String = "<|turn>user\n$content<turn|>\n<|turn>model\n"
 
     /**
      * Full user turn + model role-open: `<|turn>user\n{user}<turn|>\n<|turn>model\n`.
@@ -55,6 +64,5 @@ object GemmaE2BChatTemplate {
      * EOS, where MNN's stop-token logic terminates the response.
      */
     fun userBlock(text: String, source: String, target: String): String =
-        "<|turn>user\n${userMessage(text, source, target, includeContext = false)}" +
-            "<turn|>\n<|turn>model\n"
+        userEnvelope(userMessage(text, source, target, includeContext = false))
 }

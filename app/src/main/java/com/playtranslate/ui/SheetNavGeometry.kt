@@ -6,7 +6,8 @@ import kotlin.math.abs
  * Pure spatial-navigation math for the capture sheet's controller cursor —
  * Android-free (own rect type, mirroring [CaptureResultGeometry]'s discipline)
  * so it's JVM-testable. Candidates are screen-space rects of the navigable
- * items (header buttons, collapsed-strip eyes, source words); the caller owns
+ * items (the sections' header buttons, the Ask section's controls, the
+ * Words rows, source words); the caller owns
  * collecting them and mapping the returned index back to an item.
  */
 object SheetNavGeometry {

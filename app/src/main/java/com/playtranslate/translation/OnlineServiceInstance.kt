@@ -101,6 +101,11 @@ enum class ServiceType(
 @Serializable
 enum class OpenAiPreset(
     val account: AccountRequirement = ServiceType.OPENAI.account,
+    /** Whether the preset's models are general chat models, which answer a
+     *  free-form prompt ([PromptCompleter]). False for an endpoint that
+     *  serves a model fine-tuned for translation alone: it speaks the chat
+     *  protocol, and translates whatever it is sent. */
+    val answersPrompts: Boolean = true,
 ) {
     OPENAI,
     DEEPSEEK,
@@ -108,7 +113,7 @@ enum class OpenAiPreset(
     GROQ,
     OPENROUTER,
     CLAUDE,
-    INDEX_TRANSLATE(account = AccountRequirement.NONE),
+    INDEX_TRANSLATE(account = AccountRequirement.NONE, answersPrompts = false),
     CUSTOM;
 
     /** Named under the OpenAI row (its provider line in the add-service

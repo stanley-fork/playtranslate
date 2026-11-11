@@ -3,13 +3,9 @@ package com.playtranslate.ui
 import android.annotation.SuppressLint
 import android.content.Context
 import android.graphics.Canvas
-import android.graphics.Paint
-import android.graphics.Typeface
-import android.util.TypedValue
 import android.view.MotionEvent
 import android.view.View
 import android.view.ViewConfiguration
-import android.widget.FrameLayout
 import com.playtranslate.Prefs
 import com.playtranslate.R
 import com.playtranslate.themeColor
@@ -21,7 +17,8 @@ import kotlin.math.abs
  * surface's [PopoverHost] (card, arrow, scrim, placement and the in-window
  * rules all live there), anchored on whichever view presents the target
  * header's Text size action: its button, or the header's ⋯ when the action
- * is folded. Opened from [TranslationSectionBinder.onChooseFontSize].
+ * is folded. Opened from [TranslationSectionBinder.onChooseFontSize]. Its
+ * card is [SizePickerCard]'s, shared with the one-handle [FontSizePopover].
  *
  * Built in code (no XML, no AppCompat widgets) because the capture overlay
  * inflates with a plain [android.view.LayoutInflater] that silently drops
@@ -40,19 +37,9 @@ class FontSizeRangePopover(
     private fun dp(v: Float) = v * density
 
     override fun createView(ctx: Context, host: PopoverHost): View =
-        FrameLayout(ctx).apply {
-            val padV = dp(CARD_V_PAD_DP).toInt()
-            // No horizontal padding: the track view spans the card's full width
-            // so an end handle still has its whole 48dp box inside a view that
-            // receives touches (see RangeTrackView.edgeInset).
-            setPadding(0, padV, 0, padV)
-            addView(
-                RangeTrackView(ctx),
-                FrameLayout.LayoutParams(MATCH, dp(TRACK_ROW_H_DP).toInt()),
-            )
-        }
+        SizePickerCard.view(ctx, RangeTrackView(ctx))
 
-    override fun cardWidth(ctx: Context, natural: Int): Int = dp(CARD_W_DP).toInt()
+    override fun cardWidth(ctx: Context, natural: Int): Int = SizePickerCard.cardWidth(ctx)
 
     /**
      * The pill slider itself: a full-width track that is plain outside the two
@@ -70,14 +57,7 @@ class FontSizeRangePopover(
         /** Track, handles and value axis, shared with [SizeSliderView]. */
         private val painter = SliderTrackPainter(ctx)
         private val accent = ctx.themeColor(R.attr.ptAccent)
-        private val labelPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-            color = ctx.themeColor(R.attr.ptText)
-            textSize = TypedValue.applyDimension(
-                TypedValue.COMPLEX_UNIT_SP, LABEL_SP, ctx.resources.displayMetrics,
-            )
-            textAlign = Paint.Align.CENTER
-            typeface = Typeface.create("sans-serif-medium", Typeface.NORMAL)
-        }
+        private val labelPaint = SizePickerCard.labelPaint(ctx)
 
         private val touchHalf = painter.touchHalf
         private val touchSlop = ViewConfiguration.get(ctx).scaledTouchSlop
@@ -100,7 +80,7 @@ class FontSizeRangePopover(
          *  view's bounds. The painted circle is much smaller, so the track
          *  simply starts further in. */
         private val edgeInset: Float get() = touchHalf
-        private val trackCenterY: Float get() = dp(LABEL_BAND_DP) + touchHalf
+        private val trackCenterY: Float get() = SizePickerCard.trackCenterY(ctx, painter)
 
         private fun xFor(value: Int): Float =
             painter.xFor(value, Prefs.FONT_SP_FLOOR, Prefs.FONT_SP_CEIL, width)
@@ -127,8 +107,7 @@ class FontSizeRangePopover(
             // when the handles close to within a label's width (adjacent values
             // would otherwise smear into an unreadable overlap), then inward at
             // the extremes so a two-digit value can't run off the card.
-            val baseline = -labelPaint.fontMetrics.top
-            val halfLabel = labelPaint.measureText("88") / 2f
+            val halfLabel = SizePickerCard.halfLabel(labelPaint)
             var minLx = minX
             var maxLx = maxX
             val minGap = halfLabel * 2 + dp(4f)
@@ -143,8 +122,7 @@ class FontSizeRangePopover(
                 minLx to prefs.resultsFontMinSp,
                 maxLx to prefs.resultsFontMaxSp,
             )) {
-                val lx = x.coerceIn(halfLabel, width - halfLabel)
-                canvas.drawText(value.toString(), lx, baseline, labelPaint)
+                SizePickerCard.drawLabel(canvas, labelPaint, value, x, width)
             }
         }
 
@@ -247,20 +225,9 @@ class FontSizeRangePopover(
     }
 
     private companion object {
-        const val MATCH = FrameLayout.LayoutParams.MATCH_PARENT
-
         const val NONE = -1
         const val MIN = 0
         const val MAX = 1
-
-        const val CARD_W_DP = 220f
-        const val CARD_V_PAD_DP = 6f
-
-        /** Label band above the handles, plus the handles' own touch-box
-         *  band — together the row height, so a 48dp box fits vertically. */
-        const val LABEL_BAND_DP = 18f
-        const val TRACK_ROW_H_DP = LABEL_BAND_DP + SliderTrackPainter.TOUCH_BOX_DP
-        const val LABEL_SP = 13f
 
         /** Below this separation the two handles' grab boxes overlap so heavily
          *  that "nearer" is noise; the gesture waits for a drag direction. */
