@@ -57,8 +57,9 @@ data class WordDefinitionData(
  *  when [imported] is set.
  *  [imported] marks rows from imported Yomitan term dictionaries (whose [pos]
  *  is a single display header carrying the dictionary name, not POS tags — so
- *  it is rendered verbatim, never localized) — the compact surfaces clamp
- *  these, since monolingual definitions run paragraph-length. */
+ *  it is rendered verbatim, never localized). Monolingual definitions run
+ *  paragraph-length, which is why a word row lets each dictionary be shut
+ *  ([DefRow.Word.shutDictionaries]). */
 data class SenseDisplay(
     val pos: List<String>,
     val definition: String,

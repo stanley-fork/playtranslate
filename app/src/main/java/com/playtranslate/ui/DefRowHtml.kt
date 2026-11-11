@@ -19,10 +19,10 @@ import com.playtranslate.model.ReadingRow
  * Every tappable element carries `data-act` with a [DefAction]; the row
  * element carries `data-row` and its DOM id, which is how the page names
  * the row a tap or a rect belongs to. `data-inert` makes a link inside the
- * row a tap on the row: a row that previews its definitions is one tap
- * target that opens its word, and a link in a clamped preview would
- * otherwise take that tap away. `data-hold` makes a press held on the
- * element its own action ([DefAction.hold]).
+ * row a tap on the row: a list's row is a tap target that opens its word,
+ * and a link in its definitions would otherwise take that tap away.
+ * `data-hold` makes a press held on the element its own action
+ * ([DefAction.hold]).
  */
 internal object DefRowHtml {
 
@@ -358,12 +358,14 @@ internal object DefRowHtml {
     /**
      * The definitions under a word's header: the warning label and the meta
      * chips, then the imported dictionaries, then the pack's own senses, or
-     * the row's placeholder when the word has none of either. In a preview
-     * row an imported block that holds structured content is clamped
-     * (`clamp`) and a flat imported sense keeps to four lines (`pv`),
-     * because the row taps through to the word's own page and one long
-     * entry must not out-size the list; a full row shows all of it. The
-     * pack's senses are never clamped.
+     * the row's placeholder when the word has none of either. Every
+     * dictionary's definitions are drawn in full, in a list's row as in the
+     * lens's, each dictionary under its title, and a dictionary the user has
+     * shut in this row ([DefRow.Word.shutDictionaries]) is its title alone:
+     * that, and no cap, is what keeps one long entry from out-sizing a list.
+     * Where the row draws an imported dictionary, the pack's own senses are
+     * one more dictionary under a title of their own; alone they have none,
+     * and are drawn whatever the row was told is shut.
      */
     private fun body(ctx: Context, row: DefRow.Word, structured: Map<Long, String>): String {
         val d = row.data
@@ -374,21 +376,33 @@ internal object DefRowHtml {
         if (chips.isNotEmpty() || !row.label.isNullOrBlank()) {
             sb.append(DefinitionsDocument.contentHtml(none, emptyMap(), localize, metaChips = chips, label = row.label))
         }
+        val arrow = VectorDrawableSvg.svg(ctx.resources, R.drawable.ic_chevron_right, "dict-a")
         if (d.importedGroups.isNotEmpty()) {
-            val styled = d.importedGroups.any { g -> g.senses.any { it.scRowid?.let(structured::containsKey) == true } }
-            sb.append("<div class=\"imp")
-                .append(if (row.full) "" else " pv")
-                .append(if (styled && !row.full) " clamp" else "")
-                .append("\">")
-                .append(DefinitionsDocument.contentHtml(none.copy(importedGroups = d.importedGroups), structured, localize))
+            sb.append("<div class=\"imp\">")
+                .append(
+                    DefinitionsDocument.contentHtml(
+                        none.copy(importedGroups = d.importedGroups), structured, localize,
+                        collapse = DefinitionsDocument.ImportedCollapse(row.shutDictionaries, arrow),
+                    ),
+                )
                 .append("</div>")
         }
-        sb.append(
-            DefinitionsDocument.contentHtml(
-                none.copy(senses = d.senses), emptyMap(), localize,
-                showMisc = true, renderMisc = { ctx.renderMiscText(it) },
-            ),
-        )
+        // More than one dictionary in the row: the pack's own is titled too.
+        val ownTitled = d.importedGroups.isNotEmpty() && d.senses.any { !it.imported }
+        val ownShut = ownTitled && OWN_DICTIONARY_KEY in row.shutDictionaries
+        if (ownTitled) {
+            DefinitionsDocument.appendDictionaryTitle(
+                sb, DefAction.OWN_DICTIONARY, ownShut, ctx.getString(R.string.dictionary_title_builtin), arrow,
+            )
+        }
+        if (!ownShut) {
+            sb.append(
+                DefinitionsDocument.contentHtml(
+                    none.copy(senses = d.senses), emptyMap(), localize,
+                    showMisc = true, renderMisc = { ctx.renderMiscText(it) },
+                ),
+            )
+        }
         if (d.senses.none { !it.imported } && d.importedGroups.isEmpty() && row.emptyText != null) {
             sb.append("<div class=\"empty\">").append(htmlEscape(row.emptyText)).append("</div>")
         }

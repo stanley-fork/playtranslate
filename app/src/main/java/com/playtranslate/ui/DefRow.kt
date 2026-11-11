@@ -27,11 +27,20 @@ internal sealed class DefRow {
      * again; its reading, its definitions and its speak button are not
      * drawn.
      *
-     * [full] is how much of the definitions the row shows. False, for a
-     * list whose row taps through to the word's own page: the imported
-     * dictionaries are a clamped preview and their links are inert, so a
-     * tap anywhere is the row's. True, where the row is where the word is
-     * read (the lens): everything, with live links.
+     * Each imported dictionary's definitions stand in full under the
+     * dictionary's title, which takes a tap of its own
+     * ([DefAction.dictionary]) and shuts or opens that dictionary's block in
+     * this row: [shutDictionaries] names the ones shut
+     * ([dictionaryKey]), of which only the title is drawn. Beside an
+     * imported dictionary the pack's own definitions are a dictionary's
+     * block like the others, under a title of their own
+     * ([DefAction.OWN_DICTIONARY], [OWN_DICTIONARY_KEY]); alone in the row
+     * they have no title and nothing shuts them.
+     *
+     * [full] is whether the definitions' links are live. False, for a list
+     * whose row taps through to the word's own page: they are inert, so a
+     * tap anywhere but a button or a dictionary's title is the row's. True,
+     * where the row is where the word is read (the lens).
      */
     data class Word(
         override val id: String,
@@ -46,6 +55,7 @@ internal sealed class DefRow {
         /** What stands in for the definitions when the word has none (a
          *  looked-up word with no entry stays on screen). */
         val emptyText: String? = null,
+        val shutDictionaries: Set<String> = emptySet(),
     ) : DefRow()
 
     /**
@@ -185,4 +195,27 @@ internal object DefAction {
     /** The item a [removeItem] action names; null for any other action. */
     fun removedItem(action: String): Int? =
         if (action.startsWith("$REMOVE:")) action.substring(REMOVE.length + 1).toIntOrNull() else null
+
+    private const val DICTIONARY = "dict"
+
+    /** The title of a word row's imported dictionary number [n], counted
+     *  over the row's dictionaries in drawn order: shut or open its block. */
+    fun dictionary(n: Int): String = "$DICTIONARY:$n"
+
+    /** The dictionary a [dictionary] action names; null for any other action. */
+    fun dictionaryIndex(action: String): Int? =
+        if (action.startsWith("$DICTIONARY:")) action.substring(DICTIONARY.length + 1).toIntOrNull() else null
+
+    /** The title of the pack's own definitions in a word row that also
+     *  draws an imported dictionary: shut or open them. */
+    const val OWN_DICTIONARY = "$DICTIONARY:own"
 }
+
+/** What names the pack's own definitions in [DefRow.Word.shutDictionaries].
+ *  No dictionary's id or label starts with a NUL. */
+internal const val OWN_DICTIONARY_KEY = "\u0000own"
+
+/** What names an imported dictionary's block in a word row
+ *  ([DefRow.Word.shutDictionaries]): the dictionary's id, or its label for a
+ *  group that carries no id. */
+internal fun com.playtranslate.model.ImportedSenseGroup.dictionaryKey(): String = dictId.ifEmpty { source }

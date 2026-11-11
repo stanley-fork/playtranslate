@@ -59,9 +59,10 @@ class DefRowHtmlTest {
         trailingHolds: Boolean = false,
         label: String? = null,
         emptyText: String? = null,
+        shut: Set<String> = emptySet(),
     ): String = DefRowHtml.html(
         ctx,
-        DefRow.Word("id", data, opens, speak, trailing, trailingHolds, full, label, emptyText),
+        DefRow.Word("id", data, opens, speak, trailing, trailingHolds, full, label, emptyText, shut),
         "k7", structured, "ja",
     )
 
@@ -142,35 +143,129 @@ class DefRowHtmlTest {
         val h = html(data().copy(isCommon = true, importedGroups = imported))
         val body = h.substringAfter("<div class=\"body\">")
         val chips = body.indexOf("class=\"meta-row\"")
-        val imp = body.indexOf("<div class=\"imp pv\">")
+        val imp = body.indexOf("<div class=\"imp\">")
         val pack = body.indexOf("<div class=\"def-num\">1.</div>")
         assertTrue(body, chips in 0 until imp && imp < pack)
         assertTrue(body, body.contains("to eat (jitendex)"))
     }
 
-    @Test fun `only an imported block with structured content is clamped to a preview`() {
+    @Test fun `an imported block is drawn in full, structured or flat, in a list's row as in the lens's`() {
         val glossary = """[{"type":"structured-content","content":{"tag":"span","content":"structured eat"}}]"""
         val imported = listOf(ImportedSenseGroup("Jitendex", listOf(ImportedSense("flat eat", scRowid = 5L)), dictId = "jt"))
         val styled = html(data().copy(importedGroups = imported), structured = mapOf(5L to glossary))
-        assertTrue(styled, styled.contains("<div class=\"imp pv clamp\">"))
+        assertTrue(styled, styled.contains("<div class=\"imp\">"))
         assertTrue(styled, styled.contains("structured eat") && styled.contains("data-dictionary=\"jt\""))
-        // The same row before its content arrived, or with styling off: a flat
-        // block kept to a few lines, not clamped by height.
+        // The same row before its content arrived, or with styling off.
         val flat = html(data().copy(importedGroups = imported))
-        assertTrue(flat, flat.contains("<div class=\"imp pv\">") && flat.contains("flat eat"))
+        assertTrue(flat, flat.contains("<div class=\"imp\">") && flat.contains("flat eat"))
+        // No cap of either kind, on the row or in the page that draws it.
+        val shell = DefinitionsDocument.documentShellHtml()
+        for (cap in listOf("clamp", "max-height", "class=\"imp pv")) {
+            assertFalse(cap, styled.contains(cap) || flat.contains(cap) || shell.contains(cap))
+        }
     }
 
-    @Test fun `a full row shows everything, with live links, where a preview is one tap target`() {
+    @Test fun `a full row has live links where a list's row is one tap target, and is the same row otherwise`() {
         val glossary = """[{"type":"structured-content","content":{"tag":"span","content":"structured eat"}}]"""
         val imported = listOf(ImportedSenseGroup("Jitendex", listOf(ImportedSense("flat eat", scRowid = 5L)), dictId = "jt"))
-        val preview = html(data().copy(importedGroups = imported), structured = mapOf(5L to glossary))
-        assertTrue(preview, preview.contains(" data-row data-inert"))
+        val list = html(data().copy(importedGroups = imported), structured = mapOf(5L to glossary))
+        assertTrue(list, list.contains(" data-row data-inert"))
         val full = html(data().copy(importedGroups = imported), structured = mapOf(5L to glossary), full = true)
-        // No inert links, no clamp, no line cap: the row is where the word is read.
         assertFalse(full, full.contains("data-inert"))
-        assertTrue(full, full.contains("<div class=\"imp\">") && full.contains("structured eat"))
-        // Everything else is the same row: header, buttons, chevron.
-        assertEquals(preview.substringBefore("<div class=\"body\">").replace(" data-inert", ""), full.substringBefore("<div class=\"body\">"))
+        // The inert mark is the whole difference: header, buttons, chevron,
+        // the dictionaries' titles and all of their definitions.
+        assertEquals(list.replace(" data-inert", ""), full)
+    }
+
+    @Test fun `each imported dictionary stands under its title, a tap target of its own with the arrow that shuts it`() {
+        val imported = listOf(
+            ImportedSenseGroup(
+                "Jitendex",
+                listOf(ImportedSense("to eat", pos = "v1"), ImportedSense("to live on", pos = "v1"), ImportedSense("a meal", pos = "n")),
+                dictId = "jt",
+            ),
+            ImportedSenseGroup(
+                "大辞林", listOf(ImportedSense("食物を口に入れる", pos = "動")), accentColor = 0xFF112233.toInt(), dictId = "dj",
+            ),
+            ImportedSenseGroup("Plain", listOf(ImportedSense("no part of speech")), dictId = "pl"),
+        )
+        val h = html(data().copy(importedGroups = imported))
+        val body = h.substringAfter("<div class=\"body\">")
+        // One title per dictionary, in drawn order, each naming its place,
+        // and the pack's own after them (four dictionaries in the row).
+        assertEquals(4, body.count("class=\"dict-t\""))
+        val first = body.indexOf("<div class=\"dict-t\" data-act=\"dict:0\" role=\"button\" aria-expanded=\"true\">")
+        val second = body.indexOf(
+            "<div class=\"dict-t\" data-act=\"dict:1\" role=\"button\" aria-expanded=\"true\" style=\"color:#112233\">",
+        )
+        assertTrue(body, first >= 0 && second > first)
+        // The arrow is set in the title's own line of text, before its label.
+        assertTrue(body, Regex("<span><svg class=\"dict-a\"[^>]*>.*?</svg>Jitendex</span></div>").containsMatchIn(body))
+        assertTrue(body, body.contains("</svg>大辞林</span></div>"))
+        assertEquals("an arrow in each title", 4, body.count("<span><svg class=\"dict-a\""))
+        // Under a title the dictionary is named already: a run of
+        // definitions is headed by its part of speech alone, once, in the
+        // header's own colour (the dictionary's is its title's), and a run
+        // with none has no header.
+        assertEquals(1, body.count("<div class=\"pos-h\">v1</div>"))
+        assertEquals(1, body.count("<div class=\"pos-h\">n</div>"))
+        assertEquals(1, body.count("<div class=\"pos-h\">動</div>"))
+        assertFalse(body, body.contains("Jitendex ·") || body.contains("大辞林 ·"))
+        assertEquals("those three and the pack's own", 4, body.count("class=\"pos-h\""))
+        // The title is no part of the row's tap, and the row keeps its own.
+        assertTrue(h, h.startsWith("<div class=\"row cell\" id=\"k7\" data-row data-inert data-act=\"open\">"))
+    }
+
+    @Test fun `a dictionary shut in the row is its title alone, turned, and the others are as they were`() {
+        val imported = listOf(
+            ImportedSenseGroup("Jitendex", listOf(ImportedSense("to eat (jitendex)", pos = "v1")), dictId = "jt"),
+            ImportedSenseGroup("Other", listOf(ImportedSense("to consume")), dictId = "ot"),
+            // A group with no id is named by its label.
+            ImportedSenseGroup("Legacy", listOf(ImportedSense("to dine"))),
+        )
+        val open = html(data().copy(importedGroups = imported))
+        val h = html(data().copy(importedGroups = imported), shut = setOf("jt", "Legacy"))
+        assertTrue(h, h.contains("<div class=\"dict-t shut\" data-act=\"dict:0\" role=\"button\" aria-expanded=\"false\">"))
+        assertTrue(h, h.contains("<div class=\"dict-t\" data-act=\"dict:1\" role=\"button\" aria-expanded=\"true\">"))
+        assertTrue(h, h.contains("<div class=\"dict-t shut\" data-act=\"dict:2\" role=\"button\" aria-expanded=\"false\">"))
+        assertTrue("precondition: open, it is drawn", open.contains("to eat (jitendex)") && open.contains(">v1</div>"))
+        assertFalse("a shut dictionary draws no definition", h.contains("to eat (jitendex)"))
+        assertFalse("nor its headers", h.contains(">v1</div>"))
+        assertFalse(h, h.contains("to dine"))
+        assertTrue("an open one is untouched", h.contains("to consume"))
+        assertTrue("every title stays", h.contains("</svg>Jitendex</span>") && h.contains("</svg>Legacy</span>"))
+        // The pack's own senses are no dictionary's: nothing shuts them.
+        assertTrue(h, h.contains("<div class=\"def-num\">1.</div>"))
+        assertEquals("the head of the row is the same", open.substringBefore("<div class=\"body\">"), h.substringBefore("<div class=\"body\">"))
+        // A stub draws no dictionary at all.
+        val stub = html(data().copy(importedGroups = imported), trailing = DefRow.Trailing.SHOW, shut = setOf("jt"))
+        assertFalse(stub, stub.contains("dict-t"))
+    }
+
+    @Test fun `beside an imported dictionary the pack's own senses stand under a title of their own, and alone they have none`() {
+        val imported = listOf(ImportedSenseGroup("Jitendex", listOf(ImportedSense("to eat (jitendex)")), dictId = "jt"))
+        val name = ctx.getString(R.string.dictionary_title_builtin)
+        // One dictionary in the row: no title, and nothing shuts senses
+        // that have no title to open them again.
+        val alone = html(data())
+        assertFalse(alone, alone.contains("dict-t"))
+        assertEquals(alone, html(data(), shut = setOf(OWN_DICTIONARY_KEY)))
+        // Two: the pack's own block is titled like the imported one, after it.
+        val both = html(data().copy(importedGroups = imported))
+        val title = both.indexOf("<div class=\"dict-t\" data-act=\"dict:own\" role=\"button\" aria-expanded=\"true\"><span>")
+        assertTrue(both, title > both.indexOf("to eat (jitendex)"))
+        assertTrue(both, both.indexOf("<div class=\"def-num\">1.</div>") > title)
+        assertTrue(both, both.substring(title).substringBefore("</div>").endsWith("</svg>$name</span>"))
+        // Shut, it is its title alone, and the imported one is as it was.
+        val shut = html(data().copy(importedGroups = imported), shut = setOf(OWN_DICTIONARY_KEY))
+        assertTrue(shut, shut.contains("<div class=\"dict-t shut\" data-act=\"dict:own\" role=\"button\" aria-expanded=\"false\">"))
+        assertFalse(shut, shut.contains("def-num") || shut.contains("class=\"pos-h\">"))
+        assertTrue(shut, shut.contains("to eat (jitendex)") && shut.contains("data-act=\"dict:0\" role=\"button\" aria-expanded=\"true\""))
+        // An imported dictionary with no sense of the pack's beside it: no
+        // title for a block that is not there.
+        val importedOnly = html(data(senses = emptyList()).copy(importedGroups = imported))
+        assertFalse(importedOnly, importedOnly.contains("dict:own"))
+        assertTrue(importedOnly, importedOnly.contains("data-act=\"dict:0\""))
     }
 
     @Test fun `a row can carry a warning label and a placeholder for a word with no definition`() {

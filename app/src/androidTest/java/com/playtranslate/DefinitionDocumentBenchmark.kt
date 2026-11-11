@@ -263,9 +263,12 @@ class DefinitionDocumentBenchmark {
     private val themed by lazy { android.view.ContextThemeWrapper(ctx, R.style.Theme_PlayTranslate) }
     private var nextDom = 0
 
-    /** [row] as the app draws it: the word row as a list shows it (its
-     *  imported block clamped to a preview) or, [open], as the lens does,
-     *  with everything in full. */
+    /** [row] as the app draws it: the word row as a list shows it (links
+     *  inert) or, [open], as the lens does (links live, the Anki button).
+     *  Both draw every dictionary in full under its title: a list's row was
+     *  capped to a preview until 2026-11-11, which is what "clamped" in the
+     *  step names below meant, and figures taken before then are of capped
+     *  rows. */
     private fun rowHtml(row: RowState, structured: Map<Long, String>, lang: String, open: Boolean): String {
         val data = WordDefinitionData(
             word = row.displayWord,
@@ -580,7 +583,7 @@ class DefinitionDocumentBenchmark {
         fun build(n: Int, open: Boolean): List<String> {
             val t0 = now()
             val list = pick(n).map { rowHtml(it, structured, lang, open) }
-            out("BUILD rows=$n look=${if (open) "open (the lens's full row)" else "clamped (a list's preview row)"} html=${list.sumOf { it.length }}ch kotlin=${now() - t0}ms")
+            out("BUILD rows=$n look=${if (open) "open (the lens's full row)" else "a list's row (named clamped: capped until 2026-11-11, in full since)"} html=${list.sumOf { it.length }}ch kotlin=${now() - t0}ms")
             return list
         }
         val clamped = build(wantRows, open = false)

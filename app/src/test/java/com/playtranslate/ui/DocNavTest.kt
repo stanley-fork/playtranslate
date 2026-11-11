@@ -71,6 +71,35 @@ class DocNavTest {
         assertNull(DocNav.next(listOf(t("d", "")), null, DocNav.Dir.DOWN, false))
     }
 
+    @Test fun `a dictionary's title is reached past its row's buttons, and a column of titles walks as one`() {
+        val open = DefAction.OPEN
+        val title = DefAction.dictionary(0)
+        val second = DefAction.dictionary(1)
+        val rows = listOf(
+            t("a", open), t("a", DefAction.TRAILING), t("a", title), t("a", second),
+            // No dictionary in this row.
+            t("b", open), t("b", DefAction.TRAILING),
+            t("c", open), t("c", DefAction.TRAILING), t("c", title),
+            t("d", open), t("d", DefAction.TRAILING), t("d", title),
+        )
+        fun go(cur: DocTarget, dir: DocNav.Dir) = DocNav.next(rows, cur, dir, false)
+        // The titles are the row's own targets, after its buttons in page order.
+        assertEquals(t("a", title), go(t("a", DefAction.TRAILING), DocNav.Dir.RIGHT))
+        assertEquals(t("a", second), go(t("a", title), DocNav.Dir.RIGHT))
+        assertNull(go(t("a", second), DocNav.Dir.RIGHT))
+        assertEquals(t("a", DefAction.TRAILING), go(t("a", title), DocNav.Dir.LEFT))
+        // Down or up from a title: the next row's same title, else that row itself.
+        assertEquals(t("d", title), go(t("c", title), DocNav.Dir.DOWN))
+        assertEquals(t("c", title), go(t("d", title), DocNav.Dir.UP))
+        assertEquals(t("b", open), go(t("a", title), DocNav.Dir.DOWN))
+        assertEquals(t("b", open), go(t("c", title), DocNav.Dir.UP))
+        assertEquals(t("c", open), go(t("a", second), DocNav.Dir.DOWN).let { go(checkNotNull(it), DocNav.Dir.DOWN) })
+        // Walking the rows themselves never stops on a title.
+        assertEquals(t("b", open), go(t("a", open), DocNav.Dir.DOWN))
+        assertEquals(t("c", open), go(t("b", open), DocNav.Dir.DOWN))
+        assertEquals(t("d", open), go(t("c", open), DocNav.Dir.DOWN))
+    }
+
     // ── A laid-out page: targets at the rects the page reports ──────────
 
     /**

@@ -66,6 +66,12 @@ import org.robolectric.android.controller.ActivityController
  * hide or a release before it calls off; and a page that cannot draw ends
  * the wait with its notice, as rows that cannot be built end it with none.
  *
+ * And a row's dictionaries: a tap on a dictionary's title shuts that
+ * dictionary in that row alone and a second opens it; a rebind of the same
+ * words and a hide and reveal of the card keep it; a new lookup, and a row
+ * that leaves the list, forget it; and among rows of one word and reading,
+ * which their order alone tells apart, it never passes to another row.
+ *
  * And what a controller reaches here: the header's eye first, then, while
  * the card shows, one action per tappable target the rows' page reported,
  * each a target inside the one document view; the eye alone while the card
@@ -457,6 +463,126 @@ class WordRowsBinderTest {
         assertEquals(1, rowsWanted)
         binder.setLiveMode(false)
         assertEquals(View.VISIBLE, card.visibility)
+    }
+
+    // ── A row's dictionaries ────────────────────────────────────────────
+
+    private val twoDictionaries = listOf(
+        ImportedSenseGroup("Jitendex", listOf(ImportedSense("cat (jitendex)")), dictId = "jt"),
+        ImportedSenseGroup("Other", listOf(ImportedSense("cat (other)")), dictId = "ot"),
+    )
+
+    private fun settledWithDictionaries(vararg words: String) = WordLookupsState.Settled(
+        words.map { row(it, "", "meaning").copy(importedGroups = twoDictionaries) },
+        emptyList(), emptyMap(), definitionLang = "ja",
+    )
+
+    private fun shutIn(word: String): Set<String> = shown().first { it.data.word == word }.shutDictionaries
+
+    @Test
+    fun `a tap on a dictionary's title shuts it in that row alone, and a second opens it`() {
+        binder.render(settledWithDictionaries("猫", "犬"))
+        assertTrue("every dictionary of a new row is open", shown().all { it.shutDictionaries.isEmpty() })
+        binder.tapForTest(0, DefAction.dictionary(1))
+        assertEquals(setOf("ot"), shutIn("猫"))
+        assertEquals("the other row is untouched", emptySet<String>(), shutIn("犬"))
+        binder.tapForTest(0, DefAction.dictionary(0))
+        assertEquals(setOf("ot", "jt"), shutIn("猫"))
+        binder.tapForTest(0, DefAction.dictionary(1))
+        assertEquals("opened again", setOf("jt"), shutIn("猫"))
+        // A title names a dictionary the row has: any other number does nothing.
+        binder.tapForTest(0, DefAction.dictionary(7))
+        assertEquals(setOf("jt"), shutIn("猫"))
+        // The pack's own definitions are a dictionary of the row like the others.
+        binder.tapForTest(0, DefAction.OWN_DICTIONARY)
+        assertEquals(setOf("jt", OWN_DICTIONARY_KEY), shutIn("猫"))
+        assertEquals(emptySet<String>(), shutIn("犬"))
+        binder.tapForTest(0, DefAction.OWN_DICTIONARY)
+        assertEquals(setOf("jt"), shutIn("猫"))
+        assertTrue("a title is no tap on the row", tapped.isEmpty())
+    }
+
+    @Test
+    fun `a shut dictionary stays shut while its row is listed, and a new lookup opens everything again`() {
+        binder.render(settledWithDictionaries("猫", "犬"))
+        binder.tapForTest(0, DefAction.dictionary(0))
+        binder.tapForTest(1, DefAction.dictionary(1))
+        // The same words again (a collector that restarts, a re-ordered list).
+        binder.render(settledWithDictionaries("犬", "猫"))
+        assertEquals(setOf("jt"), shutIn("猫"))
+        assertEquals(setOf("ot"), shutIn("犬"))
+        // The card hidden and shown: the rows are the same rows.
+        eye.performClick()
+        eye.performClick()
+        idle()
+        assertEquals(setOf("jt"), shutIn("猫"))
+        // A row that leaves the list takes its own with it.
+        binder.render(settledWithDictionaries("猫"))
+        binder.render(settledWithDictionaries("猫", "犬"))
+        assertEquals(setOf("jt"), shutIn("猫"))
+        assertEquals("back in the list, as new", emptySet<String>(), shutIn("犬"))
+        // The next sentence, the same word in it or not: all open.
+        binder.render(WordLookupsState.Loading)
+        binder.render(settledWithDictionaries("猫", "犬"))
+        assertTrue(shown().all { it.shutDictionaries.isEmpty() })
+    }
+
+    /** A row of 猫 that [n] alone tells from its like: what two entries of
+     *  one word and reading are to the list. */
+    private fun twin(n: Int) = row("猫", "", "meaning").copy(freqScore = n, importedGroups = twoDictionaries)
+
+    private fun settledRows(vararg rows: RowState) =
+        WordLookupsState.Settled(rows.toList(), emptyList(), emptyMap(), definitionLang = "ja")
+
+    private fun shutInTwin(n: Int): Set<String> = shown().first { it.data.freqScore == n }.shutDictionaries
+
+    @Test
+    fun `among rows of one word and reading a shut dictionary never passes to another row`() {
+        // The first of two leaves, and its place in the order is the other's.
+        binder.render(settledRows(twin(1), twin(2)))
+        binder.tapForTest(0, DefAction.dictionary(0))
+        assertEquals(setOf("jt"), shutInTwin(1))
+        assertEquals(emptySet<String>(), shutInTwin(2))
+        binder.render(settledRows(twin(2)))
+        assertEquals("the row that stayed was never shut", emptySet<String>(), shutInTwin(2))
+
+        // Another is listed before a row that stood alone (the lens's
+        // later-loaded entry above the first).
+        binder.render(WordLookupsState.Loading)
+        binder.render(settledRows(twin(1)))
+        binder.tapForTest(0, DefAction.dictionary(0))
+        binder.render(settledRows(twin(2), twin(1)))
+        assertEquals(emptySet<String>(), shutInTwin(2))
+
+        // The two change places.
+        binder.render(WordLookupsState.Loading)
+        binder.render(settledRows(twin(1), twin(2)))
+        binder.tapForTest(0, DefAction.dictionary(0))
+        binder.render(settledRows(twin(2), twin(1)))
+        assertEquals(emptySet<String>(), shutInTwin(2))
+    }
+
+    @Test
+    fun `rows of one word and reading keep a shut dictionary while each is the row it was`() {
+        val dog = row("犬", "", "meaning").copy(importedGroups = twoDictionaries)
+        binder.render(settledRows(dog, twin(1), twin(2)))
+        binder.tapForTest(1, DefAction.dictionary(0))
+        binder.tapForTest(2, DefAction.dictionary(1))
+        // The same rows in the same order (a collector that restarts).
+        binder.render(settledRows(dog, twin(1), twin(2)))
+        assertEquals(setOf("jt"), shutInTwin(1))
+        assertEquals(setOf("ot"), shutInTwin(2))
+        // Another word leaves from before them: among their like each
+        // stands where it stood.
+        binder.render(settledRows(twin(1), twin(2)))
+        assertEquals(setOf("jt"), shutInTwin(1))
+        assertEquals(setOf("ot"), shutInTwin(2))
+        // The second leaves: the first is still the first.
+        binder.render(settledRows(twin(1)))
+        assertEquals(setOf("jt"), shutInTwin(1))
+        // And alone, a row is its word's whatever changes in it.
+        binder.render(settledRows(twin(7)))
+        assertEquals(setOf("jt"), shutInTwin(7))
     }
 
     // ── The wait for the page ───────────────────────────────────────────

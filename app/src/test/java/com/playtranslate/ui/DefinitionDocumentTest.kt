@@ -270,6 +270,17 @@ class DefinitionDocumentTest {
         assertTrue(view.isFocusable)
     }
 
+    @Test fun `a row with nothing to act on but a dictionary's title is a focus stop`() {
+        val groups = listOf(ImportedSenseGroup("Dict", listOf(ImportedSense("one")), dictId = "d"))
+        val data = WordDefinitionData(
+            word = "w", reading = null, senses = emptyList(), freqScore = 0, isCommon = false, importedGroups = groups,
+        )
+        doc.setRows(listOf(DefRow.Word("w", data, opens = false)), "ja")
+        assertTrue(view.isFocusable)
+        doc.setRows(listOf(DefRow.Word("u", data.copy(importedGroups = emptyList()), opens = false)), "ja")
+        assertFalse(view.isFocusable)
+    }
+
     @Test fun `emptying keeps the shell at one pixel for the rows that follow`() {
         doc.setRows(rows(2), "ja")
         pageReady()

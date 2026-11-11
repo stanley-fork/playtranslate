@@ -241,7 +241,10 @@ internal class DefinitionDocument(
     private fun syncFocusable() {
         view?.isFocusable = rows.any {
             when (it) {
-                is DefRow.Word -> it.opens || it.speak != null || it.trailing != null
+                // A dictionary's title is a target too. (A hidden word's
+                // stub draws none, and is a stop for its eye.)
+                is DefRow.Word -> it.opens || it.speak != null || it.trailing != null ||
+                    it.data.importedGroups.isNotEmpty()
                 is DefRow.More -> true
                 is DefRow.Imported -> it.curation?.removable == true
                 is DefRow.Sense -> it.removable || it.examples.any { e -> e.removeIndex != null }

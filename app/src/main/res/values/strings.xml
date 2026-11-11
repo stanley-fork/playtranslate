@@ -311,6 +311,15 @@
          placeholders. -->
     <string name="definitions_need_webview">Definitions need Android System WebView.</string>
 
+    <!-- The title over the app's own dictionary's definitions in a word's
+         row, shown only where the row also holds definitions from
+         dictionaries the user imported, each under its own dictionary's
+         name; a tap on a title folds that dictionary away. This one names
+         the dictionary that comes with the app's language pack, the same
+         one Settings calls "the built-in dictionary". One or two words,
+         drawn in capitals where the script has them. -->
+    <string name="dictionary_title_builtin">Built-in</string>
+
     <!-- Section title above the example-sentences list. -->
     <string name="word_detail_more_examples">More examples</string>
 

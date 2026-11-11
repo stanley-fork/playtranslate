@@ -21,7 +21,8 @@ import kotlinx.coroutines.withContext
  * rows (the lens's "Load more").
  *
  * It keeps the state a row is drawn from beyond the row itself (the deck
- * cache, which rows are speaking) and [publish] maps it all to rows. Every
+ * cache, which rows are speaking, which of a row's dictionaries the user has
+ * shut) and [publish] maps it all to rows. Every
  * change ends in [publish], and the document patches only the rows whose
  * value changed, so a deck badge, a spinner or the host's own change (a
  * word hidden) never rebuilds the list.
@@ -38,7 +39,7 @@ internal class WordRowList<T>(
     private val describe: (T) -> Entry,
     /** The page's theme, read each time a page is taken. */
     theme: () -> DefinitionsDocument.DocTheme,
-    /** Whether rows show their definitions in full ([DefRow.Word.full]):
+    /** Whether the rows' definitions have live links ([DefRow.Word.full]):
      *  true where the row is where the word is read, false for a list whose
      *  rows tap through to the word's own page. */
     private val full: Boolean = false,
@@ -115,6 +116,14 @@ internal class WordRowList<T>(
     private val speaking = HashSet<String>()
     private val speakJobs = HashMap<String, Job>()
 
+    /** Row id to the dictionaries the user has shut in that row
+     *  ([dictionaryKey], [OWN_DICTIONARY_KEY]). A row's own, and only for as
+     *  long as the row is listed: a rebind of the same words keeps it, a row
+     *  that leaves the list forgets it ([forgetShut], which also keeps an id
+     *  from handing it to another row), and so does a new lookup ([clear]).
+     *  Never stored: every dictionary of a new row is open. */
+    private val shut = HashMap<String, Set<String>>()
+
     private var released = false
 
     /** Whether the list is on screen. A list that is not holds no page; it
@@ -148,9 +157,12 @@ internal class WordRowList<T>(
      */
     fun setRows(newRows: List<T>, definitionLang: String, footer: String? = null) {
         cancelSpeaking()
+        val entriesBefore = entries
+        val idsBefore = ids
         rows = newRows
         entries = newRows.map(describe)
         ids = rowIdsOf(entries)
+        forgetShut(entriesBefore, idsBefore)
         this.footer = footer
         lang = definitionLang
         if (newRows.isEmpty() && footer == null) {
@@ -174,6 +186,7 @@ internal class WordRowList<T>(
     /** No rows, the page kept for the ones a running lookup will bring. */
     fun clear() {
         cancelSpeaking()
+        shut.clear()
         rows = emptyList()
         entries = emptyList()
         ids = emptyList()
@@ -198,6 +211,7 @@ internal class WordRowList<T>(
                 trailing = host.trailing(row),
                 trailingHolds = host.trailingHolds(row),
                 full = full,
+                shutDictionaries = shut[ids[i]].orEmpty(),
                 label = entry.label,
                 emptyText = entry.emptyText,
             )
@@ -231,7 +245,43 @@ internal class WordRowList<T>(
             DefAction.SPEAK -> speak(row.id, state)
             DefAction.TRAILING -> (row as? DefRow.Word)?.trailing?.let { host.onTrailing(state, it) }
             DefAction.hold(DefAction.TRAILING) -> host.onTrailingHold(state)
+            else -> toggleDictionary(row, action)
         }
+    }
+
+    /**
+     * Drops what [shut] holds under a row id that no longer names the row
+     * it was shut in, the list having gone from [entriesBefore] under
+     * [idsBefore] to the rows it has now: an id that is gone, and an id
+     * that has passed to another row. Rows that share a word and reading
+     * are told apart by their order alone ([rowIdsOf]), so when one of them
+     * leaves, or another is listed before it (the lens's later-loaded
+     * entries), an id names a different row; among such rows an id keeps
+     * what it holds only while the row under it is the row it was, read off
+     * what the row draws ([Entry.data]). A row that is the only one of its
+     * word and reading, before and now, keeps its own whatever changed in it.
+     */
+    private fun forgetShut(entriesBefore: List<Entry>, idsBefore: List<String>) {
+        val shared = sharedKeys(entriesBefore) + sharedKeys(entries)
+        shut.keys.retainAll { id ->
+            val now = entries.getOrNull(ids.indexOf(id)) ?: return@retainAll false
+            keyOf(now) !in shared || now.data == entriesBefore.getOrNull(idsBefore.indexOf(id))?.data
+        }
+    }
+
+    /** Shuts, or opens again, the dictionary whose title's [action] was
+     *  tapped in [row] as it was drawn then, in that row alone: the pack's
+     *  own, or the imported one at that place. Any other action is none. */
+    private fun toggleDictionary(row: DefRow, action: String) {
+        val key = if (action == DefAction.OWN_DICTIONARY) {
+            OWN_DICTIONARY_KEY
+        } else {
+            val group = DefAction.dictionaryIndex(action) ?: return
+            (row as? DefRow.Word)?.data?.importedGroups?.getOrNull(group)?.dictionaryKey() ?: return
+        }
+        val now = shut[row.id].orEmpty()
+        shut[row.id] = if (key in now) now - key else now + key
+        publish()
     }
 
     /** Each row has its own job, so taps on different rows don't clobber
@@ -396,11 +446,18 @@ internal class WordRowList<T>(
         fun rowIdsOf(entries: List<Entry>): List<String> {
             val seen = HashMap<String, Int>()
             return entries.map { e ->
-                val key = e.data.word + "\u0001" + e.data.reading.orEmpty()
+                val key = keyOf(e)
                 val n = seen.merge(key, 1, Int::plus)!!
                 if (n == 1) key else "$key\u0001$n"
             }
         }
+
+        /** What a row's id is made of: its word and reading. */
+        private fun keyOf(e: Entry): String = e.data.word + "\u0001" + e.data.reading.orEmpty()
+
+        /** The [keyOf] values that more than one of [entries] has. */
+        private fun sharedKeys(entries: List<Entry>): Set<String> =
+            entries.groupingBy(::keyOf).eachCount().filterValues { it > 1 }.keys
     }
 }
 

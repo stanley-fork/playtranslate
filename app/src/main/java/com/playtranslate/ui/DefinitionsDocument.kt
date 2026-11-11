@@ -219,6 +219,35 @@ internal object DefinitionsDocument {
   margin: .65em 0 .2em;
 }
 .pos-h:first-child { margin-top: .1em; }
+/* A dictionary's title in a word row ([ImportedCollapse]): the header's type
+   on a line of its own that takes a tap, with the arrow that says whether
+   the dictionary's block under it is open (down) or shut (toward the line's
+   end). The arrow is the row chevron, turned; its box reaches past the
+   line's start by the glyph's own inset, so the drawn arrow stands where
+   the text under it starts. */
+.dict-t {
+  display: flex; align-items: center; min-height: 32px; border-radius: 6px;
+  font-size: .72em; font-weight: 600; letter-spacing: .07em;
+  text-transform: uppercase; color: var(--pt-secondary);
+}
+.dict-t > span { min-width: 0; }
+/* The arrow is set in the title's own line, on its baseline, so it is level
+   with the capitals by construction and at every text size: a box 1.6em
+   tall whose middle stands half a capital's height (.711em in the system
+   font) above the baseline. Its negative margins keep the taller box from
+   opening the line, and vertical-align places the margin's lower edge, so
+   the offset is (.3555 - .8 + .2)em. It turns about the glyph's own middle,
+   which is right of its box's, so the turned arrow does not drop. */
+.dict-a {
+  display: inline-block; width: 1.6em; height: 1.6em; margin: -.2em 0 -.2em -.4em;
+  vertical-align: -.2445em;
+  transform-origin: 51.2% 50%; transform: rotate(90deg);
+}
+.dict-t.shut .dict-a { transform: none; }
+[dir=rtl] .dict-a { margin: -.2em -.4em -.2em 0; }
+[dir=rtl] .dict-t.shut .dict-a { transform: scaleX(-1); }
+.dict-t:active, .dict-t.cur { background: var(--pt-press); }
+.dict-t + .pos-h { margin-top: 0; }
 .label-warn { font-size: .8em; color: var(--pt-secondary); margin: .1em 0 .3em; }
 /* The conjugation line, sized like the label. The right margin is the native
    line's 17dp, clearing the open chevron the lens floats over the page's
@@ -384,9 +413,11 @@ ruby > rt { font-size: .5em; }
      * rows), `ptAppend(html, gen)` (more rows at the end), `ptReplace(id,
      * html, gen)` (one element), `ptCursor(rowId, act)` (the controller's
      * highlight). From the page: `PTBridge.onLayout(gen, height, targets)`
-     * after every change, `targets` a flat JSON array of rowId, act, left,
-     * top, width, height (CSS px from the root's corner) for every row and
-     * every tappable element; and `PTBridge.onAction(rowId, act)` for a tap.
+     * after every change, and when the rows' height changes with none (a
+     * late image, an opened `<details>`), `targets` a flat JSON array of
+     * rowId, act, left, top, width, height (CSS px from the root's corner)
+     * for every row and every tappable element; and
+     * `PTBridge.onAction(rowId, act)` for a tap.
      *
      * The page is the authority on what a tap hit, as in the first shell: a
      * link navigates (the client hands it to the browser) unless its row is
@@ -491,17 +522,6 @@ button.act:active, .act.cur { background: var(--pt-press); }
 .body { margin: .606em 12px 0 0; }
 [dir=rtl] .infl { margin: 2px 0 0 12px; }
 [dir=rtl] .body { margin: .606em 0 0 12px; }
-/* An imported block with structured content is a preview: capped, with a
-   fade when it is cut (the page marks `over` once it knows). */
-.clamp { position: relative; max-height: 8em; overflow: hidden; }
-.clamp.over::after {
-  content: ''; position: absolute; left: 0; right: 0; bottom: 0; height: 28px;
-  background: linear-gradient(transparent, var(--pt-panel));
-}
-/* In a preview a flat imported sense keeps to four lines. */
-.pv > .dict-group > .def-row > .def-text {
-  display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 4; overflow: hidden;
-}
 .empty { font-size: 1.06em; color: var(--pt-secondary); }
 /* A one-line action under the rows ("Load more"). */
 .more {
@@ -675,17 +695,10 @@ button.act:active, .act.cur { background: var(--pt-press); }
   // were built for and do nothing when it is no longer the page's.
   var gen = 0;
   var cursor = null;
+  // The height the last report gave (see the observer at the end).
+  var sent = 0;
 
   function rootEl() { return document.getElementById('root'); }
-
-  // A clamped preview shows its fade only when something is cut.
-  function markOverflow(r) {
-    var c = r.querySelectorAll('.clamp');
-    for (var i = 0; i < c.length; i++) {
-      var over = c[i].scrollHeight > c[i].clientHeight + 1;
-      if (over !== c[i].classList.contains('over')) c[i].classList.toggle('over');
-    }
-  }
 
   function report() {
     var r = rootEl();
@@ -694,7 +707,6 @@ button.act:active, .act.cur { background: var(--pt-press); }
     // character and report an enormous bogus height. The resize listener
     // reports the moment the real width arrives.
     if (document.documentElement.clientWidth < 1) return;
-    markOverflow(r);
     // The root's own rect, never the document's scroll height: that is
     // max(content, viewport), and would echo an oversized view back forever.
     var base = r.getBoundingClientRect();
@@ -710,8 +722,9 @@ button.act:active, .act.cur { background: var(--pt-press); }
         Math.round(b.left - base.left), Math.round(b.top - base.top),
         Math.round(b.width), Math.round(b.height));
     }
+    sent = Math.ceil(base.height);
     if (window.PTBridge && window.PTBridge.onLayout) {
-      window.PTBridge.onLayout(gen, Math.ceil(base.height), JSON.stringify(out));
+      window.PTBridge.onLayout(gen, sent, JSON.stringify(out));
     }
   }
 
@@ -845,6 +858,20 @@ button.act:active, .act.cur { background: var(--pt-press); }
   // Direct, not via a frame: this is what fires when a hidden view first
   // gets its real width.
   window.addEventListener('resize', report);
+
+  // The rows can grow with no row set behind it: an image that declared no
+  // size takes its own when it loads, a <details> is opened. The host gave
+  // the view the height it was last told, so the new rows' end is cut off
+  // until it is told again. A row set still reports for itself (settle): an
+  // observer speaks only from a drawn frame, and the first layout comes
+  // before there is one. By then the height is known here, so the observer
+  // reports a height that is news and nothing else, and a row set costs no
+  // report more than it did. (ResizeObserver is Chromium 64, older than any
+  // WebView of the app's minimum Android.)
+  var grown = new ResizeObserver(function () {
+    if (Math.ceil(rootEl().getBoundingClientRect().height) !== sent) report();
+  });
+  document.addEventListener('DOMContentLoaded', function () { grown.observe(rootEl()); });
 """
 
     // ── Content ─────────────────────────────────────────────────────────
@@ -897,6 +924,25 @@ button.act:active, .act.cur { background: var(--pt-press); }
     )
 
     /**
+     * A word row's imported dictionaries, each under a title that shuts and
+     * opens it ([DefRow.Word.shutDictionaries]); no other surface passes one,
+     * and their headers stay as they were. The title is the dictionary's
+     * label on a line of its own, in the dictionary's colour when it has
+     * one, behind [arrow]; it carries `data-act` ([DefAction.dictionary] of
+     * the group's place among the word's dictionaries), which is how the
+     * page reports its tap. Under it each run of definitions is headed by
+     * its part of speech alone, when it has one. A dictionary in [shut]
+     * ([dictionaryKey]) draws its title and nothing else.
+     */
+    class ImportedCollapse(
+        val shut: Set<String>,
+        /** The arrow's markup, an `<svg class="dict-a">` of the glyph that
+         *  points toward the line's end (the page turns it down for an open
+         *  block). Built by the row renderer, which can read the drawable. */
+        val arrow: String,
+    )
+
+    /**
      * A word's definitions as markup, the body of a row of the page
      * ([DefRowHtml]): imported groups first (in
      * their given order — [TermMerge] already ordered them), each in its
@@ -923,6 +969,9 @@ button.act:active, .act.cur { background: var(--pt-press); }
      * removal is allowed. The ✕ carries `data-act`
      * ([DefAction.removeItem] of that index), which is how the page reports
      * its tap. Null emits no wrapper at all.
+     *
+     * [collapse] (a word row only) gives each dictionary its title line and
+     * leaves a shut one's definitions out (see [ImportedCollapse]).
      */
     fun contentHtml(
         data: WordDefinitionData,
@@ -933,6 +982,7 @@ button.act:active, .act.cur { background: var(--pt-press); }
         metaChips: List<MetaChip> = emptyList(),
         label: String? = null,
         importedCuration: ImportedCuration? = null,
+        collapse: ImportedCollapse? = null,
     ): String {
         val sb = StringBuilder()
         label?.takeIf { it.isNotBlank() }?.let {
@@ -959,7 +1009,7 @@ button.act:active, .act.cur { background: var(--pt-press); }
         // The flat index of each group's first sense, counted over removed
         // senses too: the curation's identity names a row across every group.
         var groupBase = 0
-        for (group in data.importedGroups) {
+        for ((groupIndex, group) in data.importedGroups.withIndex()) {
             val base = groupBase
             groupBase += group.senses.size
             val kept = group.senses.withIndex()
@@ -973,15 +1023,28 @@ button.act:active, .act.cur { background: var(--pt-press); }
             // curation's wrapper and ✕ (see the file header).
             val scopeOpen = "<div class=\"gloss-scope\" data-dictionary=\"" + htmlEscape(group.dictId) + "\">"
             val headerColor = group.accentColor?.let { " style=\"color:${cssHex(it)}\"" }.orEmpty()
+            val shut = collapse != null && group.dictionaryKey() in collapse.shut
+            if (collapse != null) {
+                appendDictionaryTitle(
+                    sb, DefAction.dictionary(groupIndex), shut, group.source, collapse.arrow, headerColor,
+                )
+            }
             var previousHeader: String? = null
-            for ((i, sense) in kept) {
+            for ((i, sense) in if (shut) emptyList() else kept) {
                 // Consecutive senses sharing a header emit it once. Run over the kept
                 // senses and outside the curation wrapper, so removing a
-                // run's first row hands its header to the next.
-                val header = importedHeader(group.source, sense.pos)
+                // run's first row hands its header to the next. Under a
+                // title the dictionary is already named: the header is the
+                // part of speech alone, in the header's own colour, and a
+                // run with none has no header.
+                val header = if (collapse != null) sense.pos else importedHeader(group.source, sense.pos)
                 if (header != previousHeader) {
-                    sb.append("<div class=\"pos-h\"$headerColor>")
-                        .append(htmlEscape(header)).append("</div>")
+                    if (collapse == null) {
+                        sb.append("<div class=\"pos-h\"$headerColor>")
+                            .append(htmlEscape(header)).append("</div>")
+                    } else if (header.isNotBlank()) {
+                        sb.append("<div class=\"pos-h\">").append(htmlEscape(header)).append("</div>")
+                    }
                     previousHeader = header
                 }
                 val body = sense.scRowid?.let { structured[it] }
@@ -1017,6 +1080,27 @@ button.act:active, .act.cur { background: var(--pt-press); }
             sb.append("</div></div>")
         }
         return sb.toString()
+    }
+
+    /**
+     * A dictionary's title in a word row: its [label] behind [arrow], in one
+     * line of text (the arrow is set on the label's baseline), a tap target
+     * of its own ([act]), marked shut or open. [style] is the title's own
+     * colour as a ` style="…"` attribute, or nothing.
+     */
+    fun appendDictionaryTitle(
+        sb: StringBuilder,
+        act: String,
+        shut: Boolean,
+        label: String,
+        arrow: String,
+        style: String = "",
+    ) {
+        sb.append("<div class=\"dict-t").append(if (shut) " shut" else "")
+            .append("\" data-act=\"").append(act)
+            .append("\" role=\"button\" aria-expanded=\"").append(!shut).append('"')
+            .append(style).append("><span>").append(arrow)
+            .append(htmlEscape(label)).append("</span></div>")
     }
 
     /**
