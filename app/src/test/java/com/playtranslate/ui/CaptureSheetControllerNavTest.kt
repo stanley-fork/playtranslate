@@ -286,6 +286,23 @@ class CaptureSheetControllerNavTest {
         }
     }
 
+    /** A target that names what takes its place when a press of it removes
+     *  it ([NavTarget.successor]): [next]'s target, as a document's ✕ of an
+     *  explain answer names the row's explain button. */
+    private data class LeavingTarget(val spot: Spot, val next: Spot) : NavTarget {
+        override fun rectOnScreen(out: Rect): Boolean {
+            if (!spot.shown) return false
+            out.set(spot.rect)
+            return true
+        }
+
+        override fun activate() {
+            spot.activations++
+        }
+
+        override fun successor(): NavTarget = FakeTarget(next)
+    }
+
     /**
      * An expanded sheet's content at fixed places on a laid-out window: an
      * ordinary [button], below it a [doc] view that draws targets (three
@@ -422,6 +439,48 @@ class CaptureSheetControllerNavTest {
         withSecond = false
         b.nav.revalidateCursor()
         assertEquals(b.first.rect, b.host.ring)
+    }
+
+    @Test
+    fun `a target that is gone is followed to the one it named, ahead of the nearest`() {
+        val b = Board()
+        // Top to bottom: the target the last one names, a nearer neighbour,
+        // and the one that will go (an answer's ✕ under its row's buttons).
+        var withThird = true
+        b.host.actions = {
+            listOf(b.inDoc(b.first), b.inDoc(b.second)) +
+                if (withThird) listOf(NavAction(b.doc, target = LeavingTarget(b.third, next = b.first))) else emptyList()
+        }
+        repeat(3) { press(b.nav, KeyEvent.KEYCODE_DPAD_DOWN) }
+        assertEquals("precondition: the cursor is on the third target", b.third.rect, b.host.ring)
+
+        withThird = false
+        b.nav.revalidateCursor()
+        b.nav.syncRing()
+
+        assertEquals("on the target it named, though the second is nearer", b.first.rect, b.host.ring)
+        press(b.nav, KeyEvent.KEYCODE_BUTTON_A)
+        assertEquals("and A is that target's", 1, b.first.activations)
+        assertEquals(0, b.second.activations)
+    }
+
+    @Test
+    fun `a target that named one that is not there either is retargeted to the nearest, as any other`() {
+        val b = Board()
+        var withThird = true
+        b.host.actions = {
+            // The named target (the first spot) is not among the candidates.
+            listOf(NavAction(b.button), b.inDoc(b.second)) +
+                if (withThird) listOf(NavAction(b.doc, target = LeavingTarget(b.third, next = b.first))) else emptyList()
+        }
+        repeat(3) { press(b.nav, KeyEvent.KEYCODE_DPAD_DOWN) }
+        assertEquals("precondition: the cursor is on the third target", b.third.rect, b.host.ring)
+
+        withThird = false
+        b.nav.revalidateCursor()
+        b.nav.syncRing()
+
+        assertEquals(b.second.rect, b.host.ring)
     }
 
     @Test

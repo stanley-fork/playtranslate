@@ -15,7 +15,25 @@ import java.util.Locale
  *  What an [AskSession] is keyed by. */
 data class AskSentence(val text: String, val sourceLang: String, val targetLang: String)
 
-/** What the user asked: a ready-made question, or their own words. */
+/**
+ * One word of a sentence, as a question about it names it: the [sentence]
+ * it stands in, the [word] as its dictionary row heads it, that word's
+ * [reading] where it has one of its own, and the forms it takes in the
+ * sentence where they differ from the word ([surfaces]: 食べさせられた for
+ * 食べる; a row that covers several occurrences has several, a word that
+ * stands as itself none). What a word row's host says of the row, and what
+ * an answer is kept against: an answer about one of these is no answer
+ * about another.
+ */
+data class WordInSentence(
+    val sentence: AskSentence,
+    val word: String,
+    val reading: String? = null,
+    val surfaces: List<String> = emptyList(),
+)
+
+/** What the user asked: a ready-made question, their own words, or how one
+ *  word of the sentence is used in it. */
 sealed class AskQuestion {
     /** The line over the answer. */
     abstract val title: String
@@ -27,6 +45,16 @@ sealed class AskQuestion {
     data class Custom(val text: String) : AskQuestion() {
         override val title: String get() = text
     }
+
+    /** A word row's question: how [word] is used in the sentence it was
+     *  read in ([WordInSentence]'s word, reading and forms). [title] is the
+     *  asking surface's to give, being a string of the app's. */
+    data class Word(
+        val word: String,
+        val reading: String?,
+        val surfaces: List<String>,
+        override val title: String,
+    ) : AskQuestion()
 }
 
 /**
@@ -37,7 +65,8 @@ sealed class AskQuestion {
  * the answer's language named in full ([answerLanguage]) where the
  * translation prompts have its English name. `{source}` is the sentence's
  * language's English name, `{text}` the sentence, `{question}` the
- * question's wording. [build] ends every user message with [ANSWER_IN], so
+ * question's wording, `{word}` the word a word question is about
+ * ([wordValue]). [build] ends every user message with [ANSWER_IN], so
  * both messages say the answer's language.
  *
  * The prompts are for the models that are put one. A service that writes
@@ -66,6 +95,13 @@ object AskPrompts {
             "For each one, quote the part of the sentence it covers, then explain in one or two " +
             "lines what it does there."
 
+    /** A word row's question ([AskQuestion.Word]): `{word}` is the word as
+     *  [wordValue] names it. A first draft, like the wording above it. */
+    const val WORD_IN_SENTENCE =
+        "Explain how {word} is used in this {source} text: which of its meanings it has here, " +
+            "and what its form and the words around it add. Answer in two to four sentences, " +
+            "and do not translate the whole text."
+
     /** The frame for a ready-made question: its wording, then the sentence. */
     const val PRESET = "{question}\n\n{text}"
 
@@ -92,6 +128,10 @@ object AskPrompts {
         val (wording, frame) = when (question) {
             is AskQuestion.Preset -> fill(question.preset.question) to PRESET
             is AskQuestion.Custom -> question.text to CUSTOM
+            // The word is a value of the wording, as the wording is of the
+            // frame: a word that reads like a token stays the word.
+            is AskQuestion.Word ->
+                fill(WORD_IN_SENTENCE, LlmPromptTemplates.TOKEN_WORD to wordValue(question)) to PRESET
         }
         return SentenceQuestion(
             source = sentence.sourceLang,
@@ -105,6 +145,23 @@ object AskPrompts {
                 LlmPromptTemplates.TOKEN_TEXT to sentence.text,
             ),
         )
+    }
+
+    /**
+     * The word of a word question as its wording names it: the word in
+     * quotes, then in brackets its reading and the forms it takes in the
+     * sentence, whichever it has: `"食べる" (read たべる; it appears here as
+     * "食べさせられた")`. The forms are what the model can find in the text,
+     * which a dictionary form alone often is not.
+     */
+    internal fun wordValue(question: AskQuestion.Word): String {
+        val notes = listOfNotNull(
+            question.reading?.takeIf { it.isNotBlank() && it != question.word }?.let { "read $it" },
+            question.surfaces.filter { it.isNotBlank() && it != question.word }.distinct()
+                .takeIf { it.isNotEmpty() }
+                ?.let { forms -> "it appears here as " + forms.joinToString(", ") { "\"$it\"" } },
+        )
+        return "\"${question.word}\"" + if (notes.isEmpty()) "" else notes.joinToString("; ", " (", ")")
     }
 
     /**

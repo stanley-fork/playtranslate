@@ -299,23 +299,46 @@ internal object DefRowHtml {
         // A preview's links are the row's tap; a full row's are live.
         if (!row.full) sb.append(" data-inert")
         if (row.opens) sb.append(" data-act=\"").append(DefAction.OPEN).append('"')
-        sb.append("><div class=\"head\"><div class=\"title\" lang=\"").append(htmlEscape(sourceLang)).append("\">")
+        // A head that keeps room at its end for the chevron (op).
+        sb.append("><div class=\"head").append(if (row.opens) " op" else "")
+            .append("\"><div class=\"title\" lang=\"").append(htmlEscape(sourceLang)).append("\">")
         sb.append("<span class=\"w\">")
         val titlePitch = if (!stub && kanaOnly) PitchAccentHtml.pitchAccentHtml(d.word, readings[0].pitch) else ""
         sb.append(titlePitch.ifEmpty { htmlEscape(d.word) }).append("</span>")
         if (!stub && readings.size == 1 && !kanaOnly) appendReading(sb, readings[0], bold = false)
         sb.append("</div>")
 
+        // The buttons are one group: it stands beside the title while the
+        // headword fits there, and under it, at the line's end, when it
+        // does not (the page's rule, ROW_CSS). No button, no group.
+        val acts = StringBuilder()
+        row.explain?.let { explain ->
+            if (stub) {
+                // Keeps its place like the speak column, so the eye does not
+                // move when the row is toggled.
+                acts.append("<span class=\"act explain ghost\"></span>")
+            } else {
+                acts.append("<button class=\"act explain").append(if (explain.answer != null) " on" else "")
+                    .append("\" data-act=\"").append(DefAction.EXPLAIN)
+                    .append("\" aria-label=\"").append(htmlEscape(ctx.getString(R.string.cd_word_explain)))
+                    .append("\">")
+                // The whole wait: nothing else of the row moves until there
+                // is something to read.
+                if (explain.busy) acts.append("<span class=\"spin\"></span>")
+                else acts.append(icon(ctx, R.drawable.ic_ai_info))
+                acts.append("</button>")
+            }
+        }
         row.speak?.let { speak ->
             if (stub) {
                 // The column keeps its place, so the eye does not move when
                 // the row is toggled.
-                sb.append("<span class=\"act speak ghost\"></span>")
+                acts.append("<span class=\"act speak ghost\"></span>")
             } else {
-                sb.append("<button class=\"act speak\" data-act=\"").append(DefAction.SPEAK).append("\">")
-                if (speak == DefRow.Speak.LOADING) sb.append("<span class=\"spin\"></span>")
-                else sb.append(icon(ctx, R.drawable.ic_lens_speak))
-                sb.append("</button>")
+                acts.append("<button class=\"act speak\" data-act=\"").append(DefAction.SPEAK).append("\">")
+                if (speak == DefRow.Speak.LOADING) acts.append("<span class=\"spin\"></span>")
+                else acts.append(icon(ctx, R.drawable.ic_lens_speak))
+                acts.append("</button>")
             }
         }
         row.trailing?.let { trailing ->
@@ -324,11 +347,12 @@ internal object DefRowHtml {
                 DefRow.Trailing.HIDE -> R.drawable.ic_visibility to R.string.hidden_word_hide_content_description
                 DefRow.Trailing.SHOW -> R.drawable.ic_visibility_off to R.string.hidden_word_show_content_description
             }
-            sb.append("<button class=\"act\" data-act=\"").append(DefAction.TRAILING).append('"')
-            if (row.trailingHolds) sb.append(" data-hold")
-            sb.append(" aria-label=\"").append(htmlEscape(ctx.getString(label))).append("\">")
+            acts.append("<button class=\"act\" data-act=\"").append(DefAction.TRAILING).append('"')
+            if (row.trailingHolds) acts.append(" data-hold")
+            acts.append(" aria-label=\"").append(htmlEscape(ctx.getString(label))).append("\">")
                 .append(icon(ctx, drawable)).append("</button>")
         }
+        if (acts.isNotEmpty()) sb.append("<div class=\"acts\">").append(acts).append("</div>")
         if (row.opens) {
             sb.append("<span class=\"act chev\">").append(icon(ctx, R.drawable.ic_chevron_right)).append("</span>")
         }
@@ -349,6 +373,8 @@ internal object DefRowHtml {
             sb.append("<div class=\"infl\">")
                 .append(lines.joinToString("<br>") { htmlEscape(it) }).append("</div>")
         }
+
+        row.explain?.answer?.let { appendExplainAnswer(ctx, sb, it) }
 
         val body = body(ctx, row, structured)
         if (body.isNotEmpty()) sb.append("<div class=\"body\">").append(body).append("</div>")
@@ -407,6 +433,29 @@ internal object DefRowHtml {
             sb.append("<div class=\"empty\">").append(htmlEscape(row.emptyText)).append("</div>")
         }
         return sb.toString()
+    }
+
+    /**
+     * What came of a row's explain question ([DefRow.Answer]), between the
+     * row's head and its definitions: there only once the user asked, and
+     * put away by its own ✕. The title line with the ✕ at its end, the
+     * text, the footer under an answer, Try again after a failure, and a
+     * hairline (the block's own) where the definitions begin.
+     */
+    private fun appendExplainAnswer(ctx: Context, sb: StringBuilder, answer: DefRow.Answer) {
+        sb.append("<div class=\"xp\"><div class=\"xp-h\"><span class=\"xp-t\">")
+            .append(htmlEscape(answer.title)).append("</span>")
+            .append("<button type=\"button\" class=\"xp-x\" data-act=\"").append(DefAction.EXPLAIN_CLOSE)
+            .append("\" aria-label=\"").append(htmlEscape(ctx.getString(R.string.cd_ask_close))).append("\">")
+            .append(icon(ctx, R.drawable.ic_close)).append("</button></div>")
+        sb.append("<div class=\"xp-a").append(if (answer.muted) " mu" else "").append("\">")
+            .append(htmlEscape(answer.text)).append("</div>")
+        answer.footer?.let { sb.append("<div class=\"xp-f\">").append(htmlEscape(it)).append("</div>") }
+        if (answer.retry) {
+            sb.append("<button type=\"button\" class=\"xp-r\" data-act=\"").append(DefAction.EXPLAIN_RETRY)
+                .append("\">").append(htmlEscape(ctx.getString(R.string.ask_retry))).append("</button>")
+        }
+        sb.append("</div>")
     }
 
     private fun appendReading(sb: StringBuilder, row: ReadingRow, bold: Boolean) {

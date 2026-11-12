@@ -980,6 +980,19 @@
          point by point. -->
     <string name="ask_preset_grammar_breakdown">Grammar breakdown</string>
 
+    <!-- contentDescription for a button on a word's row, in the results'
+         word list and in the dictionary popup over a tapped word: it asks
+         an AI model how that word is used in the sentence the user is
+         reading, and shows the answer in the row. The button is an icon,
+         so this is only read aloud by a screen reader. -->
+    <string name="cd_word_explain">Explain in this sentence</string>
+
+    <!-- Small title over the answer that button (cd_word_explain) brings,
+         inside the word's row and under the word itself: the answer says
+         how the word is used in the sentence being read. Shown in capital
+         letters where the script has them; keep it to a few words. -->
+    <string name="word_explain_title">In this sentence</string>
+
     <!-- Skeleton/placeholder line under the Words header while
          tokenization is in flight. -->
     <string name="words_loading">Looking up words…</string>

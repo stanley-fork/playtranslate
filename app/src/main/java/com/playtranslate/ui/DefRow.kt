@@ -56,7 +56,38 @@ internal sealed class DefRow {
          *  looked-up word with no entry stays on screen). */
         val emptyText: String? = null,
         val shutDictionaries: Set<String> = emptySet(),
+        /** The row's "explain in this sentence" button, the first in its
+         *  head ([DefAction.EXPLAIN]); null for a row with none (a word
+         *  with no sentence behind it). */
+        val explain: Explain? = null,
     ) : DefRow()
+
+    /**
+     * A word row's question of how its word is used in the sentence it was
+     * read in, as the row draws it. With nothing asked it is the button
+     * alone. While the question is out ([busy]) the button is a spinner and
+     * nothing else moves. With something to read ([answer]) the button is
+     * lit and the answer stands under the row's head, over its definitions.
+     * A hidden word's stub draws neither, and keeps the button's place.
+     */
+    data class Explain(val busy: Boolean = false, val answer: Answer? = null)
+
+    /**
+     * What came of a row's question, in the words every surface that draws
+     * a question uses ([askDisplay]): the [title] over it, with the ✕ that
+     * puts it away at the line's end ([DefAction.EXPLAIN_CLOSE]); the
+     * [text], [muted] where it is the app's word on the question and not an
+     * answer (a failure, a question the service does not take); the
+     * [footer] under an answer (who gave it, and that it was cut short);
+     * and Try again where [retry] ([DefAction.EXPLAIN_RETRY]).
+     */
+    data class Answer(
+        val title: String,
+        val text: String,
+        val muted: Boolean = false,
+        val footer: String? = null,
+        val retry: Boolean = false,
+    )
 
     /**
      * A one-line action at the end of a list: the lens's "Load more (n)",
@@ -174,6 +205,33 @@ internal object DefAction {
     const val SPEAK = "speak"
     const val TRAILING = "trailing"
     const val MORE = "more"
+
+    /** A word row's explain button ([DefRow.Word.explain]): ask, stop a
+     *  question that is out, or put an answer away. */
+    const val EXPLAIN = "explain"
+
+    /** The ✕ of an explain answer, and its Try again. */
+    const val EXPLAIN_CLOSE = "explain:close"
+    const val EXPLAIN_RETRY = "explain:retry"
+
+    /**
+     * Where a controller's cursor goes when the element it is on is gone
+     * from its row after a press of it: the action of the same row that
+     * takes its place, or null to leave the cursor as every cursor already
+     * treats a target that is gone.
+     *
+     * Only an explain answer's own buttons have one, the row's explain
+     * button: the ✕ takes the answer away and Try again folds the failure
+     * while it asks, each with itself, and the button they leave behind is
+     * the one that brought them. Nothing else moves by this, and must not:
+     * a cursor that walked on by itself from a ✕ that removes something
+     * (an Anki sheet's example, its sense) would stand on another ✕, and
+     * the next press would remove a second thing.
+     */
+    fun fallback(act: String): String? = when (act) {
+        EXPLAIN_CLOSE, EXPLAIN_RETRY -> EXPLAIN
+        else -> null
+    }
 
     /** [act] when its element was held, not tapped (an element that asks
      *  for it: a row's trailing button with [DefRow.Word.trailingHolds]). */

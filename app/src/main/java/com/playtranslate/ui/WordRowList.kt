@@ -5,6 +5,11 @@ import android.view.View
 import android.view.ViewGroup
 import androidx.annotation.VisibleForTesting
 import com.playtranslate.AnkiManager
+import com.playtranslate.R
+import com.playtranslate.ask.AskState
+import com.playtranslate.ask.WordExplanations
+import com.playtranslate.ask.WordInSentence
+import com.playtranslate.translation.TranslationBackendRegistry
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -22,7 +27,8 @@ import kotlinx.coroutines.withContext
  *
  * It keeps the state a row is drawn from beyond the row itself (the deck
  * cache, which rows are speaking, which of a row's dictionaries the user has
- * shut) and [publish] maps it all to rows. Every
+ * shut, what was asked about a row's word and what came of it) and
+ * [publish] maps it all to rows. Every
  * change ends in [publish], and the document patches only the rows whose
  * value changed, so a deck badge, a spinner or the host's own change (a
  * word hidden) never rebuilds the list.
@@ -47,6 +53,10 @@ internal class WordRowList<T>(
      *  notice took the page's place after the renderer died twice
      *  ([showsNotice]), or their first chunk could not be built. */
     onLayout: () -> Unit = {},
+    /** Whether anything could answer an explain question, asked when a
+     *  row's button is tapped, as the Ask section asks before it takes a
+     *  question ([AskSectionBinder]). */
+    private val hasLlm: () -> Boolean = { TranslationBackendRegistry.hasCompleter() },
 ) {
     /** What a row shows of its word. [data]'s Anki decks are the list's to
      *  fill ([Host.deckBadges]); the rest is drawn as given. */
@@ -84,6 +94,21 @@ internal class WordRowList<T>(
         /** The second button was held ([trailingHolds]). */
         fun onTrailingHold(row: T) {}
 
+        /** The sentence [row]'s word was read in, and how a question about
+         *  the word names it: what gives the row its explain button
+         *  ([DefRow.Word.explain]). Null, the default, for a word with no
+         *  sentence behind it (a dictionary search's, a word page's list's):
+         *  no button. Read at every draw, so it is cheap, and it is the
+         *  identity an answer is kept by: an answer stays on its row only
+         *  while this is what it was asked about. */
+        fun explainSubject(row: T): WordInSentence? = null
+
+        /** An explain button was tapped with nothing that could answer:
+         *  raise the "needs an AI model" alert ([askNeedsLlm]) where this
+         *  list's surface shows its alerts. Never called for a list whose
+         *  rows have no button. */
+        fun onExplainNeedsModel() {}
+
         /** Speak [row]'s word and return when it is done; the row draws its
          *  spinner for as long as this runs. */
         suspend fun speak(row: T)
@@ -119,10 +144,21 @@ internal class WordRowList<T>(
     /** Row id to the dictionaries the user has shut in that row
      *  ([dictionaryKey], [OWN_DICTIONARY_KEY]). A row's own, and only for as
      *  long as the row is listed: a rebind of the same words keeps it, a row
-     *  that leaves the list forgets it ([forgetShut], which also keeps an id
+     *  that leaves the list forgets it ([sameRowAs], which also keeps an id
      *  from handing it to another row), and so does a new lookup ([clear]).
      *  Never stored: every dictionary of a new row is open. */
     private val shut = HashMap<String, Set<String>>()
+
+    /** The explain questions of the rows, by row id: each asked about the
+     *  word in its sentence as the host named it then
+     *  ([Host.explainSubject]). A row's own, and for as long as the row is
+     *  listed with that same word in that same sentence ([setRows]): a
+     *  rebind of the same rows keeps a question, in flight or answered (the
+     *  lens's later-loaded entries, a re-order), and the same word under
+     *  another sentence starts with none, whether or not the list was
+     *  emptied between the two. A question whose state moves redraws its
+     *  row. Never stored; gone with the list ([clear], [release]). */
+    private val explanations = WordExplanations(scope, onChange = { publish() })
 
     private var released = false
 
@@ -162,7 +198,11 @@ internal class WordRowList<T>(
         rows = newRows
         entries = newRows.map(describe)
         ids = rowIdsOf(entries)
-        forgetShut(entriesBefore, idsBefore)
+        val sameRow = sameRowAs(entriesBefore, idsBefore)
+        shut.keys.retainAll(sameRow)
+        explanations.retain { id, subject ->
+            sameRow(id) && host.explainSubject(newRows[ids.indexOf(id)]) == subject
+        }
         this.footer = footer
         lang = definitionLang
         if (newRows.isEmpty() && footer == null) {
@@ -187,6 +227,7 @@ internal class WordRowList<T>(
     fun clear() {
         cancelSpeaking()
         shut.clear()
+        explanations.clear()
         rows = emptyList()
         entries = emptyList()
         ids = emptyList()
@@ -214,6 +255,7 @@ internal class WordRowList<T>(
                 shutDictionaries = shut[ids[i]].orEmpty(),
                 label = entry.label,
                 emptyText = entry.emptyText,
+                explain = host.explainSubject(row)?.let { explainOf(ids[i]) },
             )
         }
         document.setRows(words + listOfNotNull(footer?.let { DefRow.More(FOOTER_ID, it) }), lang)
@@ -223,6 +265,7 @@ internal class WordRowList<T>(
     fun release() {
         released = true
         cancelSpeaking()
+        explanations.clear()
         document.release()
     }
 
@@ -245,28 +288,74 @@ internal class WordRowList<T>(
             DefAction.SPEAK -> speak(row.id, state)
             DefAction.TRAILING -> (row as? DefRow.Word)?.trailing?.let { host.onTrailing(state, it) }
             DefAction.hold(DefAction.TRAILING) -> host.onTrailingHold(state)
+            DefAction.EXPLAIN -> explain(row.id, state)
+            DefAction.EXPLAIN_CLOSE -> {
+                explanations.close(row.id)
+                publish()
+            }
+            DefAction.EXPLAIN_RETRY -> explanations.retry(row.id)
             else -> toggleDictionary(row, action)
         }
     }
 
     /**
-     * Drops what [shut] holds under a row id that no longer names the row
-     * it was shut in, the list having gone from [entriesBefore] under
-     * [idsBefore] to the rows it has now: an id that is gone, and an id
-     * that has passed to another row. Rows that share a word and reading
-     * are told apart by their order alone ([rowIdsOf]), so when one of them
-     * leaves, or another is listed before it (the lens's later-loaded
-     * entries), an id names a different row; among such rows an id keeps
-     * what it holds only while the row under it is the row it was, read off
-     * what the row draws ([Entry.data]). A row that is the only one of its
-     * word and reading, before and now, keeps its own whatever changed in it.
+     * Whether a row id still names the row it named before a new row set,
+     * the list having gone from [entriesBefore] under [idsBefore] to the
+     * rows it has now: what a row keeps across the change is kept under its
+     * id (the dictionaries shut in it, its explain question), so an id that
+     * is gone, and an id that has passed to another row, keep nothing. Rows
+     * that share a word and reading are told apart by their order alone
+     * ([rowIdsOf]), so when one of them leaves, or another is listed before
+     * it (the lens's later-loaded entries), an id names a different row;
+     * among such rows an id names the row it did only while the row under
+     * it is the row it was, read off what the row draws ([Entry.data]). A
+     * row that is the only one of its word and reading, before and now, is
+     * the same row whatever changed in it.
      */
-    private fun forgetShut(entriesBefore: List<Entry>, idsBefore: List<String>) {
+    private fun sameRowAs(entriesBefore: List<Entry>, idsBefore: List<String>): (String) -> Boolean {
         val shared = sharedKeys(entriesBefore) + sharedKeys(entries)
-        shut.keys.retainAll { id ->
-            val now = entries.getOrNull(ids.indexOf(id)) ?: return@retainAll false
-            keyOf(now) !in shared || now.data == entriesBefore.getOrNull(idsBefore.indexOf(id))?.data
+        return { id ->
+            val now = entries.getOrNull(ids.indexOf(id))
+            now != null &&
+                (keyOf(now) !in shared || now.data == entriesBefore.getOrNull(idsBefore.indexOf(id))?.data)
         }
+    }
+
+    /**
+     * A row's explain question as the row draws it: the button alone with
+     * nothing asked, the spinner while the question is out (and nothing
+     * else: the row does not move until there is something to read), and
+     * once there is, the block, in the words every surface draws a
+     * question's state in ([askDisplay]).
+     */
+    private fun explainOf(id: String): DefRow.Explain {
+        val state = explanations.state(id)
+        if (state is AskState.Asking) return DefRow.Explain(busy = true)
+        val shown = askDisplay(ctx, state) ?: return DefRow.Explain()
+        return DefRow.Explain(
+            answer = DefRow.Answer(shown.title, shown.body, shown.muted, shown.footer, shown.retry),
+        )
+    }
+
+    /**
+     * A tap on [row]'s explain button. With nothing asked it asks, or, with
+     * nothing that could answer, hands the host the alert that says so
+     * (asked at the tap, as the Ask section does: a model set up a moment
+     * ago answers). With a question out or on screen it takes it back: a
+     * request in flight is cancelled, an answer is put away.
+     */
+    private fun explain(id: String, row: T) {
+        val subject = host.explainSubject(row) ?: return
+        if (explanations.state(id) != AskState.Idle) {
+            explanations.close(id)
+            publish()
+            return
+        }
+        if (!hasLlm()) {
+            host.onExplainNeedsModel()
+            return
+        }
+        explanations.ask(id, subject, ctx.getString(R.string.word_explain_title))
     }
 
     /** Shuts, or opens again, the dictionary whose title's [action] was

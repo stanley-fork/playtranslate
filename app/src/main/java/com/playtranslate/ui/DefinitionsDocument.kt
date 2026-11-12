@@ -481,8 +481,33 @@ $DOCUMENT_JS
    light up behind its own button. */
 .cell[data-act]:active:not(.np), .row.cur { background: var(--pt-press); }
 .cell.stub { padding-top: 8px; padding-bottom: 8px; background: var(--pt-band); }
-.head { display: flex; align-items: center; }
-.title { flex: 1; min-width: 0; display: flex; flex-wrap: wrap; align-items: baseline; }
+/* The head: the title (the headword and a lone reading), the row's buttons
+   as one group, and the chevron of a row that opens.
+
+   A headword that does not fit beside the buttons keeps its line, and the
+   buttons take the next one, at the line's end. That is the head wrapping,
+   decided by widths alone: the title's base size is nothing, so it is its
+   smallest width that says whether the buttons fit beside it, and that
+   width is the headword's whole unbroken width, because the headword's box
+   is as wide as its content at most (max-content), whatever could break
+   inside it (a phrase's spaces, kana drawn mora by mora under an accent
+   line). On one line the title grows into the room the buttons leave, as it
+   always did. Both widths are capped at the line they stand in (max-width),
+   which is what lets a headword wider than the whole line wrap inside its
+   box, at its own breaks, and never run off the row.
+
+   The chevron is no button and stands out of the flow, in a box of its
+   glyph's width at the first line's end, where the head keeps room for it
+   (op), so it stays on the headword's line when the buttons leave it. The
+   buttons stand at the top of their line, level with it. */
+.head { display: flex; flex-wrap: wrap; align-items: center; position: relative; }
+.head.op { padding-right: 24px; }
+[dir=rtl] .head.op { padding-right: 0; padding-left: 24px; }
+.title {
+  flex: 1 1 0%; min-width: auto; max-width: 100%;
+  display: flex; flex-wrap: wrap; align-items: baseline;
+}
+.w { width: max-content; max-width: 100%; }
 .w { font-size: 1.636em; font-weight: 700; letter-spacing: -.02em; margin-right: 10px; }
 [dir=rtl] .w { margin-right: 0; margin-left: 10px; }
 .stub .w { font-size: 1.064em; color: var(--pt-secondary); }
@@ -508,9 +533,48 @@ $DOCUMENT_JS
   display: flex; align-items: center; justify-content: center;
 }
 [dir=rtl] .act { margin: 0 16px 0 0; }
-.act.speak, [dir=rtl] .act.speak { margin: 0; }
-.act.chev { color: var(--pt-hint); }
+.acts { flex: none; display: flex; align-self: flex-start; margin-left: auto; }
+[dir=rtl] .acts { margin-left: 0; margin-right: auto; }
+.acts > .act:first-child, [dir=rtl] .acts > .act:first-child { margin: 0; }
+.act.chev { position: absolute; top: 0; right: 0; width: 20px; margin: 0; color: var(--pt-hint); }
+[dir=rtl] .act.chev { right: auto; left: 0; margin: 0; }
+/* Lit while its answer is open. */
+.act.explain.on { color: var(--pt-accent); }
+/* The icon is drawn higher than its box: it is the circle that reads as the
+   button's centre, not the circle with the sparkle over it. By the numbers
+   the circle is centred one unit under the middle of its 24-unit box (1px
+   at this size); the other 1px is by eye on a device, where it still read
+   low beside the icons next to it. */
+.act.explain .ic { transform: translateY(-2px); }
 button.act:active, .act.cur { background: var(--pt-press); }
+/* What came of a row's explain question, between the head and the
+   definitions: a title in the dictionary titles' type with the X that puts
+   it away at the line's end, the text in the row's own type (muted where it
+   is the app's word and not an answer), who answered under it, Try again
+   after a failure, and a hairline where the definitions begin. The X and
+   Try again are the Ask card's sizes. */
+.xp { margin: .3em 12px 0 0; border-bottom: 1px solid var(--pt-divider); }
+[dir=rtl] .xp { margin: .3em 0 0 12px; }
+.xp-h { display: flex; align-items: center; min-height: 32px; }
+.xp-t {
+  flex: 1; min-width: 0;
+  font-size: .72em; font-weight: 600; letter-spacing: .07em;
+  text-transform: uppercase; color: var(--pt-accent);
+}
+.xp-x {
+  flex: none; width: 36px; height: 32px; padding: 0; border: 0; border-radius: 50%;
+  background: none; color: var(--pt-hint);
+  display: flex; align-items: center; justify-content: center;
+}
+.xp-x .ic { width: 18px; height: 18px; }
+.xp-a { white-space: pre-wrap; padding: 0 0 .5em; }
+.xp-a.mu { color: var(--pt-secondary); }
+.xp-f { white-space: pre-wrap; font-size: .72em; color: var(--pt-hint); padding: 0 0 .6em; }
+.xp-r {
+  display: block; min-height: 32px; margin: -.2em 0 .4em; padding: 0; border: 0; border-radius: 6px;
+  background: none; color: var(--pt-accent); font: inherit; font-size: .8em; font-weight: 500;
+}
+.xp-x:active, .xp-x.cur, .xp-r:active, .xp-r.cur { background: var(--pt-press); }
 .ic { width: 22px; height: 22px; }
 .spin {
   width: 20px; height: 20px; border-radius: 50%;

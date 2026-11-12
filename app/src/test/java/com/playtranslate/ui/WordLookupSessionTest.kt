@@ -8,16 +8,22 @@ import android.os.Looper
 import android.view.Display
 import android.view.InputDevice
 import android.view.KeyEvent
+import android.view.View
+import android.view.ViewGroup
 import android.view.WindowManager
+import android.widget.TextView
 import androidx.test.core.app.ApplicationProvider
 import com.playtranslate.MainActivity
 import com.playtranslate.OcrManager
 import com.playtranslate.Prefs
+import com.playtranslate.R
 import com.playtranslate.displaySizePx
 import com.playtranslate.language.TokenSpan
 import com.playtranslate.overlay.OverlayHost
 import com.playtranslate.overlay.OwnWindows
 import com.playtranslate.overlayThemedContext
+import com.playtranslate.translation.FakeCompleterBackend
+import com.playtranslate.translation.TranslationBackendRegistry
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -303,6 +309,91 @@ class WordLookupSessionTest {
         val started = generateSequence { app.nextStartedActivity }.map { it.action }.toList()
         assertFalse(started.toString(), MainActivity.ACTION_DRAG_SENTENCE in started)
         assertEquals(0, ended)
+    }
+
+    // ── the card's explain button ────────────────────────────────────────
+    //
+    // This card's owner is the drag lookup, the one lens owner with no Ask
+    // section behind it: it says what a row's question is about (the
+    // sentence its lookup cut out of the line's group) and raises the
+    // "needs an AI model" alert itself.
+
+    /** The card up on "hello" by the real lookup, its row laid out. */
+    private fun cardOnHello(): DefRow.Word {
+        Prefs(ctx).sourceLang = "en"
+        load(helloWorld)
+        session.onTapAt(150f, 315f)
+        val deadline = System.currentTimeMillis() + 3000
+        while (!lens().isInteractive && System.currentTimeMillis() < deadline) {
+            shadowOf(Looper.getMainLooper()).idle()
+            Thread.sleep(5)
+        }
+        assertTrue("precondition: the card came up", lens().isInteractive)
+        return lens().shownRowsForTest().filterIsInstance<DefRow.Word>().first()
+    }
+
+    private fun alertTexts(): List<String> {
+        fun texts(v: View): List<String> = when (v) {
+            is TextView -> listOf(v.text.toString())
+            is ViewGroup -> (0 until v.childCount).flatMap { texts(v.getChildAt(it)) }
+            else -> emptyList()
+        }
+        return host.field<List<OverlayHost.OverlayHandle>>("overlayWindows").flatMap { texts(it.view) }
+    }
+
+    private fun alertButton(text: String): View {
+        fun find(v: View): View? = when {
+            v is android.widget.Button && v.text.toString() == text -> v
+            v is ViewGroup -> (0 until v.childCount).firstNotNullOfOrNull { find(v.getChildAt(it)) }
+            else -> null
+        }
+        return host.field<List<OverlayHost.OverlayHandle>>("overlayWindows").firstNotNullOf { find(it.view) }
+    }
+
+    @Test fun `a word's card has the explain button, and its question is about the sentence the word was found in`() {
+        val llm = FakeCompleterBackend(id = "lookup-test-llm", priority = 0, displayName = "Test LLM")
+        TranslationBackendRegistry.addOnlineBackend(llm)
+        try {
+            val row = cardOnHello()
+            assertEquals(DefRow.Explain(), row.explain)
+
+            lens().tapRowForTest(row.id, DefAction.EXPLAIN)
+            shadowOf(Looper.getMainLooper()).idle()
+
+            val user = requireNotNull(llm.lastPrompt).second
+            assertTrue("the word as the card heads it: $user", user.contains("\"${row.data.word}\""))
+            assertTrue("in the line it was tapped in: $user", user.contains("hello world"))
+            assertTrue("the card stays for its answer", lens().isInteractive)
+        } finally {
+            TranslationBackendRegistry.removeOnlineBackend(llm.id)
+        }
+    }
+
+    @Test fun `with no AI model the card's explain button closes the card and raises the alert over the game`() {
+        assertFalse("precondition: nothing here could answer", TranslationBackendRegistry.hasCompleter())
+        val row = cardOnHello()
+        assertFalse("precondition: no alert yet", ctx.getString(R.string.ask_no_llm_title) in alertTexts())
+
+        lens().tapRowForTest(row.id, DefAction.EXPLAIN)
+        shadowOf(Looper.getMainLooper()).idle()
+
+        assertNull("the card's window is gone: it must never stand over the alert", lens().rootViewForTest())
+        // The card went by its own means, so the presentation ends with it,
+        // as when the card opens a page or is touched away.
+        assertEquals(1, ended)
+        val texts = alertTexts()
+        assertTrue("the alert the Ask section raises: $texts", ctx.getString(R.string.ask_no_llm_title) in texts)
+
+        // Its button opens Translation services, as a new task: there is no
+        // activity of ours under an over-game card to start it from.
+        alertButton(ctx.getString(R.string.ask_no_llm_open_services)).performClick()
+        shadowOf(Looper.getMainLooper()).idle()
+        val started = shadowOf(ctx as Application).nextStartedActivity
+        assertEquals(TranslationServicesActivity::class.java.name, started?.component?.className)
+        assertTrue(
+            "a new task",
+            started!!.flags and android.content.Intent.FLAG_ACTIVITY_NEW_TASK != 0,
+        )
     }
 
     // ── the frame a card cites ───────────────────────────────────────────

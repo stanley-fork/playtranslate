@@ -14,12 +14,17 @@ import android.widget.FrameLayout
 import androidx.test.core.app.ApplicationProvider
 import com.playtranslate.Prefs
 import com.playtranslate.R
+import com.playtranslate.ask.AskSentence
+import com.playtranslate.language.InflectedForm
 import com.playtranslate.language.SentenceAnnotation
 import com.playtranslate.language.SourceLangId
 import com.playtranslate.model.ImportedSense
 import com.playtranslate.model.ImportedSenseGroup
 import com.playtranslate.themeColor
+import com.playtranslate.translation.FakeCompleterBackend
+import com.playtranslate.translation.TranslationBackendRegistry
 import com.playtranslate.vocab.HiddenWordsStore
+import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -103,6 +108,8 @@ class WordRowsBinderTest {
     private val tapped = mutableListOf<String>()
     /** [WordRowsBinder.onRowsWanted] invocations. */
     private var rowsWanted = 0
+    /** [WordRowsBinder.Host.onAskNeedsLlm] invocations. */
+    private var needsModel = 0
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
 
     private val rows = listOf(
@@ -135,11 +142,13 @@ class WordRowsBinderTest {
             override val scope: CoroutineScope get() = this@WordRowsBinderTest.scope
             override val ttsAlertTarget: TtsAlertTarget get() = TtsAlertTarget.InActivity(activity)
             override fun onWordTapped(row: RowState) { tapped += row.displayWord }
+            override fun onAskNeedsLlm() { needsModel++ }
         },
     ).also { it.onRowsWanted = { rowsWanted++ } }
 
     @After
     fun tearDown(): Unit = runBlocking {
+        TranslationBackendRegistry.removeOnlineBackend(llm.id)
         controller.pause().stop().destroy()
         shadowOf(Looper.getMainLooper()).idle()
         HiddenWordsStore.resetForTest(app)
@@ -585,6 +594,331 @@ class WordRowsBinderTest {
         assertEquals(setOf("jt"), shutInTwin(7))
     }
 
+    // ── The explain button ──────────────────────────────────────────────
+    //
+    // A row has the button when its rows came with the text they are the
+    // words of ([WordLookupsState.Settled.sentence]); what it asks is put to
+    // the registry's services (a fake here), as the Ask section's is.
+
+    private val sentence = AskSentence("猫が魚を食べた", sourceLang = "ja", targetLang = "en")
+    private val otherSentence = AskSentence("猫がいる", sourceLang = "ja", targetLang = "en")
+
+    private fun settledIn(sentence: AskSentence?, vararg rows: RowState = this.rows.toTypedArray()) =
+        WordLookupsState.Settled(rows.toList(), emptyList(), emptyMap(), definitionLang = "ja", sentence = sentence)
+
+    /** What the model answers the question in flight, completed by the
+     *  test; a question stays in flight until then. */
+    private var reply = CompletableDeferred<String>()
+    /** Requests that were cancelled while waiting for their reply. */
+    private var cancelledRequests = 0
+    private val llm = FakeCompleterBackend(
+        id = "words-test-llm", priority = 0, displayName = "Test LLM",
+        answer = { _, _ ->
+            try {
+                reply.await()
+            } catch (e: kotlinx.coroutines.CancellationException) {
+                cancelledRequests++
+                throw e
+            }
+        },
+    )
+
+    /** The user has a model: the fake, answering through [reply]. */
+    private fun giveLlm() = TranslationBackendRegistry.addOnlineBackend(llm)
+
+    private fun answer(text: String) {
+        val r = reply
+        reply = CompletableDeferred()
+        r.complete(text)
+        idle()
+    }
+
+    private fun explainOf(word: String): DefRow.Explain? = shown().first { it.data.word == word }.explain
+
+    private fun tapOn(word: String, action: String) {
+        binder.tapForTest(shown().indexOfFirst { it.data.word == word }, action)
+        idle()
+    }
+
+    private val explainTitle: String get() = activity.getString(R.string.word_explain_title)
+
+    private fun answered(text: String) = DefRow.Explain(
+        answer = DefRow.Answer(explainTitle, text, footer = activity.getString(R.string.ask_answered_by, "Test LLM")),
+    )
+
+    @Test
+    fun `rows that came with their sentence have the explain button, rows that came with none do not`() {
+        binder.render(settled())
+        assertTrue("no sentence, no button", shown().all { it.explain == null })
+        binder.render(WordLookupsState.Loading)
+        binder.render(settledIn(sentence))
+        assertTrue("the button alone, nothing asked", shown().all { it.explain == DefRow.Explain() })
+        binder.render(WordLookupsState.Loading)
+        binder.render(settledIn(null))
+        assertTrue(shown().all { it.explain == null })
+    }
+
+    @Test
+    fun `with no model a tap on the button asks the surface for its alert and asks nothing`() {
+        binder.render(settledIn(sentence))
+        tapOn("猫", DefAction.EXPLAIN)
+        assertEquals(1, needsModel)
+        assertEquals(DefRow.Explain(), explainOf("猫"))
+        assertTrue("a button is no tap on the row", tapped.isEmpty())
+        // A model set up a moment later answers the next tap: asked at the tap.
+        giveLlm()
+        tapOn("猫", DefAction.EXPLAIN)
+        assertEquals(1, needsModel)
+        assertEquals(DefRow.Explain(busy = true), explainOf("猫"))
+    }
+
+    @Test
+    fun `a tap asks about the row's word in the rows' sentence, spins, then shows the answer under its title`() {
+        giveLlm()
+        // Found first as 食べた, and in all as that and 食べない.
+        val eat = row("食べる", "たべる", "to eat").copy(
+            surface = "食べた",
+            inflectedForms = listOf(InflectedForm("食べた", emptyList()), InflectedForm("食べない", emptyList())),
+        )
+        binder.render(settledIn(sentence, rows[0], eat))
+
+        tapOn("食べる", DefAction.EXPLAIN)
+
+        assertEquals("the spinner, and nothing else of the row", DefRow.Explain(busy = true), explainOf("食べる"))
+        assertEquals("its neighbour is untouched", DefRow.Explain(), explainOf("猫"))
+        val user = llm.lastPrompt!!.second
+        assertTrue(
+            "the word as its row heads it, with its reading and the forms it takes here, each once: $user",
+            user.contains("\"食べる\" (read たべる; it appears here as \"食べた\", \"食べない\")"),
+        )
+        assertTrue("about the text the rows are the words of: $user", user.contains("猫が魚を食べた"))
+        assertTrue("answered in the reader's language: $user", user.trimEnd().endsWith("Answer in English (English, en)."))
+
+        answer("  It is the plain past of to eat. ")
+
+        assertEquals(answered("It is the plain past of to eat."), explainOf("食べる"))
+        assertEquals(DefRow.Explain(), explainOf("猫"))
+        assertEquals(1, llm.completeCalls.get())
+        assertTrue(tapped.isEmpty())
+
+        // A language whose rows gather no inflected forms: the form is the
+        // one the word was first found as.
+        binder.render(WordLookupsState.Loading)
+        binder.render(settledIn(sentence, row("run", "", "to run").copy(surface = "ran")))
+        tapOn("run", DefAction.EXPLAIN)
+        assertTrue(llm.lastPrompt!!.second, llm.lastPrompt!!.second.contains("\"run\" (it appears here as \"ran\")"))
+    }
+
+    @Test
+    fun `rows drawn before the hidden words loaded keep their button and an answer through the re-order`(): Unit = runBlocking {
+        giveLlm()
+        HiddenWordsStore.setHidden(app, SourceLangId.JA, "猫", "ねこ", hidden = true)
+        HiddenWordsStore.dropCacheForTest()
+        binder.render(settledIn(sentence))
+        assertEquals("provisional: lookup order", listOf("猫", "食べる", "魚"), order())
+        tapOn("魚", DefAction.EXPLAIN)
+        answer("the fish's")
+
+        HiddenWordsStore.loaded(app, SourceLangId.JA)
+        binder.applyHiddenState()
+
+        assertEquals("re-rendered, the hidden word last", listOf("食べる", "魚", "猫"), order())
+        assertEquals("under the same sentence: the answer stays", answered("the fish's"), explainOf("魚"))
+        assertEquals("and every row still has its button", DefRow.Explain(), explainOf("食べる"))
+    }
+
+    @Test
+    fun `the button takes back what it brought, an answer or a question still out, and so does the X`() {
+        giveLlm()
+        binder.render(settledIn(sentence))
+        // An answer, by its X.
+        tapOn("猫", DefAction.EXPLAIN)
+        answer("one")
+        tapOn("猫", DefAction.EXPLAIN_CLOSE)
+        assertEquals(DefRow.Explain(), explainOf("猫"))
+        // An answer, by the button that brought it.
+        tapOn("猫", DefAction.EXPLAIN)
+        answer("two")
+        assertEquals(answered("two"), explainOf("猫"))
+        tapOn("猫", DefAction.EXPLAIN)
+        assertEquals(DefRow.Explain(), explainOf("猫"))
+        // A question still out: stopped, and its late answer is nobody's.
+        tapOn("猫", DefAction.EXPLAIN)
+        assertEquals(DefRow.Explain(busy = true), explainOf("猫"))
+        tapOn("猫", DefAction.EXPLAIN)
+        assertEquals(DefRow.Explain(), explainOf("猫"))
+        answer("too late")
+        assertEquals(DefRow.Explain(), explainOf("猫"))
+        assertEquals("three questions were put", 3, llm.completeCalls.get())
+    }
+
+    @Test
+    fun `a question that is out is stopped when its row is put away, when the rows go, and when the card is released`() {
+        giveLlm()
+        binder.render(settledIn(sentence))
+        tapOn("猫", DefAction.EXPLAIN)
+        tapOn("猫", DefAction.EXPLAIN)
+        assertEquals("the button took it back", 1, cancelledRequests)
+
+        tapOn("猫", DefAction.EXPLAIN)
+        binder.render(WordLookupsState.Loading)
+        assertEquals("the next lookup has no use for it", 2, cancelledRequests)
+
+        binder.render(settledIn(sentence))
+        tapOn("猫", DefAction.EXPLAIN)
+        binder.release()
+        assertEquals("a released card asks nothing more", 3, cancelledRequests)
+    }
+
+    @Test
+    fun `two rows are asked side by side and each shows its own answer`() {
+        giveLlm()
+        binder.render(settledIn(sentence))
+        tapOn("猫", DefAction.EXPLAIN)
+        val first = reply
+        reply = CompletableDeferred()
+        tapOn("魚", DefAction.EXPLAIN)
+        assertEquals(DefRow.Explain(busy = true), explainOf("猫"))
+        assertEquals(DefRow.Explain(busy = true), explainOf("魚"))
+
+        answer("the fish's")
+        assertEquals(answered("the fish's"), explainOf("魚"))
+        assertEquals("the first is still out", DefRow.Explain(busy = true), explainOf("猫"))
+        first.complete("the cat's")
+        idle()
+        assertEquals(answered("the cat's"), explainOf("猫"))
+        assertEquals(answered("the fish's"), explainOf("魚"))
+    }
+
+    @Test
+    fun `a failure is shown with Try again, which asks again`() {
+        giveLlm()
+        binder.render(settledIn(sentence))
+        tapOn("猫", DefAction.EXPLAIN)
+        val r = reply
+        reply = CompletableDeferred()
+        r.completeExceptionally(java.io.IOException("no route"))
+        idle()
+
+        val failed = explainOf("猫")!!
+        assertFalse(failed.busy)
+        assertEquals(explainTitle, failed.answer!!.title)
+        assertTrue("the app's word, muted: ${failed.answer}", failed.answer!!.muted)
+        assertTrue(failed.answer!!.text.startsWith(activity.getString(R.string.ask_failed)))
+        assertTrue("Try again is offered", failed.answer!!.retry)
+
+        tapOn("猫", DefAction.EXPLAIN_RETRY)
+        assertEquals("the failure folds away while it asks", DefRow.Explain(busy = true), explainOf("猫"))
+        answer("this time")
+        assertEquals(answered("this time"), explainOf("猫"))
+    }
+
+    @Test
+    fun `an answer and a question in flight stay with their rows while the same rows are listed`() {
+        giveLlm()
+        binder.render(settledIn(sentence))
+        tapOn("猫", DefAction.EXPLAIN)
+        answer("the cat's")
+        tapOn("魚", DefAction.EXPLAIN)
+        // The same rows again, in another order (a collector that restarts,
+        // the hidden words' re-order): nothing was asked again.
+        binder.render(settledIn(sentence, rows[2], rows[1], rows[0]))
+        assertEquals(answered("the cat's"), explainOf("猫"))
+        assertEquals("still out, not cancelled", DefRow.Explain(busy = true), explainOf("魚"))
+        // The card hidden and shown: the rows are the same rows.
+        eye.performClick()
+        eye.performClick()
+        idle()
+        assertEquals(answered("the cat's"), explainOf("猫"))
+        // The answer that lands meanwhile is shown with the rest.
+        answer("the fish's")
+        assertEquals(answered("the fish's"), explainOf("魚"))
+        assertEquals("two questions, each put once", 2, llm.completeCalls.get())
+    }
+
+    @Test
+    fun `an answer that lands while the card is hidden is there when it is shown`() {
+        giveLlm()
+        binder.render(settledIn(sentence))
+        tapOn("猫", DefAction.EXPLAIN)
+        eye.performClick()
+        idle()
+        answer("landed unseen")
+        eye.performClick()
+        idle()
+        assertEquals(answered("landed unseen"), explainOf("猫"))
+    }
+
+    @Test
+    fun `the same word in another sentence starts with nothing asked, with or without a Loading between`() {
+        giveLlm()
+        binder.render(settledIn(sentence))
+        tapOn("猫", DefAction.EXPLAIN)
+        answer("in the first sentence")
+        tapOn("魚", DefAction.EXPLAIN)
+
+        // No Loading between: a collector that restarts onto the next
+        // sentence's rows hands them over directly.
+        binder.render(settledIn(otherSentence))
+        assertEquals("an answer about one sentence is none about another", DefRow.Explain(), explainOf("猫"))
+        assertEquals("and a question about it is no longer wanted", DefRow.Explain(), explainOf("魚"))
+        answer("too late, about the first sentence")
+        assertEquals(DefRow.Explain(), explainOf("魚"))
+
+        // With one, the usual way.
+        tapOn("猫", DefAction.EXPLAIN)
+        answer("in the second")
+        binder.render(WordLookupsState.Loading)
+        binder.render(settledIn(sentence))
+        assertEquals(DefRow.Explain(), explainOf("猫"))
+    }
+
+    @Test
+    fun `a row that leaves the list takes its answer with it, and one whose word changes form asks anew`() {
+        giveLlm()
+        binder.render(settledIn(sentence))
+        tapOn("猫", DefAction.EXPLAIN)
+        answer("the cat's")
+        binder.render(settledIn(sentence, rows[1]))
+        binder.render(settledIn(sentence))
+        assertEquals("back in the list, as new", DefRow.Explain(), explainOf("猫"))
+
+        // The same word and reading, found as another form: another question.
+        tapOn("食べる", DefAction.EXPLAIN)
+        answer("as itself")
+        assertEquals(answered("as itself"), explainOf("食べる"))
+        binder.render(settledIn(sentence, rows[0], rows[1].copy(surface = "食べた"), rows[2]))
+        assertEquals("what it was asked about is not what the row is now", DefRow.Explain(), explainOf("食べる"))
+    }
+
+    @Test
+    fun `among rows of one word and reading an answer never passes to another row`() {
+        giveLlm()
+        // The first of two leaves, and its place in the order is the other's.
+        binder.render(settledIn(sentence, twin(1), twin(2)))
+        binder.tapForTest(0, DefAction.EXPLAIN)
+        answer("the first twin's")
+        assertEquals(answered("the first twin's"), shown().first { it.data.freqScore == 1 }.explain)
+        binder.render(settledIn(sentence, twin(2)))
+        assertEquals("the row that stayed was never asked", DefRow.Explain(), shown().single().explain)
+    }
+
+    @Test
+    fun `a hidden word's stub keeps the button's place, and its answer is there when the word is shown again`(): Unit = runBlocking {
+        giveLlm()
+        HiddenWordsStore.loaded(app, SourceLangId.JA)
+        binder.render(settledIn(sentence))
+        tapOn("猫", DefAction.EXPLAIN)
+        answer("the cat's")
+        HiddenWordsStore.setHidden(app, SourceLangId.JA, "猫", "ねこ", hidden = true)
+        binder.applyHiddenState()
+        assertTrue(isStub(shown().first { it.data.word == "猫" }))
+        assertEquals("the stub is handed it, and draws its place alone", answered("the cat's"), explainOf("猫"))
+        HiddenWordsStore.setHidden(app, SourceLangId.JA, "猫", "ねこ", hidden = false)
+        binder.applyHiddenState()
+        assertEquals(answered("the cat's"), explainOf("猫"))
+    }
+
     // ── The wait for the page ───────────────────────────────────────────
 
     private val loading: View get() = root.findViewById(R.id.tvMainWordsLoading)
@@ -786,6 +1120,7 @@ class WordRowsBinderTest {
                 override val scope: CoroutineScope get() = this@WordRowsBinderTest.scope
                 override val ttsAlertTarget: TtsAlertTarget get() = TtsAlertTarget.InActivity(activity)
                 override fun onWordTapped(row: RowState) {}
+                override fun onAskNeedsLlm() {}
             },
         )
         try {
@@ -873,6 +1208,37 @@ class WordRowsBinderTest {
         showPage()
         assertEquals("precondition: the card is hidden", View.GONE, card.visibility)
         assertEquals("the eye alone", listOf(eye), binder.navigableActions().map { it.view })
+    }
+
+    @Test
+    fun `the explain button is a target ahead of Speak, and an answer adds its X after the head's buttons`() {
+        giveLlm()
+        binder.applyWordsVisibility()
+        binder.render(settledIn(sentence))
+        list.layoutForTest(50)
+        fun acts(word: String) = list.targets.filter { it.rowId.startsWith(word) && it.act.isNotEmpty() }.map { it.act }
+        assertEquals(listOf(DefAction.OPEN, DefAction.EXPLAIN, DefAction.SPEAK, DefAction.TRAILING), acts("猫"))
+
+        tapOn("猫", DefAction.EXPLAIN)
+        answer("the cat's")
+        list.layoutForTest(50)
+        assertEquals(
+            listOf(DefAction.OPEN, DefAction.EXPLAIN, DefAction.SPEAK, DefAction.TRAILING, DefAction.EXPLAIN_CLOSE),
+            acts("猫"),
+        )
+        assertEquals("its neighbour has none", listOf(DefAction.OPEN, DefAction.EXPLAIN, DefAction.SPEAK, DefAction.TRAILING), acts("魚"))
+        showPage()
+        val targets = binder.navigableActions().mapNotNull { it.target as? DocNavTarget }
+        val close = targets.single { it.act == DefAction.EXPLAIN_CLOSE }
+        assertEquals(
+            "the sheet's cursor reaches the X, and follows it to its row's explain button when it goes",
+            targets.single { it.rowId == close.rowId && it.act == DefAction.EXPLAIN },
+            close.successor(),
+        )
+        assertTrue(
+            "no other target names one",
+            targets.filter { it.act != DefAction.EXPLAIN_CLOSE }.all { it.successor() == null },
+        )
     }
 
     // ── The page it asks for ────────────────────────────────────────────

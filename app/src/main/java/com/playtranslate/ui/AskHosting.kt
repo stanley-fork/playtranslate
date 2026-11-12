@@ -1,6 +1,9 @@
 package com.playtranslate.ui
 
+import android.app.ActivityOptions
 import android.content.Context
+import android.content.Intent
+import com.playtranslate.PlayTranslateApplication
 import com.playtranslate.R
 import com.playtranslate.ask.AskSentence
 import com.playtranslate.language.ChineseScriptVariant
@@ -50,3 +53,40 @@ internal fun OverlayAlert.Builder.askNeedsLlm(
             ctx.themeColor(R.attr.ptAccent),
         ) { openTranslationServices() }
         .addCancelButton(ctx.getString(R.string.btn_cancel))
+
+/**
+ * The "Ask needs an AI model" alert on [target], for a surface with no Ask
+ * section whose alert it could borrow (the drag lens: over a game, on the
+ * camera's frozen frame, on an imported image). Its button starts
+ * Translation services from the activity where the surface lives in one,
+ * and from an over-game surface as a new task on the foreground display
+ * ([launchOnForegroundDisplay]).
+ *
+ * Reached only from a tap on a row's explain button and then a tap on the
+ * alert's own button, so the launch is the user's, with our alert on screen
+ * a moment before: never from a lifecycle event, a reconnect or a timer.
+ */
+internal fun showAskNeedsLlm(target: TtsAlertTarget) = showAlertOn(target) {
+    askNeedsLlm(target.context) {
+        when (target) {
+            is TtsAlertTarget.InActivity ->
+                target.activity.startActivity(Intent(target.activity, TranslationServicesActivity::class.java))
+            is TtsAlertTarget.Overlay -> launchOnForegroundDisplay(
+                target.context,
+                Intent(target.context.applicationContext, TranslationServicesActivity::class.java),
+                target.displayId,
+            )
+        }
+    }
+}
+
+/** Starts [intent] as a new task on the foreground display (else
+ *  [displayId], the launching surface's own): the one way an app page opens
+ *  from an over-game surface, the capture sheet's pages and the drag lens's
+ *  alert alike. */
+internal fun launchOnForegroundDisplay(ctx: Context, intent: Intent, displayId: Int) {
+    intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+    val targetDisplay = PlayTranslateApplication.foregroundDisplayId() ?: displayId
+    val opts = ActivityOptions.makeBasic().setLaunchDisplayId(targetDisplay).toBundle()
+    ctx.applicationContext.startActivity(intent, opts)
+}

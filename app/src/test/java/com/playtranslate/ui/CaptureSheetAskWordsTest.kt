@@ -26,6 +26,7 @@ import com.playtranslate.Prefs
 import com.playtranslate.R
 import com.playtranslate.ask.AskQuestion
 import com.playtranslate.ask.AskSession
+import com.playtranslate.ask.AskSentence
 import com.playtranslate.ask.AskState
 import com.playtranslate.language.SourceLangId
 import com.playtranslate.language.SourceLanguageEngines
@@ -341,8 +342,10 @@ class CaptureSheetAskWordsTest {
 
     /** [rows] on the Words card, pushed through the sheet's renderer as a
      *  settled lookup lands, once the sheet's own lookup is at rest. */
-    private fun showRows(o: CaptureResultOverlay, rows: List<RowState>) {
-        o.lookupsRenderer.render(WordLookupsState.Settled(rows, emptyList(), emptyMap(), definitionLang = "en"))
+    private fun showRows(o: CaptureResultOverlay, rows: List<RowState>, sentence: AskSentence? = null) {
+        o.lookupsRenderer.render(
+            WordLookupsState.Settled(rows, emptyList(), emptyMap(), definitionLang = "en", sentence = sentence),
+        )
         settle()
         assertEquals("precondition: the card draws the rows",
             rows.map { it.displayWord }, o.wordRows.shownRows.map { it.data.word })
@@ -895,6 +898,115 @@ class CaptureSheetAskWordsTest {
         assertEquals(TranslationServicesActivity::class.java.name, started?.component?.className)
         assertEquals("the over-game sheet goes for the page", listOf(CaptureResultOverlay.DismissReason.PAGE), dismissals)
         assertTrue(o.dismissed)
+    }
+
+    /** The sentence the sheet's own lookup settled with: what its rows'
+     *  explain questions are about. */
+    private fun lookupSentence(o: CaptureResultOverlay): AskSentence =
+        requireNotNull((o.wordLookups.state.value as WordLookupsState.Settled).sentence)
+
+    @Test fun `the sheet's own lookup hands its rows the text they are the words of, so each has the explain button`() {
+        val o = open(screen, text(2), text(2), askHidden = true, wordsHidden = false)
+        val settled = o.wordLookups.state.value as WordLookupsState.Settled
+        assertEquals(
+            "the text the lookup analysed, under the pair it analysed it in: what Ask is asked about here too",
+            o.askSession.sentence,
+            settled.sentence,
+        )
+        assertEquals(text(2), settled.sentence?.text)
+        // The tokenizer here has no pack and finds no words (class doc), so
+        // rows are put in the lookup's place, with the sentence it settled.
+        showRows(o, words, settled.sentence)
+        assertTrue(o.wordRows.shownRows.all { it.explain == DefRow.Explain() })
+        // And rows that come with none have no button.
+        showRows(o, words)
+        assertTrue(o.wordRows.shownRows.all { it.explain == null })
+    }
+
+    @Test fun `with no LLM a Words row's explain button raises the sheet's alert, the one its Ask chips raise`() {
+        assertFalse("precondition: nothing here could answer", TranslationBackendRegistry.hasCompleter())
+        val o = open(screen, text(2), text(2), askHidden = true, wordsHidden = false)
+        showRows(o, words, lookupSentence(o))
+        assertTrue("precondition: no alert yet", otherWindows(o).isEmpty())
+
+        o.wordRows.tapForTest(0, DefAction.EXPLAIN)
+        settle()
+
+        val texts = textViewsIn(otherWindows(o).single())
+        assertTrue("the alert's title", texts.any { it.text.toString() == ctx.getString(R.string.ask_no_llm_title) })
+        assertEquals("nothing was asked", DefRow.Explain(), o.wordRows.shownRows[0].explain)
+        texts.filterIsInstance<Button>()
+            .single { it.text.toString() == ctx.getString(R.string.ask_no_llm_open_services) }
+            .performClick()
+        settle()
+        assertEquals(
+            TranslationServicesActivity::class.java.name,
+            shadowOf(ctx as Application).nextStartedActivity?.component?.className,
+        )
+    }
+
+    @Test fun `with no LLM the explain button in the sheet's own lens closes the lens and raises the sheet's alert`() {
+        assertFalse("precondition: nothing here could answer", TranslationBackendRegistry.hasCompleter())
+        val o = open(screen, text(2), text(2), askHidden = true, wordsHidden = false)
+        // The tap spans of the first two words, as an analysis gives them.
+        val the = com.playtranslate.language.TokenSpan("The", "the")
+        val quick = com.playtranslate.language.TokenSpan("quick", "quick")
+        o.lookupsRenderer.render(
+            WordLookupsState.Analyzed(
+                tokenSpans = listOf(the, quick),
+                annotation = com.playtranslate.language.SentenceAnnotation(
+                    text(2), com.playtranslate.language.SourceLangId.EN, 0,
+                    listOf(
+                        com.playtranslate.language.AnnotatedSpan(0, 3, "The", lookupForm = "the", lookupHint = ""),
+                        com.playtranslate.language.AnnotatedSpan(4, 9, "quick", lookupForm = "quick", lookupHint = ""),
+                    ),
+                ),
+                phrases = emptyList(),
+            ),
+        )
+        settle()
+        val sourceLens: SourceTextLens = o.field("sourceLens")
+        assertEquals("precondition: the source text has its tap spans", 2, sourceLens.wordSpans.size)
+
+        sourceLens.onTapAtOffset(5)
+        val deadline = System.currentTimeMillis() + 3000
+        while (!sourceLens.isShowing && System.currentTimeMillis() < deadline) {
+            shadowOf(Looper.getMainLooper()).idle()
+            Thread.sleep(5)
+        }
+        assertTrue("precondition: the lens came up over the word", sourceLens.isShowing)
+        val lens: MagnifierLens = sourceLens.field("lens")
+        val row = lens.shownRowsForTest().filterIsInstance<DefRow.Word>().first()
+        assertEquals(DefRow.Explain(), row.explain)
+        val windowsBefore = otherWindows(o).toSet()
+
+        lens.tapRowForTest(row.id, DefAction.EXPLAIN)
+        settle()
+
+        assertFalse("the lens is gone", sourceLens.isShowing)
+        val raised = otherWindows(o).filter { it !in windowsBefore }.flatMap { textViewsIn(it) }.map { it.text.toString() }
+        assertTrue("the sheet's alert, the one its Ask chips raise: $raised", ctx.getString(R.string.ask_no_llm_title) in raised)
+    }
+
+    @Test fun `a Words row's explain question is answered in its row, and the Ask section is left as it was`() {
+        giveLlm()
+        val o = open(screen, text(2), text(2), askHidden = false, wordsHidden = false)
+        showRows(o, words, lookupSentence(o))
+        val word = o.wordRows.shownRows[0].data.word
+
+        o.wordRows.tapForTest(0, DefAction.EXPLAIN)
+        settle()
+        assertEquals(DefRow.Explain(busy = true), o.wordRows.shownRows[0].explain)
+        assertTrue("about that row's word: ${llm.lastPrompt?.second}", llm.lastPrompt!!.second.contains("\"$word\""))
+        assertTrue("in the sheet's text", llm.lastPrompt!!.second.contains(text(2)))
+
+        answer("It names the animal.")
+
+        val shown = o.wordRows.shownRows[0].explain!!.answer!!
+        assertEquals(ctx.getString(R.string.word_explain_title), shown.title)
+        assertEquals("It names the animal.", shown.text)
+        assertEquals(ctx.getString(R.string.ask_answered_by, "Test LLM"), shown.footer)
+        assertEquals("a word's answer is the row's, never the section's", AskState.Idle, o.askSession.state.value)
     }
 
     @Test fun `a host that keeps the sheet through a launch keeps it when the alert opens Translation services`() {

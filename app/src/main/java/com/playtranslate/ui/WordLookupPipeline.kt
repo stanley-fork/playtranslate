@@ -3,6 +3,7 @@ package com.playtranslate.ui
 import android.content.Context
 import com.playtranslate.Prefs
 import com.playtranslate.language.SourceLanguageEngines
+import com.playtranslate.model.TranslationLangContext
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -172,6 +173,10 @@ class WordLookupPipeline(private val scope: CoroutineScope) {
                     annotation = a.annotation,
                     phrases = a.tokens.phrases,
                     definitionLang = a.sourceLang.yomitanConsumingLang(),
+                    sentence = askSentence(
+                        a.text,
+                        TranslationLangContext(a.sourceLang, a.context.targetLang, a.context.targetChineseVariant),
+                    ),
                 )
                 // Pair the settled rows with their source text and let the
                 // owner (re)write the cache. If the translation has already

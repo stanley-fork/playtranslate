@@ -50,6 +50,7 @@ internal data class DocNavTarget(
 ) : NavTarget {
     override fun rectOnScreen(out: Rect): Boolean = document.rectOnScreen(rowId, act, out)
     override fun activate() = document.activate(rowId, act)
+    override fun successor(): NavTarget? = DefAction.fallback(act)?.let { copy(act = it) }
 }
 
 /**
@@ -463,8 +464,7 @@ internal class DefinitionDocument(
         override fun onLayout(gen: Int, heightCssPx: Int, targetsJson: String) {
             if (gen != this@DefinitionDocument.gen) return
             applyHeight((heightCssPx * density).roundToInt())
-            targets = parseTargets(targetsJson)
-            cursor = cursor?.let { c -> targets.firstOrNull { it.rowId == c.rowId && it.act == c.act } }
+            laidOut(parseTargets(targetsJson))
             this@DefinitionDocument.onLayout()
             feedIfNear()
         }
@@ -619,15 +619,34 @@ internal class DefinitionDocument(
             out += DocTarget(row.id, act, 0, top, 300, rowHeightCssPx)
             if (row is DefRow.Word) {
                 val stub = row.trailing == DefRow.Trailing.SHOW
+                // In page order: the head's buttons (explain first), then
+                // what an explain answer adds under the head.
+                if (row.explain != null && !stub) out += DocTarget(row.id, DefAction.EXPLAIN, 128, top, 36, 40)
                 if (row.speak != null && !stub) out += DocTarget(row.id, DefAction.SPEAK, 180, top, 36, 40)
                 if (row.trailing != null) out += DocTarget(row.id, DefAction.TRAILING, 232, top, 36, 40)
+                row.explain?.answer?.takeIf { !stub }?.let { answer ->
+                    out += DocTarget(row.id, DefAction.EXPLAIN_CLOSE, 252, top + 40, 36, 32)
+                    if (answer.retry) out += DocTarget(row.id, DefAction.EXPLAIN_RETRY, 16, top + 72, 80, 32)
+                }
             }
             top += rowHeightCssPx
         }
         applyHeight((top * density).roundToInt())
-        targets = out
+        laidOut(out)
         onLayout()
         feedIfNear()
+    }
+
+    /** The page laid its rows out as [laid]: they are the targets now, and
+     *  the cursor stands on its own target among them or on what took its
+     *  place ([DocNav.settle]). A move is told to the page, which draws the
+     *  highlight from its own copy of the cursor; a cursor that merely
+     *  lost its target is dropped here, as it always was. */
+    private fun laidOut(laid: List<DocTarget>) {
+        targets = laid
+        val was = cursor
+        val now = was?.let { DocNav.settle(laid, it.rowId, it.act) }
+        if (was != null && now != null && now.act != was.act) setCursor(now) else cursor = now
     }
 
     /** Draws the controller's highlight on a target, or clears it (null). */
@@ -775,6 +794,20 @@ internal object DocNav {
             }
         }
     }
+
+    /**
+     * Where a cursor on [act] of row [rowId] stands in [targets], a layout
+     * that may have come after a press of that very target: on it, while
+     * the page still lays it out; else on the action that takes its place
+     * in the same row, for the few that name one ([DefAction.fallback]: an
+     * explain answer's ✕ and its Try again go with the press, and leave the
+     * row's explain button); else nowhere (null), as a cursor whose target
+     * is gone has always been. The one rule for every cursor that walks a
+     * document's targets.
+     */
+    fun settle(targets: List<DocTarget>, rowId: String, act: String): DocTarget? =
+        targets.firstOrNull { it.rowId == rowId && it.act == act }
+            ?: DefAction.fallback(act)?.let { next -> targets.firstOrNull { it.rowId == rowId && it.act == next } }
 
     /** Whether the row at [b], the one after the row at [a], is on [a]'s
      *  line: the same top, and beside it, not over it. Rows reported at one

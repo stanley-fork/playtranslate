@@ -390,6 +390,78 @@ class TranslationResultContentTest {
     }
 
     @Test
+    fun `with no LLM a Words row's explain button leads to the same alert of the host, as an interaction`() {
+        assertFalse("precondition: nothing here could answer", TranslationBackendRegistry.hasCompleter())
+        content.render(ResultState.Ready(result("猫が食べる。", "The cat eats.")))
+        content.renderWordLookups(
+            WordLookupsState.Settled(
+                rows = listOf(
+                    RowState(
+                        displayWord = "食べる", reading = "たべる", meaning = "to eat", senses = emptyList(),
+                        freqScore = 3, isCommon = true, surface = "食べる",
+                    ),
+                ),
+                tokenSpans = emptyList(), lookupToReading = emptyMap(),
+                sentence = sentence("猫が食べる。"),
+            ),
+        )
+        idle()
+        assertEquals("the rows came with their sentence: the button", DefRow.Explain(), content.wordRows.shownRows.single().explain)
+        val before = host.interactions
+
+        content.wordRows.tapForTest(0, DefAction.EXPLAIN)
+
+        assertEquals("the alert its Ask section raises", 1, host.askAlerts)
+        assertEquals(before + 1, host.interactions)
+        assertEquals("nothing was asked", DefRow.Explain(), content.wordRows.shownRows.single().explain)
+        assertTrue("and the word was not opened", host.tappedWords.isEmpty())
+    }
+
+    @Test
+    fun `the lens over the source text gives its row the explain button, and with no LLM closes and leaves the host its alert`() {
+        assertFalse("precondition: nothing here could answer", TranslationBackendRegistry.hasCompleter())
+        // English: a tokenizer and a lookup that need no pack.
+        Prefs(app).sourceLang = "en"
+        val text = "hello world"
+        content.render(ResultState.Ready(result(text, "bonjour le monde")))
+        val hello = TokenSpan("hello", "hello")
+        val world = TokenSpan("world", "world")
+        content.renderWordLookups(
+            WordLookupsState.Analyzed(
+                tokenSpans = listOf(hello, world),
+                annotation = SentenceAnnotation(
+                    text, SourceLangId.EN, 0,
+                    listOf(
+                        AnnotatedSpan(0, 5, "hello", lookupForm = "hello", lookupHint = ""),
+                        AnnotatedSpan(6, 11, "world", lookupForm = "world", lookupHint = ""),
+                    ),
+                ),
+                phrases = emptyList(),
+            ),
+        )
+        idle()
+        assertEquals("precondition: the source text has its tap spans", 2, content.sourceLens.wordSpans.size)
+
+        content.sourceLens.onTapAtOffset(1)
+        val deadline = System.currentTimeMillis() + 3000
+        while (!content.sourceLens.isShowing && System.currentTimeMillis() < deadline) {
+            idle()
+            Thread.sleep(5)
+        }
+        assertTrue("precondition: the lens came up over the word", content.sourceLens.isShowing)
+        val lens = SourceTextLens::class.java.getDeclaredField("lens").apply { isAccessible = true }
+            .get(content.sourceLens) as MagnifierLens
+        val row = lens.shownRowsForTest().filterIsInstance<DefRow.Word>().first()
+        assertEquals("the unit was resolved against a displayed text: the button", DefRow.Explain(), row.explain)
+
+        lens.tapRowForTest(row.id, DefAction.EXPLAIN)
+        idle()
+
+        assertFalse("the lens is gone before the alert: its window would cover the page's", content.sourceLens.isShowing)
+        assertEquals("the alert the page's Ask section raises", 1, host.askAlerts)
+    }
+
+    @Test
     fun `with no LLM an Ask preset leads to the host's alert, as an interaction, and asks nothing`() {
         assertFalse("precondition: nothing here could answer", TranslationBackendRegistry.hasCompleter())
         content.render(ResultState.Ready(result("猫が食べる。", "The cat eats.")))

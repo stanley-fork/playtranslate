@@ -41,6 +41,11 @@ interface NavTarget {
     /** The target's live rect on screen; false when it is not showing. */
     fun rectOnScreen(out: Rect): Boolean
     fun activate()
+
+    /** The target of the same view that takes this one's place when a
+     *  press of this one removes it, for a cursor to follow; null, the
+     *  default, for a target with none. */
+    fun successor(): NavTarget? = null
 }
 
 /** The sheet's side of the controller-navigation seam. [CaptureResultOverlay]
@@ -478,6 +483,18 @@ class CaptureSheetControllerNav(
         if (cands.isEmpty()) {
             clearCursor()
             return
+        }
+        // A target that names what takes its place ([NavTarget.successor]:
+        // an explain answer's ✕ leaves the button that brought it) is
+        // followed there before nearness is asked, which would pick
+        // whatever stands closest to where the ✕ was: the row's eye.
+        (cur as? Item.Button)?.let { gone ->
+            val next = gone.target?.successor() ?: return@let
+            cands.firstOrNull { (item, _) -> item is Item.Button && item.view === gone.view && item.target == next }
+                ?.let { (item, rect) ->
+                    setCursor(item, rect)
+                    return
+                }
         }
         var best = 0
         var bestD = Long.MAX_VALUE

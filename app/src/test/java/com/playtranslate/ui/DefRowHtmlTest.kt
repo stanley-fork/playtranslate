@@ -60,9 +60,10 @@ class DefRowHtmlTest {
         label: String? = null,
         emptyText: String? = null,
         shut: Set<String> = emptySet(),
+        explain: DefRow.Explain? = null,
     ): String = DefRowHtml.html(
         ctx,
-        DefRow.Word("id", data, opens, speak, trailing, trailingHolds, full, label, emptyText, shut),
+        DefRow.Word("id", data, opens, speak, trailing, trailingHolds, full, label, emptyText, shut, explain),
         "k7", structured, "ja",
     )
 
@@ -125,6 +126,120 @@ class DefRowHtmlTest {
         val infl = h.substringAfter("<div class=\"infl\">").substringBefore("</div>")
         assertEquals(MAX_INFLECTION_LINES + 1, infl.split("<br>").size)
         assertTrue(infl, infl.endsWith(ctx.getString(R.string.inflection_more, 2)))
+    }
+
+    // ── The head's layout ────────────────────────────────────────────────
+
+    @Test fun `the head's buttons are one group after the title, and the chevron follows it`() {
+        val h = html(explain = DefRow.Explain())
+        assertTrue("a row that opens keeps room for its chevron", h.contains("<div class=\"head op\"><div class=\"title\""))
+        val group = h.substringAfter("<div class=\"acts\">").substringBefore("</div>")
+        val order = listOf("data-act=\"explain\"", "data-act=\"speak\"", "data-act=\"trailing\"").map { group.indexOf(it) }
+        assertTrue("explain, speak, then the second button: $group", order.all { it >= 0 } && order == order.sorted())
+        assertEquals(1, h.count("class=\"acts\""))
+        assertTrue(
+            "the chevron stands outside the group, after it",
+            h.substringAfter("<div class=\"acts\">").contains("</button></div><span class=\"act chev\">"),
+        )
+        assertTrue("the title comes first", h.indexOf("class=\"title\"") < h.indexOf("class=\"acts\""))
+    }
+
+    @Test fun `a row with no button has no group, and one that does not open keeps no room for a chevron`() {
+        val bare = html(opens = false, speak = null, trailing = null)
+        assertFalse(bare, bare.contains("class=\"acts\""))
+        assertTrue(bare, bare.contains("<div class=\"head\"><div class=\"title\""))
+        val opening = html(speak = null, trailing = null)
+        assertFalse("still no group", opening.contains("class=\"acts\""))
+        assertTrue(opening, opening.contains("<div class=\"head op\">"))
+    }
+
+    // ── The explain button and its answer ────────────────────────────────
+
+    private val answer = DefRow.Answer("In this sentence", "It is the past of to eat.")
+
+    @Test fun `a row with no explain has neither the button nor the block`() {
+        val h = html()
+        for (gone in listOf("explain", "class=\"xp")) assertFalse(gone, h.contains(gone))
+    }
+
+    @Test fun `with nothing asked the row has the button alone, named for a screen reader`() {
+        val h = html(explain = DefRow.Explain())
+        assertTrue(
+            h,
+            h.contains(
+                "<button class=\"act explain\" data-act=\"explain\" aria-label=\"" +
+                    ctx.getString(R.string.cd_word_explain) + "\"><svg class=\"ic\"",
+            ),
+        )
+        assertFalse("not lit", h.contains("act explain on"))
+        assertFalse("no answer, no block", h.contains("class=\"xp"))
+        assertEquals("only Speak could spin, and it does not", 0, h.count("class=\"spin\""))
+    }
+
+    @Test fun `while the question is out the button is a spinner and nothing else is drawn`() {
+        val h = html(explain = DefRow.Explain(busy = true))
+        assertTrue(h, h.contains("data-act=\"explain\"") && h.contains("\"><span class=\"spin\"></span></button><button class=\"act speak\""))
+        assertFalse("the row does not move until there is something to read", h.contains("class=\"xp"))
+        assertFalse(h, h.contains("act explain on"))
+    }
+
+    @Test fun `an answer lights the button and stands between the head and the definitions, under its title and X`() {
+        val h = html(
+            data().copy(inflectedForms = listOf(InflectedForm("食べた", emptyList()))),
+            explain = DefRow.Explain(answer = answer),
+        )
+        assertTrue("lit", h.contains("<button class=\"act explain on\" data-act=\"explain\""))
+        assertTrue(
+            h,
+            h.contains(
+                "<div class=\"xp\"><div class=\"xp-h\"><span class=\"xp-t\">In this sentence</span>" +
+                    "<button type=\"button\" class=\"xp-x\" data-act=\"explain:close\" aria-label=\"" +
+                    ctx.getString(R.string.cd_ask_close) + "\">",
+            ),
+        )
+        assertTrue(h, h.contains("<div class=\"xp-a\">It is the past of to eat.</div></div>"))
+        assertFalse("no footer was given", h.contains("class=\"xp-f\""))
+        assertFalse("nor Try again", h.contains("explain:retry"))
+        val at = listOf("class=\"infl\"", "class=\"xp\"", "class=\"body\"").map { h.indexOf(it) }
+        assertTrue("after the conjugation line, before the definitions: $at", at.all { it >= 0 } && at == at.sorted())
+    }
+
+    @Test fun `an answer's footer is drawn under it, and its text is the page's text, never markup`() {
+        val h = html(
+            explain = DefRow.Explain(answer = DefRow.Answer("<b>T</b>", "a < b & \"c\"", footer = "Answered by <Gemini>")),
+        )
+        assertTrue(h, h.contains("<span class=\"xp-t\">&lt;b&gt;T&lt;/b&gt;</span>"))
+        assertTrue(h, h.contains("<div class=\"xp-a\">a &lt; b &amp; &quot;c&quot;</div>"))
+        assertTrue(h, h.contains("<div class=\"xp-f\">Answered by &lt;Gemini&gt;</div></div>"))
+    }
+
+    @Test fun `a failure is muted and offers Try again, an answer neither`() {
+        val failed = html(
+            explain = DefRow.Explain(answer = DefRow.Answer("In this sentence", "Couldn't get an answer.", muted = true, retry = true)),
+        )
+        assertTrue(failed, failed.contains("<div class=\"xp-a mu\">"))
+        assertTrue(
+            failed,
+            failed.contains(
+                "<button type=\"button\" class=\"xp-r\" data-act=\"explain:retry\">" +
+                    ctx.getString(R.string.ask_retry) + "</button></div>",
+            ),
+        )
+        assertTrue("its X is there too", failed.contains("data-act=\"explain:close\""))
+        // Out of scope: the app's word, with nothing to try again.
+        val refused = html(explain = DefRow.Explain(answer = DefRow.Answer("T", "Only answers…", muted = true)))
+        assertTrue(refused.contains("class=\"xp-a mu\""))
+        assertFalse(refused.contains("explain:retry"))
+    }
+
+    @Test fun `a hidden word's stub keeps the button's place and draws neither it nor an answer`() {
+        val h = html(trailing = DefRow.Trailing.SHOW, explain = DefRow.Explain(answer = answer))
+        assertTrue(
+            "the explain column, then the speak column, keep their places",
+            h.contains("<div class=\"acts\"><span class=\"act explain ghost\"></span><span class=\"act speak ghost\"></span>"),
+        )
+        assertFalse(h, h.contains("data-act=\"explain"))
+        assertFalse(h, h.contains("class=\"xp\""))
     }
 
     @Test fun `a hidden word is a stub, the word and the eye that shows it`() {

@@ -12,6 +12,7 @@ import android.util.Log
 import android.util.TypedValue
 import com.playtranslate.CaptureService
 import com.playtranslate.R
+import com.playtranslate.ask.WordInSentence
 import com.playtranslate.displaySizePx
 import com.playtranslate.DisplayGeometry
 import com.playtranslate.displayGeometryOf
@@ -150,6 +151,12 @@ class DragLookupController(
     private var secondaryLoading = false
     private var secondaryLoadJob: Job? = null
 
+    /** Where this lens's alerts show (a row's Speak with no engine, its
+     *  explain button with no AI model): the host's own surface when it
+     *  gave one (an activity's), else an overlay over the game. */
+    private val alertTarget: TtsAlertTarget =
+        ttsAlertTarget ?: TtsAlertTarget.Overlay(magnifier.rawCtx, overlayHost, magnifier.wm, displayId)
+
     /** Open-detail + Anki button actions, shared with the capture overlay. Reads
      *  this controller's live word/entry/sentence/screenshot at tap time. */
     private val lensActions = SourceLensActions(
@@ -272,11 +279,7 @@ class DragLookupController(
         // [lensActions] (shared with the capture overlay).
         // A row's Speak button pronounces that row's headword: the
         // looked-up word's, or a related unit's by its index.
-        speech = LensSpeech(
-            magnifier,
-            ttsAlertTarget
-                ?: TtsAlertTarget.Overlay(magnifier.rawCtx, overlayHost, magnifier.wm, displayId),
-        ) { secondary ->
+        speech = LensSpeech(magnifier, alertTarget) { secondary ->
             val lang = Prefs(popup.ctx).sourceLangId
             if (secondary == null) {
                 // Speak the displayed kana reading (JA) so audio matches the
@@ -294,6 +297,10 @@ class DragLookupController(
         magnifier.onDismiss = { lensDismissed() }
         // The "Load more (n)" row under the sticky lens's sections.
         magnifier.onLoadMoreTap = { loadSecondaries() }
+        // A row's explain button with no AI model set up. No Ask section
+        // stands behind this lens, so the alert is raised here, where the
+        // lens's other alerts show; the lens has dismissed itself first.
+        magnifier.onExplainNeedsModel = { showAskNeedsLlm(alertTarget) }
     }
 
     /** True when the lens is in sticky-definitions mode (drag has ended,
@@ -1801,8 +1808,15 @@ class DragLookupController(
         loadMoreLoading: Boolean = false,
         scroll: LensScroll = LensScroll.Top,
     ) {
-        fun section(p: PopupData) =
-            LensSection(p.toLensData(), p.machineTranslatedLabel(), opens = true, anki = p.entry != null)
+        // What a row's explain question is about: the sentence this lookup
+        // cut out of the line's group, under the pair it resolved with (the
+        // settings', read as [resolveToken] reads them), and each unit's own
+        // word, reading and the form it was found as.
+        val sentence = currentSentence?.let { askSentence(it, Prefs(context).langContext()) }
+        fun section(p: PopupData) = LensSection(
+            p.toLensData(), p.machineTranslatedLabel(), opens = true, anki = p.entry != null,
+            explain = sentence?.let { WordInSentence(it, p.word, p.reading, listOfNotNull(p.surface)) },
+        )
         val secondaries = res.secondaries()
         val loadMore = res.pending.takeIf { it.isNotEmpty() }?.let { LensLoadMore(it.size, loadMoreLoading) }
         if (secondaries.isNotEmpty() || loadMore != null) {

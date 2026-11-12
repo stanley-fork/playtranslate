@@ -998,6 +998,7 @@ class CaptureResultOverlay(
             // The open works entry-or-not — it opens the sentence view — so
             // every section opens.
             opensWithoutEntry = true,
+            onAskNeedsLlm = { showAskNeedsLlm() },
             wireActions = { magnifier, resolvedAt -> wireLensActions(magnifier, resolvedAt) },
         )
         sourceLens = lens
@@ -1010,6 +1011,7 @@ class CaptureResultOverlay(
                 override val scope: CoroutineScope get() = this@CaptureResultOverlay.scope
                 override val ttsAlertTarget: TtsAlertTarget get() = alertTarget
                 override fun onWordTapped(row: RowState) = openWordRow(row)
+                override fun onAskNeedsLlm() = showAskNeedsLlm()
             },
         )
         // The card asks for its rows whenever it is shown and may need them;
@@ -2644,13 +2646,7 @@ class CaptureResultOverlay(
     /** Starts [intent] as a new task on the foreground display (else this
      *  sheet's): the one way an activity opens from this over-game sheet, for
      *  the OCR download page and the PlayTranslate Cloud page alike. */
-    private fun launchOnForegroundDisplay(intent: Intent) {
-        val app = ctx.applicationContext
-        intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-        val targetDisplay = PlayTranslateApplication.foregroundDisplayId() ?: displayId
-        val opts = android.app.ActivityOptions.makeBasic().setLaunchDisplayId(targetDisplay).toBundle()
-        app.startActivity(intent, opts)
-    }
+    private fun launchOnForegroundDisplay(intent: Intent) = launchOnForegroundDisplay(ctx, intent, displayId)
 
     /** Change the source ([isSource]) or target language. Shared by the language section
      *  headers and the tappable language name in the no-text status. The bound result is

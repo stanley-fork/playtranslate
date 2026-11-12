@@ -43,6 +43,7 @@ import android.widget.TextView
 import androidx.annotation.VisibleForTesting
 import androidx.appcompat.content.res.AppCompatResources
 import androidx.core.graphics.drawable.DrawableCompat
+import com.playtranslate.ask.WordInSentence
 import com.playtranslate.dictionary.Deinflector
 import com.playtranslate.overlay.OverlayHost
 import com.playtranslate.overlay.OverlayPlacement
@@ -128,6 +129,11 @@ data class LensSection(
     /** Whether the section's row offers Add to Anki
      *  ([MagnifierLens.onAnkiTap], [MagnifierLens.onAnkiLongPress]). */
     val anki: Boolean = false,
+    /** The sentence the section's word was read in and how a question
+     *  about the word names it: what gives the section's row its explain
+     *  button ([WordRowList.Host.explainSubject]). The owner fills it from
+     *  what its own lookup ran on; null, no button. */
+    val explain: WordInSentence? = null,
 )
 
 /** The lens's "Load more (n)" row ([MagnifierLens.setSplitDefinitions]):
@@ -344,6 +350,14 @@ class MagnifierLens(
      *  spinner meanwhile): null for the tapped unit's row, else the
      *  secondary's index. */
     var onSpeak: (suspend (secondary: Int?) -> Unit)? = null
+    /** A row's explain button was tapped with no AI model to put the
+     *  question to: the owner raises the "needs an AI model" alert
+     *  ([askNeedsLlm]) on its surface. The lens has dismissed itself by the
+     *  time this runs, on every surface: its window covers the whole screen
+     *  and takes any touch off its card as a dismissal, and where the alert
+     *  belongs to the window beneath it (an activity's, the workspace's) the
+     *  lens would stand over the alert and take the first tap meant for it. */
+    var onExplainNeedsModel: (() -> Unit)? = null
 
     /** True when there's no [overlayHost] — the lens attaches directly to the
      *  activity window (TYPE_APPLICATION_PANEL) instead of going through a
@@ -982,6 +996,13 @@ class MagnifierLens(
             onAnkiTap = { i -> onAnkiTap?.invoke(i) },
             onAnkiLongPress = { i -> onAnkiLongPress?.invoke(i) },
             onSpeak = { i -> onSpeak?.invoke(i) },
+            onExplainNeedsModel = {
+                // Read first: the dismissal is the owner's cue to let go of
+                // what it wired for this lens.
+                val raise = onExplainNeedsModel
+                dismiss()
+                raise?.invoke()
+            },
             deckBadges = deckBadges,
             onBodyHeightChanged = { fitHeightToContent() },
         )
@@ -1196,6 +1217,9 @@ class MagnifierLens(
         private val onAnkiLongPress: (Int?) -> Unit,
         /** Speaks a row's word, returning when it is done. */
         private val onSpeak: suspend (Int?) -> Unit,
+        /** An explain button tapped with nothing that could answer
+         *  ([MagnifierLens.onExplainNeedsModel]). */
+        private val onExplainNeedsModel: () -> Unit,
         private val deckBadges: Boolean,
         /** The body the card should fit changed height (the definitions
          *  page reported a layout). The owner re-runs its card-height fit,
@@ -1535,6 +1559,9 @@ class MagnifierLens(
                 override fun onTrailingHold(row: LensItem) = onAnkiLongPress(row.secondary)
                 override suspend fun speak(row: LensItem) = onSpeak(row.secondary)
                 override fun onFooter() = fireLoadMoreTap()
+
+                override fun explainSubject(row: LensItem): WordInSentence? = row.section.explain
+                override fun onExplainNeedsModel() = this@LensView.onExplainNeedsModel()
             },
             describe = { WordRowList.Entry(it.section.data, it.section.opens, it.section.label, emptyText) },
             theme = {
@@ -1646,6 +1673,11 @@ class MagnifierLens(
                 }
             }
             onBodyHeightChanged()
+            // A cursor whose target went with its own press stands on what
+            // took its place ([DocNav.settle]); any other is as it was.
+            docCursor?.let { (row, act) ->
+                DocNav.settle(list.targets, row, act)?.let { docCursor = it.rowId to it.act }
+            }
             shownDocCursor = null
             if (focusWhenLaidOut) {
                 focusWhenLaidOut = false

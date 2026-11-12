@@ -113,6 +113,12 @@ object LlmPromptTemplates {
      *  it a value, so there it passes through as written. */
     const val TOKEN_QUESTION = "{question}"
 
+    /** The word a question is about, as its wording names it, in the Ask
+     *  prompt for one word of a sentence
+     *  ([com.playtranslate.ask.AskPrompts.WORD_IN_SENTENCE]); like
+     *  [TOKEN_QUESTION], no translation template gives it a value. */
+    const val TOKEN_WORD = "{word}"
+
     /** Recent source→translation pairs, or "" when the feature is off, nothing
      *  qualifies, or the consumer is on-device. The provider's non-empty value
      *  is a self-contained block ENDING IN "\n\n", so the default template
@@ -194,7 +200,7 @@ object LlmPromptTemplates {
         listOf(
             TOKEN_SOURCE_CODE, TOKEN_TARGET_CODE, TOKEN_STRINGS,
             TOKEN_SOURCE, TOKEN_TARGET, TOKEN_TEXT, TOKEN_COUNT,
-            TOKEN_CONTEXT, TOKEN_QUESTION,
+            TOKEN_CONTEXT, TOKEN_QUESTION, TOKEN_WORD,
         ).joinToString("|") { Regex.escape(it) }
     )
 

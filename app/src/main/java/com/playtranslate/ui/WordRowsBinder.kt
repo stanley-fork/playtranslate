@@ -13,6 +13,8 @@ import androidx.core.view.isVisible
 import com.playtranslate.AnkiManager
 import com.playtranslate.Prefs
 import com.playtranslate.R
+import com.playtranslate.ask.AskSentence
+import com.playtranslate.ask.WordInSentence
 import com.playtranslate.vocab.HiddenWordsStore
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.flow.drop
@@ -114,6 +116,12 @@ class WordRowsBinder(
 
         /** Any user interaction (live-mode hosts pause on it). */
         fun onInteraction() {}
+
+        /** A row's explain button was tapped with no AI model to put the
+         *  question to: show the alert that says so ([askNeedsLlm]) on this
+         *  surface, as its Ask section's does. No default: every surface
+         *  with this card has one to show. */
+        fun onAskNeedsLlm()
     }
 
     /** The document's slot; exposed for the page's layout. */
@@ -155,6 +163,23 @@ class WordRowsBinder(
             )
 
             override fun onInteraction() = host.onInteraction()
+
+            // The lookup's own text and pair, which came with these rows
+            // ([WordLookupsState.Settled.sentence]). The forms are those the
+            // word takes in it: the first occurrence's, and every inflected
+            // one the row gathers. Which of them say anything is the
+            // question's to judge when it names the word
+            // ([com.playtranslate.ask.AskPrompts.wordValue]).
+            override fun explainSubject(row: RowState): WordInSentence? = lastSentence?.let { sentence ->
+                WordInSentence(
+                    sentence,
+                    row.displayWord,
+                    row.reading.ifEmpty { null },
+                    listOf(row.surface) + row.inflectedForms.map { it.surface },
+                )
+            }
+
+            override fun onExplainNeedsModel() = host.onAskNeedsLlm()
         },
         WordRowList.COMPACT_SCALE,
         twoColumnsWhenWide = true,
@@ -168,6 +193,12 @@ class WordRowsBinder(
      *  language they were looked up in, for the late-load re-render. */
     private var lastRows: List<RowState> = emptyList()
     private var lastLang: String = ""
+
+    /** The text the rows last rendered are the words of, and its pair, as
+     *  their lookup gave it ([WordLookupsState.Settled.sentence]): what a
+     *  row's explain question is about. Null for rows that came with none.
+     *  Read only for rows that are listed, so it is not reset when they go. */
+    private var lastSentence: AskSentence? = null
 
     /** True once the rendered rows were ordered against a LOADED hidden set
      *  (see [renderRows]); while false, the next revision re-renders
@@ -352,7 +383,7 @@ class WordRowsBinder(
             }
             is WordLookupsState.Settled -> {
                 lookupRunning = false
-                renderRows(state.rows, state.definitionLang)
+                renderRows(state.rows, state.definitionLang, state.sentence)
                 noWordsText.visibility = if (state.rows.isEmpty()) View.VISIBLE else View.GONE
             }
         }
@@ -374,9 +405,10 @@ class WordRowsBinder(
         list.release()
     }
 
-    private fun renderRows(rows: List<RowState>, lang: String) {
+    private fun renderRows(rows: List<RowState>, lang: String, sentence: AskSentence?) {
         lastRows = rows
         lastLang = lang
+        lastSentence = sentence
         // A fresh list is ordered hidden-last. isLoaded BEFORE snapshot: true
         // means the snapshot taken next is the loaded set and this ordering
         // is final; false means it is provisional, and the load's revision
@@ -413,7 +445,7 @@ class WordRowsBinder(
     fun applyHiddenState() {
         if (list.isEmpty) return
         if (!hiddenOrderApplied && HiddenWordsStore.isLoaded(prefs.sourceLangId)) {
-            renderRows(lastRows, lastLang)
+            renderRows(lastRows, lastLang, lastSentence)
             return
         }
         list.publish()

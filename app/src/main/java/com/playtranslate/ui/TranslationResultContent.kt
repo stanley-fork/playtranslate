@@ -233,6 +233,7 @@ class TranslationResultContent(
                         row.displayWord, row.reading.ifEmpty { null }, row.surface,
                         row.lookupForm, row.lookupReading,
                     )
+                override fun onAskNeedsLlm() = host.onAskNeedsLlm()
             },
         )
         // The card asks for its rows whenever it is shown and may need them;
@@ -249,6 +250,7 @@ class TranslationResultContent(
             offersAnki = { true },
             opensWithoutEntry = host.opensWithoutEntry,
             deckBadges = true,
+            onAskNeedsLlm = { host.onAskNeedsLlm() },
             wireActions = { lens, resolved -> host.wireLensActions(lens, resolved) },
         )
         lookupsRenderer = WordLookupsRenderer(

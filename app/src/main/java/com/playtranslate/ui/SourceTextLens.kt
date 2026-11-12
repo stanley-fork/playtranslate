@@ -5,6 +5,7 @@ import android.graphics.Point
 import android.graphics.Rect
 import android.view.WindowManager
 import com.playtranslate.Prefs
+import com.playtranslate.ask.WordInSentence
 import com.playtranslate.overlay.OverlayHost
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
@@ -63,6 +64,11 @@ class SourceTextLens(
     private val opensWithoutEntry: Boolean,
     /** Whether the lens's rows carry the "already in Anki" deck pill. */
     private val deckBadges: Boolean = false,
+    /** A row's explain button was tapped with no AI model to put the
+     *  question to: the surface's own "needs an AI model" alert, the one
+     *  its Ask section raises. The lens is gone by the time this runs
+     *  ([MagnifierLens.onExplainNeedsModel]). */
+    private val onAskNeedsLlm: () -> Unit,
     /** Wire the actions of a lens for this tap: each row's open, and its
      *  Anki button's tap + hold (by section: null for the tapped unit, else
      *  the secondary's index). Runs before the lens shows, and again on the
@@ -159,6 +165,7 @@ class SourceTextLens(
             onDismissed?.invoke()
         }
         lens.onLoadMoreTap = { loadMore(lens) }
+        lens.onExplainNeedsModel = onAskNeedsLlm
         this.lens = lens
         // Each row speaks its own unit, read from the body state at tap
         // time so a [loadMore]'s sections are covered.
@@ -190,13 +197,24 @@ class SourceTextLens(
         val at = currentAt ?: return
         val resolved = at.word
         val canOpen = resolved.entry != null || opensWithoutEntry
-        val primary = LensSection(resolved.data, resolved.label, opens = canOpen, anki = offersAnki(resolved))
+        // What a row's explain question is about: the displayed text the
+        // units were resolved against, under the pair their lookup read (the
+        // settings', as [SourceWordLookup.resolveAt] reads them), and each
+        // unit's own word, reading and the form it was found as.
+        val sentence = presentedText?.let { askSentence(it, Prefs(ctx).langContext()) }
+        // Every section, the tapped unit's and a related one's, is built
+        // here and nowhere else.
+        fun section(unit: SourceWordLookup.Resolved, opens: Boolean) = LensSection(
+            unit.data, unit.label, opens = opens, anki = offersAnki(unit),
+            explain = sentence?.let { WordInSentence(it, unit.word, unit.reading, listOfNotNull(unit.surface)) },
+        )
+        val primary = section(resolved, opens = canOpen)
         val secondaries = at.secondaries()
         val loadMore = SourceWordLookup.loadMoreFor(at, loadingMore)
         if (secondaries.isNotEmpty() || loadMore != null) {
             lens.setSplitDefinitions(
                 primary,
-                secondaries.map { LensSection(it.data, it.label, opens = true, anki = offersAnki(it)) },
+                secondaries.map { section(it, opens = true) },
                 secondariesOnTop = at.phrase != null,
                 loadMore,
                 scroll,

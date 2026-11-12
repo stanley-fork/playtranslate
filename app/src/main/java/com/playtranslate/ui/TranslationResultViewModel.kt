@@ -547,6 +547,14 @@ sealed class WordLookupsState {
          *  must be the lookup's language and never a fresh read of the
          *  settings. Blank only on the empty results of a failed lookup. */
         val definitionLang: String = "",
+        /** The text the rows are the words of, and the pair it was analysed
+         *  under (the analysis's own snapshot, like [definitionLang]), as a
+         *  question about one of those words takes them
+         *  ([com.playtranslate.ask.WordInSentence]): what gives a Words row
+         *  its explain button. It travels with the rows it belongs to, so a
+         *  row can never be asked about under another text. Null where no
+         *  rows settled (a failed lookup), and then no row has the button. */
+        val sentence: com.playtranslate.ask.AskSentence? = null,
     ) : WordLookupsState()
 }
 

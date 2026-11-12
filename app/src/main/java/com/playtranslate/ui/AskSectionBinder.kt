@@ -13,7 +13,6 @@ import android.view.inputmethod.InputMethodManager
 import android.widget.EditText
 import android.widget.ImageButton
 import android.widget.TextView
-import androidx.annotation.AttrRes
 import androidx.core.view.isVisible
 import androidx.core.widget.doAfterTextChanged
 import com.playtranslate.Prefs
@@ -25,7 +24,6 @@ import com.playtranslate.ask.AskSession
 import com.playtranslate.ask.AskState
 import com.playtranslate.themeColor
 import com.playtranslate.translation.TranslationBackendRegistry
-import com.playtranslate.translation.TranslationError
 
 /**
  * The results' Ask section (section_ask.xml): the user's LLM asked about the
@@ -255,26 +253,9 @@ class AskSectionBinder(
         if (state !is AskState.Idle) clearFieldFocus()
         idleGroup.isVisible = state is AskState.Idle
         answerGroup.isVisible = state !is AskState.Idle
-        when (state) {
-            AskState.Idle -> applyPresets()
-            is AskState.Asking -> showQuestion(
-                state.question,
-                state.service?.let { ctx.getString(R.string.ask_status_asking, it) }
-                    ?: ctx.getString(R.string.ask_status_asking_unnamed),
-                R.attr.ptText,
-            )
-            is AskState.Answered -> showQuestion(
-                state.question, state.text, R.attr.ptText, footer = answerFooter(state),
-            )
-            // The service's word on the question, in the app's own words:
-            // no Try again, since asking again would get the same.
-            is AskState.OutOfScope -> showQuestion(
-                state.question, ctx.getString(R.string.ask_out_of_scope, state.answeredBy), R.attr.ptTextMuted,
-            )
-            is AskState.Failed -> showQuestion(
-                state.question, failureText(state), R.attr.ptTextMuted, retry = true,
-            )
-        }
+        // The state in words is [askDisplay]'s, shared with every other
+        // surface that draws one; with nothing asked, the questions.
+        askDisplay(ctx, state)?.let(::showQuestion) ?: applyPresets()
         applySpoilerWarning()
         applyVisibility()
         host.onHeightChanged()
@@ -367,22 +348,17 @@ class AskSectionBinder(
         }
     }
 
-    /** The answer group for [question]: its title, then [body] in
-     *  [bodyColor], with [footer] under it and Try again where given. */
-    private fun showQuestion(
-        question: AskQuestion,
-        body: CharSequence,
-        @AttrRes bodyColor: Int,
-        footer: CharSequence? = null,
-        retry: Boolean = false,
-    ) {
-        titleText.text = question.title
-        titleText.setTypeface(null, if (readsInItalic(question.title)) Typeface.ITALIC else Typeface.NORMAL)
-        bodyText.text = body
-        bodyText.setTextColor(ctx.themeColor(bodyColor))
-        footerText.text = footer
-        footerText.isVisible = footer != null
-        retryButton.isVisible = retry
+    /** The answer group for a question on screen ([shown]): its title,
+     *  then its body, muted where it is the app's word and not an answer,
+     *  with the footer under it and Try again where given. */
+    private fun showQuestion(shown: AskDisplay) {
+        titleText.text = shown.title
+        titleText.setTypeface(null, if (readsInItalic(shown.title)) Typeface.ITALIC else Typeface.NORMAL)
+        bodyText.text = shown.body
+        bodyText.setTextColor(ctx.themeColor(if (shown.muted) R.attr.ptTextMuted else R.attr.ptText))
+        footerText.text = shown.footer
+        footerText.isVisible = shown.footer != null
+        retryButton.isVisible = shown.retry
     }
 
     /** Whether [text] is drawn in italic: when every letter in it is Latin
@@ -396,28 +372,6 @@ class AskSectionBinder(
         text.codePoints().noneMatch {
             Character.isLetter(it) && Character.UnicodeScript.of(it) != Character.UnicodeScript.LATIN
         }
-
-    /** The lines under an answer: who gave it, and first, for an answer the
-     *  service cut at its length limit, a line saying so, so that a text
-     *  that stops mid-sentence does not read as the whole answer. */
-    private fun answerFooter(answered: AskState.Answered): String {
-        val by = ctx.getString(R.string.ask_answered_by, answered.answeredBy)
-        return if (answered.cut) ctx.getString(R.string.ask_answer_cut) + "\n" + by else by
-    }
-
-    /** The failure in words: the generic line, and under it the service's
-     *  reason when the session says which online service refused and how. */
-    private fun failureText(failed: AskState.Failed): String {
-        val generic = ctx.getString(R.string.ask_failed)
-        val service = failed.service ?: return generic
-        val failure = failed.failure ?: return generic
-        // The error pill's words for that refusal. An error's id only keys
-        // the pill's once-per-outage rule, which an answer never enters, and
-        // the session carries the service's name alone, so the name stands
-        // in for it.
-        val reason = TranslationErrorMessages.text(ctx, TranslationError.Service(service, service, failure))
-        return "$generic\n$reason"
-    }
 
     // ── Asking ───────────────────────────────────────────────────────────
 

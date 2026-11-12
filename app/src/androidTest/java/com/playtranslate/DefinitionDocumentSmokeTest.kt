@@ -444,6 +444,182 @@ class DefinitionDocumentSmokeTest {
     }
 
     /**
+     * The word row's head in a real engine, the one thing about it no JVM
+     * test can run: where its buttons stand. Five rows in a card 300dp wide
+     * at the Words card's text size, each with the explain button, Speak, a
+     * second button and the chevron, which leaves the headword about 92px
+     * beside the buttons and about 256px on a line of its own:
+     *  - a short headword keeps its buttons on its line;
+     *  - a headword that fits a line but not beside the buttons keeps the
+     *    line whole, and the buttons stand under it, at the line's end:
+     *    one Latin word, a phrase with spaces (which could break at them),
+     *    and kana drawn mora by mora under an accent line (which could break
+     *    between any two);
+     *  - a headword wider than the whole line wraps inside its own box and
+     *    never runs past the head, its buttons under it;
+     *  - an open explain answer stands under the head, with its ✕ a target.
+     * Synthetic rows, so it needs no pack. Leaves a screenshot beside the
+     * other smoke shots (smoke_head.jpg).
+     */
+    @Test
+    fun aHeadwordTooLongForItsButtonsKeepsItsLineAndTheButtonsWrapUnder() {
+        val app = instr.targetContext
+        fun data(word: String, reading: String? = null, pitch: List<Int> = emptyList()) = WordDefinitionData(
+            word, reading,
+            listOf(com.playtranslate.ui.SenseDisplay(listOf("noun"), "a definition", emptyList())),
+            freqScore = 0, isCommon = false, pitch = pitch,
+        )
+        fun row(id: String, data: WordDefinitionData, explain: DefRow.Explain = DefRow.Explain()) = DefRow.Word(
+            id, data, opens = true, speak = DefRow.Speak.IDLE, trailing = DefRow.Trailing.HIDE, explain = explain,
+        )
+        val rows = listOf(
+            row("short", data("猫", "ねこ")),
+            row("latin", data("Entschuldigung")),
+            row("phrase", data("in spite of all")),
+            row("kana", data("いらっしゃいませ", pitch = listOf(6))),
+            row("huge", data("Geschwindigkeitsbegrenzungen")),
+            row(
+                "asked", data("犬", "いぬ"),
+                DefRow.Explain(answer = DefRow.Answer("In this sentence", "It names the animal.", footer = "Answered by a test")),
+            ),
+        )
+        val order = rows.map { it.id }
+
+        val themed = ContextThemeWrapper(app, R.style.Theme_PlayTranslate)
+        val wm = app.getSystemService(WindowManager::class.java)
+        val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
+        var root: FrameLayout? = null
+        var doc: DefinitionDocument? = null
+        try {
+            onMain {
+                val density = themed.resources.displayMetrics.density
+                val card = FrameLayout(themed).apply { setBackgroundColor(themed.themeColor(R.attr.ptSurface)) }
+                root = FrameLayout(themed).apply {
+                    setBackgroundColor(Color.BLACK)
+                    addView(
+                        card,
+                        FrameLayout.LayoutParams((300 * density).toInt(), ViewGroup.LayoutParams.WRAP_CONTENT).apply {
+                            topMargin = (60 * density).toInt()
+                            leftMargin = (20 * density).toInt()
+                        },
+                    )
+                }
+                wm.addView(
+                    root,
+                    WindowManager.LayoutParams(
+                        ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT,
+                        WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY,
+                        WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or WindowManager.LayoutParams.FLAG_HARDWARE_ACCELERATED or
+                            WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON,
+                        PixelFormat.OPAQUE,
+                    ),
+                )
+                doc = DefinitionDocument(
+                    themed, card, scope,
+                    theme = {
+                        DefinitionsDocument.DocTheme(
+                            DefinitionsDocument.Tokens(
+                                text = themed.themeColor(R.attr.ptText),
+                                textMuted = themed.themeColor(R.attr.ptTextMuted),
+                                textHint = themed.themeColor(R.attr.ptTextHint),
+                                accent = themed.themeColor(R.attr.ptAccent),
+                                panel = themed.themeColor(R.attr.ptSurface),
+                                baseFontSizePx = 16.5f,
+                            ),
+                            divider = themed.themeColor(R.attr.ptDivider),
+                            band = 0,
+                            link = themed.themeColor(R.attr.ptTextLink),
+                        )
+                    },
+                    onAction = { _, _ -> },
+                )
+            }
+            val d = doc!!
+            onMain { d.setRows(rows, "ja") }
+            await("the rows as targets") { d.targets.map { it.rowId }.distinct().size == rows.size }
+            var targets = emptyList<com.playtranslate.ui.DocTarget>()
+            onMain { targets = d.targets }
+            fun t(row: String, act: String) = targets.first { it.rowId == row && it.act == act }
+            fun box(row: String) = targets.first { it.rowId == row }
+
+            // What only the page knows: each headword's own box, against its
+            // head's. One line of a headword is 1.636 x 16.5 x 1.4 = 38px.
+            var measured: String? = null
+            onMain {
+                val web = (d.hostView as DefinitionDocumentView).getChildAt(0) as WebView
+                web.evaluateJavascript(
+                    """(function(){var out=[];var rows=document.querySelectorAll('[data-row]');
+                    for(var i=0;i<rows.length;i++){var h=rows[i].querySelector('.head'),w=h.querySelector('.w');
+                    var hb=h.getBoundingClientRect(),wb=w.getBoundingClientRect();
+                    out.push(Math.round(wb.height)+','+Math.round(wb.right-hb.right)+','+Math.round(wb.bottom-hb.top));}
+                    return out.join(';');})()""",
+                ) { measured = it }
+            }
+            await("the page's own measure of the headwords") { measured != null }
+            val words = measured!!.trim('"').split(';').map { m -> m.split(',').map { it.toInt() } }
+            fun headwordHeight(row: String) = words[order.indexOf(row)][0]
+            fun headwordPastHead(row: String) = words[order.indexOf(row)][1]
+            fun headwordBottom(row: String) = words[order.indexOf(row)][2]
+            Log.i("DefDocSmoke", "head: targets=$targets words=$measured")
+
+            val acts = listOf(DefAction.EXPLAIN, DefAction.SPEAK, DefAction.TRAILING)
+            // Every row: the three buttons level with one another, in order.
+            for (row in order) {
+                val tops = acts.map { t(row, it).top }
+                assertEquals("$row: the buttons are level", 1, tops.distinct().size)
+                val lefts = acts.map { t(row, it).left }
+                assertEquals("$row: explain, speak, then the second button", lefts.sorted(), lefts)
+                assertTrue("$row: the headword stays inside its head", headwordPastHead(row) <= 1)
+            }
+            // A short headword: the buttons on its line, at the row's top.
+            assertTrue(
+                "short: the buttons stand beside the headword (${t("short", DefAction.EXPLAIN)} in ${box("short")})",
+                t("short", DefAction.EXPLAIN).top - box("short").top <= 14,
+            )
+            assertTrue("short: one line", headwordHeight("short") <= 45)
+            // Fits a line, not beside the buttons: the line is kept whole and
+            // the buttons stand under it, ending where the short row's end.
+            for (row in listOf("latin", "phrase", "kana")) {
+                assertTrue("$row: the headword is on one line (${headwordHeight(row)}px)", headwordHeight(row) <= 50)
+                assertTrue(
+                    "$row: the buttons stand under the headword",
+                    t(row, DefAction.EXPLAIN).top - box(row).top >= headwordBottom(row) - 2,
+                )
+                assertEquals(
+                    "$row: at the line's end, where a row's buttons always end",
+                    t("short", DefAction.TRAILING).left, t(row, DefAction.TRAILING).left,
+                )
+            }
+            // Wider than the whole line: it wraps in its own box, the buttons under it.
+            assertTrue("huge: the headword wraps (${headwordHeight("huge")}px)", headwordHeight("huge") >= 60)
+            assertTrue(
+                "huge: the buttons stand under all of it",
+                t("huge", DefAction.EXPLAIN).top - box("huge").top >= headwordBottom("huge") - 2,
+            )
+            // An open answer: its X is a target, under the head's buttons.
+            val close = t("asked", DefAction.EXPLAIN_CLOSE)
+            assertTrue("asked: the answer stands under the head", close.top >= t("asked", DefAction.EXPLAIN).top + 36)
+            assertEquals(
+                setOf(DefAction.OPEN, DefAction.EXPLAIN, DefAction.SPEAK, DefAction.TRAILING, DefAction.EXPLAIN_CLOSE),
+                targets.filter { it.rowId == "asked" && it.act.isNotEmpty() }.map { it.act }.toSet(),
+            )
+
+            Thread.sleep(600)
+            val dir = File(app.getExternalFilesDir(null), "defdoc").apply { mkdirs() }
+            ui.takeScreenshot()?.let { bmp ->
+                FileOutputStream(File(dir, "smoke_head.jpg")).use { bmp.compress(Bitmap.CompressFormat.JPEG, 85, it) }
+                bmp.recycle()
+            }
+        } finally {
+            onMain {
+                doc?.release()
+                root?.let { wm.removeView(it) }
+            }
+            scope.cancel()
+        }
+    }
+
+    /**
      * The rows of a word's own page in a real engine: plain-text imported
      * definitions as page senses under their dictionary's name, then
      * numbered senses with the eyebrow, the note and examples. None is a

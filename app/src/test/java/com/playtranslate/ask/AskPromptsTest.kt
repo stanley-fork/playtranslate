@@ -26,7 +26,10 @@ import org.junit.Test
  *  - every user message, a preset's or a typed question's, ends with the
  *    line "Answer in <the answer's language>.";
  *  - a typed question and the sentence are the user's own words: neither is
- *    read as a template, whatever braces they contain.
+ *    read as a template, whatever braces they contain;
+ *  - a word's question ([AskQuestion.Word]) names its word in quotes with
+ *    the reading and the forms it has, goes in the ready-made questions'
+ *    frame, and its word is a value like the sentence, never a template.
  *
  * The wording of SYSTEM and of the typed question's frame is a first draft,
  * so it is pinned only through its tokens, never as literal text. The
@@ -212,5 +215,74 @@ class AskPromptsTest {
     @Test fun `a question's title is a preset's title or the typed words`() {
         assertEquals("Explain it", AskQuestion.Preset(preset).title)
         assertEquals("Why is が used here?", AskQuestion.Custom("Why is が used here?").title)
+    }
+
+    // ── A word's question ────────────────────────────────────────────────
+    //
+    // Its wording is a first draft, like SYSTEM's, so it is pinned through
+    // what it must carry (the word as it is named, the sentence's language)
+    // and never as literal text. How the word is named is pinned as written:
+    // it is what the model has to find the word in the text by.
+
+    private val eat = AskQuestion.Word("食べる", "たべる", listOf("食べさせられた"), title = "In this sentence")
+
+    @Test fun `a word is named in quotes, with its reading and the forms it takes in the sentence`() {
+        assertEquals(
+            "\"食べる\" (read たべる; it appears here as \"食べさせられた\")",
+            AskPrompts.wordValue(eat),
+        )
+        assertEquals(
+            "every form, each once",
+            "\"食べる\" (it appears here as \"食べた\", \"食べない\")",
+            AskPrompts.wordValue(AskQuestion.Word("食べる", null, listOf("食べた", "食べない", "食べた"), "t")),
+        )
+    }
+
+    @Test fun `a reading or a form that is the word itself says nothing and is left out`() {
+        assertEquals("\"ねこ\"", AskPrompts.wordValue(AskQuestion.Word("ねこ", "ねこ", listOf("ねこ"), "t")))
+        assertEquals("\"cat\"", AskPrompts.wordValue(AskQuestion.Word("cat", null, emptyList(), "t")))
+        assertEquals(
+            "a blank reading and a blank form are none",
+            "\"cat\"",
+            AskPrompts.wordValue(AskQuestion.Word("cat", " ", listOf(""), "t")),
+        )
+    }
+
+    @Test fun `a word question's wording names the word and the language, and leaves the sentence out`() {
+        val asked = AskPrompts.build(eat, sentence)
+
+        assertTrue(asked.question, asked.question.contains(AskPrompts.wordValue(eat)))
+        assertTrue("the sentence's language by its English name: ${asked.question}", asked.question.contains("Japanese"))
+        assertFalse("no token is left unfilled: ${asked.question}", asked.question.contains("{"))
+        assertFalse("the wording leaves the sentence out", asked.question.contains("猫が好きです"))
+        assertEquals("ja", asked.source)
+        assertEquals("fr", asked.target)
+        assertEquals("猫が好きです", asked.sentence)
+    }
+
+    @Test fun `a word question's user message is its wording, the sentence, then the answer's language`() {
+        val asked = AskPrompts.build(eat, sentence)
+
+        assertEquals("${asked.question}\n\n猫が好きです\n\nAnswer in French (français, fr).", asked.user)
+        assertEquals(
+            "the system message is the one every question has",
+            AskPrompts.build(AskQuestion.Custom("Q?"), sentence).system,
+            asked.system,
+        )
+    }
+
+    @Test fun `a word that reads like a token is not expanded`() {
+        val tricky = AskQuestion.Word("{text}", "{source}", listOf("{question}"), "t")
+
+        val asked = AskPrompts.build(tricky, sentence)
+
+        assertTrue(asked.question, asked.question.contains("\"{text}\" (read {source}; it appears here as \"{question}\")"))
+        // The sentence appears once: where the frame puts it, not again
+        // where the word said {text}.
+        assertEquals(asked.user, 1, count(asked.user, "猫が好きです"))
+    }
+
+    @Test fun `a word question's title is the one it was given`() {
+        assertEquals("In this sentence", eat.title)
     }
 }

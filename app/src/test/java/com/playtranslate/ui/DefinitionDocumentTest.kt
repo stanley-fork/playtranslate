@@ -230,6 +230,43 @@ class DefinitionDocumentTest {
         assertEquals("a row the document does not hold is no tap", 1, actions.size)
     }
 
+    @Test fun `a cursor on an answer's X moves to the row's explain button when the X goes, and the page is told`() {
+        doc.setRows(rows(2), "ja")
+        pageReady()
+        val head = """"k0","open",0,0,300,100,"k0","explain",120,5,36,40,"k0","speak",180,5,36,40"""
+        val other = """"k1","open",0,100,300,100"""
+        layout(1, 200, "[$head,\"k0\",\"explain:close\",250,45,36,32,$other]")
+        doc.setCursor(doc.targets.first { it.act == DefAction.EXPLAIN_CLOSE })
+        val key = KeyEvent(KeyEvent.ACTION_DOWN, KeyEvent.KEYCODE_BUTTON_A)
+
+        // The X was pressed and the page lays the row out without the answer.
+        view.onKeyDown(KeyEvent.KEYCODE_BUTTON_A, key)
+        assertEquals(listOf("w0" to DefAction.EXPLAIN_CLOSE), actions)
+        layout(1, 200, "[$head,$other]")
+
+        assertTrue("the page draws the highlight from its own copy: ${sent()}", sent().contains("ptCursor(\"k0\",\"explain\")"))
+        view.onKeyDown(KeyEvent.KEYCODE_BUTTON_A, key)
+        assertEquals("the next press is the button's", "w0" to DefAction.EXPLAIN, actions.last())
+    }
+
+    @Test fun `a cursor on any other target that goes is dropped, and the next press does nothing`() {
+        doc.setRows(rows(2), "ja")
+        pageReady()
+        layout(1, 200, """["k0","",0,0,300,100,"k0","remove:0",250,5,36,32,"k0","remove:1",250,45,36,32,"k0","remove",250,85,36,32]""")
+        doc.setCursor(doc.targets.first { it.act == DefAction.removeItem(1) })
+        val told = sent()
+        val key = KeyEvent(KeyEvent.ACTION_DOWN, KeyEvent.KEYCODE_BUTTON_A)
+        view.onKeyDown(KeyEvent.KEYCODE_BUTTON_A, key)
+        assertEquals(listOf("w0" to DefAction.removeItem(1)), actions)
+
+        // The item is gone; the others' X are where they were.
+        layout(1, 160, """["k0","",0,0,300,100,"k0","remove:0",250,5,36,32,"k0","remove",250,45,36,32]""")
+
+        assertEquals("the page was told nothing new", told, sent())
+        assertFalse("no cursor: the key is not this document's", view.onKeyDown(KeyEvent.KEYCODE_BUTTON_A, key))
+        assertEquals("and nothing else was removed", 1, actions.size)
+    }
+
     @Test fun `the row at a height is the one it falls in, and in two columns the first of its line`() {
         doc.setRows(rows(4), "ja")
         pageReady()

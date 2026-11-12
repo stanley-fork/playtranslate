@@ -67,6 +67,49 @@ class DocNavTest {
         assertEquals(t("a", DefAction.OPEN), next(t("z", DefAction.OPEN), DocNav.Dir.DOWN))
     }
 
+    // ── Where a cursor stands after a layout ([DocNav.settle]) ───────────
+
+    private val answered = listOf(
+        t("a", DefAction.OPEN), t("a", DefAction.EXPLAIN), t("a", DefAction.SPEAK),
+        t("a", DefAction.EXPLAIN_CLOSE), t("a", DefAction.EXPLAIN_RETRY),
+        t("b", DefAction.OPEN), t("b", DefAction.EXPLAIN),
+    )
+    private val put_away = answered.filterNot { it.act == DefAction.EXPLAIN_CLOSE || it.act == DefAction.EXPLAIN_RETRY }
+
+    @Test fun `a cursor stays on its target while the page lays it out`() {
+        for (target in answered) assertEquals(target, DocNav.settle(answered, target.rowId, target.act))
+    }
+
+    @Test fun `an explain answer's own buttons leave the cursor on their row's explain button when they go`() {
+        assertEquals(t("a", DefAction.EXPLAIN), DocNav.settle(put_away, "a", DefAction.EXPLAIN_CLOSE))
+        assertEquals(t("a", DefAction.EXPLAIN), DocNav.settle(put_away, "a", DefAction.EXPLAIN_RETRY))
+        // In their own row, never another's; and nowhere when that button went too.
+        assertNull(DocNav.settle(listOf(t("b", DefAction.OPEN), t("b", DefAction.EXPLAIN)), "a", DefAction.EXPLAIN_CLOSE))
+        assertNull(DocNav.settle(listOf(t("a", DefAction.OPEN), t("a", DefAction.SPEAK)), "a", DefAction.EXPLAIN_CLOSE))
+    }
+
+    @Test fun `any other target that is gone leaves the cursor nowhere, a removing X above all`() {
+        val row = listOf(t("a", ""), t("a", DefAction.removeItem(0)), t("a", DefAction.REMOVE), t("a", DefAction.SPEAK))
+        // A cursor that walked on by itself would stand on another X, and the
+        // next press would remove a second thing.
+        assertNull(DocNav.settle(row, "a", DefAction.removeItem(1)))
+        for (act in listOf(DefAction.EXPLAIN, DefAction.OPEN, DefAction.TRAILING, DefAction.dictionary(2), DefAction.MORE)) {
+            assertNull(act, DocNav.settle(row, "a", act))
+        }
+    }
+
+    @Test fun `only an explain answer's own buttons name a fallback`() {
+        assertEquals(DefAction.EXPLAIN, DefAction.fallback(DefAction.EXPLAIN_CLOSE))
+        assertEquals(DefAction.EXPLAIN, DefAction.fallback(DefAction.EXPLAIN_RETRY))
+        for (act in listOf(
+            DefAction.EXPLAIN, DefAction.OPEN, DefAction.SPEAK, DefAction.TRAILING, DefAction.hold(DefAction.TRAILING),
+            DefAction.MORE, DefAction.TARGET, DefAction.AUDIO, DefAction.SOURCE, DefAction.REMOVE,
+            DefAction.removeItem(3), DefAction.dictionary(0), DefAction.OWN_DICTIONARY, "",
+        )) {
+            assertNull(act, DefAction.fallback(act))
+        }
+    }
+
     @Test fun `no targets, no cursor`() {
         assertNull(DocNav.next(listOf(t("d", "")), null, DocNav.Dir.DOWN, false))
     }
