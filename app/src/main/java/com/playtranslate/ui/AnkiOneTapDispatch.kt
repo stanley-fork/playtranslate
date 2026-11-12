@@ -311,6 +311,8 @@ suspend fun Context.oneTapSendSentence(
         sourceLangId = sourceLangId,
         screenshot = screenshotPath?.let { ScreenshotAttachment(it) },
         includeSentenceAudio = prefs.ankiSentenceAudioEnabled,
+        // One-tap has no sheet, so there is no note to type.
+        notes = "",
         // Audio selections stay at their Auto defaults — the registry's
         // Commons-first → TTS resolution with the user's saved voice,
         // exactly what a freshly-opened sheet sends. (One-tap used to
@@ -362,6 +364,8 @@ suspend fun Context.oneTapSendWord(
         sourceLangId = sourceLangId,
         screenshot = screenshotPath?.let { ScreenshotAttachment(it) },
         includeWordAudio = prefs.ankiWordAudioEnabled,
+        // One-tap has no sheet, so there is no note to type.
+        notes = "",
         // wordSelection stays Auto — saved-voice TTS (Commons-first when
         // enabled), matching the sheet's default cell.
         definition = WordCardDefinition(

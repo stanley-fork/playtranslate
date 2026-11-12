@@ -65,6 +65,47 @@ private val ModelTarget.holdsPicture: Boolean
             model.fieldNames.any { mapping[it] == ContentSource.PICTURE }
     }
 
+/** True when a note assembled for this target has somewhere to put the
+ *  note the user typed ([NotesDestination]). False sends nothing of it, so
+ *  the dispatcher asks first ([notesNeedConsent]). */
+private val ModelTarget.holdsNotes: Boolean
+    get() = when (this) {
+        is ModelTarget.Default -> NotesDestination.ownModel(model.fieldNames)
+        is ModelTarget.Basic -> NotesDestination.basic(model.fieldNames)
+        is ModelTarget.Structured -> NotesDestination.mapped(model.fieldNames, mapping)
+    }
+
+/**
+ * Where a typed note lands on each kind of card type, read the way the
+ * assemblers write it, so "has a place" here and "was written" there cannot
+ * disagree.
+ */
+internal object NotesDestination {
+    /** Our own note type: [PtModels.assemble] keys the value on this field
+     *  name, so a model whose Notes field the user renamed or removed (or
+     *  a retired generation that never had one, reached as the default
+     *  through a stale name) takes no note. */
+    const val OWN_FIELD = "Notes"
+
+    fun ownModel(fieldNames: List<String>): Boolean = OWN_FIELD in fieldNames
+
+    /** Basic: [AnkiCardTypeMapper.assembleBasicNote] puts the note under
+     *  the Back's content. */
+    fun basic(fieldNames: List<String>): Boolean = "Back" in fieldNames
+
+    /** A mapped note type: a field the model has NOW is set to
+     *  [ContentSource.NOTES]. Per live field name, as
+     *  [AnkiCardTypeMapper.assembleNote] reads the mapping, so a stale
+     *  entry left behind by a renamed field is no destination. */
+    fun mapped(fieldNames: List<String>, mapping: Map<String, ContentSource>): Boolean =
+        fieldNames.any { mapping[it] == ContentSource.NOTES }
+}
+
+/** The send must ask before it goes on: the user typed a note and the card
+ *  type has nowhere to put it. A blank note asks nothing. */
+internal fun notesNeedConsent(hasNotes: Boolean, holdsNotes: Boolean): Boolean =
+    hasNotes && !holdsNotes
+
 /**
  * Result of an attempted Anki send. Callers map this to user-visible
  * Toast / dismiss behavior.
@@ -111,11 +152,13 @@ sealed interface AnkiSendResult {
      *  threading it through avoids a prefs-race if the user changes
      *  the card type between dispatch and follow-up. */
     data class NeedsMapping(val model: AnkiManager.ModelInfo) : AnkiSendResult
-    /** The user declined the oversize prompt (chose not to send a
-     *  simplified card). Nothing was uploaded or inserted — the probe
-     *  runs before the media pass — so callers just restore the save
-     *  button, silently: the user made this choice a moment ago and
-     *  needs no alert re-explaining it. */
+    /** The user declined a prompt the send put to them: the oversize one
+     *  (chose not to send a simplified card) or the notes one (chose not
+     *  to save a card that cannot hold their note). Nothing was uploaded
+     *  or inserted — both run before the media pass — so callers just
+     *  restore the save button, silently: the user made this choice a
+     *  moment ago and needs no alert re-explaining it. The sheet stays
+     *  open as it was, the typed note included. */
     data object Declined : AnkiSendResult
 }
 
@@ -237,6 +280,18 @@ suspend fun Context.dispatchSendToAnki(
      *  no card on a flow the user isn't watching. Runs BEFORE the media
      *  pass, so declining uploads nothing and orphans nothing. */
     oversizePrompt: (suspend () -> Boolean)? = null,
+    /** The user typed a note for this card (non-blank). The note itself
+     *  rides inside [ptNote] / [structured]; this says there is one. */
+    hasNotes: Boolean = false,
+    /** Asked when [hasNotes] and the resolved card type has no field to
+     *  hold a note ([ModelTarget.holdsNotes]): return true to save the
+     *  card without it, false to abort ([AnkiSendResult.Declined]), which
+     *  leaves the sheet open with the note intact (2026-11-11: a typed
+     *  note is never dropped unasked). Null sends: one-tap, the only
+     *  caller that passes none, has no sheet and so never has a note.
+     *  Runs BEFORE the size probe and the media pass, so declining
+     *  uploads nothing and orphans nothing. */
+    notesPrompt: (suspend () -> Boolean)? = null,
 ): AnkiSendResult {
     val ctx = this
     val prefs = Prefs(ctx)
@@ -337,6 +392,14 @@ suspend fun Context.dispatchSendToAnki(
                 ModelTarget.Structured(picked, mapping)
             }
         }
+    }
+
+    // A typed note with nowhere to go: ask before anything else is spent
+    // on this send. First of the two prompts, because the answer decides
+    // whether there is a send at all, where the oversize one only decides
+    // its fidelity.
+    if (notesNeedConsent(hasNotes, target.holdsNotes) && notesPrompt?.invoke() == false) {
+        return AnkiSendResult.Declined
     }
 
     // Pure per-target field assembly, shared by the size probe below and

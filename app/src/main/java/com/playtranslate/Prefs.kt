@@ -1436,6 +1436,11 @@ class Prefs internal constructor(
         // before those Yomitan-derived sources existed — see
         // [migrateAnkiPitchFreqFieldMappings].
         migrateAnkiPitchFreqFieldMappings()
+
+        // Move saved Lapis / JPMN mappings onto the Yomitan-format definition
+        // sources and the Notes source — see
+        // [migrateAnkiGlossaryNotesFieldMappings].
+        migrateAnkiGlossaryNotesFieldMappings()
     }
 
     /**
@@ -1562,6 +1567,61 @@ class Prefs internal constructor(
         }
 
         sp.edit { putBoolean(KEY_ANKI_PITCH_FREQ_MAPPING_MIGRATED, true) }
+    }
+
+    /**
+     * One-shot move of saved Lapis and JPMN field mappings onto the sources
+     * added in 2026-11: Lapis's `MainDefinition` and `Glossary` take the
+     * definitions in Yomitan's own markup, and Lapis's `MiscInfo` and JPMN's
+     * `AdditionalNotes` take the user's typed note.
+     *
+     * Same reason as [migrateAnkiPitchFreqFieldMappings]: [getAnkiFieldMapping]
+     * is authoritative once non-empty, so a card type configured before the
+     * sources existed would never pick up the new template defaults. Which
+     * fields move, and why Lapis's two definition fields only move as a pair,
+     * is [com.playtranslate.ui.AnkiCardTypeMapper.withGlossaryAndNotesSources],
+     * applied here to every saved mapping. Each stored name is read the way
+     * [getAnkiFieldMapping] reads it ([resolveContentSourceName]), and a field
+     * that is not rewritten keeps its stored text untouched. Gated on
+     * [KEY_ANKI_GLOSSARY_NOTES_MAPPING_MIGRATED] so it runs exactly once.
+     */
+    private fun migrateAnkiGlossaryNotesFieldMappings() {
+        if (sp.contains(KEY_ANKI_GLOSSARY_NOTES_MAPPING_MIGRATED)) return
+
+        val raw = sp.getString(KEY_ANKI_FIELD_MAPPINGS, null)
+        if (raw != null) {
+            try {
+                val root = JSONObject(raw)
+                var changed = false
+                val modelIds = root.keys()
+                while (modelIds.hasNext()) {
+                    val obj = root.optJSONObject(modelIds.next()) ?: continue
+                    val saved = buildMap {
+                        val fieldNames = obj.keys()
+                        while (fieldNames.hasNext()) {
+                            val fieldName = fieldNames.next()
+                            put(fieldName, resolveContentSourceName(obj.optString(fieldName)))
+                        }
+                    }
+                    val moved = com.playtranslate.ui.AnkiCardTypeMapper.withGlossaryAndNotesSources(saved)
+                    for ((fieldName, source) in moved) {
+                        if (saved[fieldName] != source) {
+                            obj.put(fieldName, source.name)
+                            changed = true
+                        }
+                    }
+                }
+                if (changed) {
+                    sp.edit { putString(KEY_ANKI_FIELD_MAPPINGS, root.toString()) }
+                }
+            } catch (_: Exception) {
+                // Corrupt JSON — getAnkiFieldMapping already degrades it to an
+                // empty mapping; set the marker rather than re-parsing a broken
+                // blob on every launch.
+            }
+        }
+
+        sp.edit { putBoolean(KEY_ANKI_GLOSSARY_NOTES_MAPPING_MIGRATED, true) }
     }
 
     /** Hotkey combo for hold-to-show translations. Empty = not set. Format: keyCodes joined by "+". */
@@ -2028,6 +2088,7 @@ class Prefs internal constructor(
         private const val KEY_ANKI_GAME_AUDIO      = "anki_game_audio_enabled"
         private const val KEY_ANKI_AUDIO_MAPPING_MIGRATED = "anki_audio_mapping_migrated"
         private const val KEY_ANKI_PITCH_FREQ_MAPPING_MIGRATED = "anki_pitch_freq_mapping_migrated"
+        private const val KEY_ANKI_GLOSSARY_NOTES_MAPPING_MIGRATED = "anki_glossary_notes_mapping_migrated"
         private const val KEY_REGION_LIST    = "region_list"
         const val KEY_DEEPL_KEY              = "deepl_api_key"
         private const val KEY_SECRETS_ENCRYPTED_MIGRATED = "secrets_encrypted_migrated"

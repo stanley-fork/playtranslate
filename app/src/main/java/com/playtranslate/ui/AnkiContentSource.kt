@@ -64,6 +64,10 @@ enum class ContentSource(
                           R.string.anki_content_part_of_speech_desc),
     WORDS_TABLE          (R.string.anki_content_words_table,
                           R.string.anki_content_words_table_desc),
+    // The user's own free-text note for the card, typed on the review
+    // sheet; "" on a one-tap send, which has no sheet.
+    NOTES                (R.string.anki_content_notes,
+                          R.string.anki_content_notes_desc),
 
     // Yomitan-derived (JA) sources for mining-note pitch/frequency slots,
     // populated post-lookup from Headword.pitch / .frequencies.
@@ -87,6 +91,19 @@ enum class ContentSource(
                           R.string.anki_content_frequency_stylized_desc),
     FREQUENCY_HARMONIC   (R.string.anki_content_frequency_harmonic,
                           R.string.anki_content_frequency_harmonic_desc),
+
+    // The word's definitions in Yomitan's own card markup
+    // ([CardGlossary.yomitanHtml]), for note types made for Yomitan, which
+    // style that markup and script against it themselves. Two sources
+    // because such a note type splits them the way Lapis does:
+    // GLOSSARY_PRIMARY is the first dictionary alone (Lapis
+    // `MainDefinition`), GLOSSARY every dictionary (Lapis `Glossary`).
+    // Distinct from DEFINITION above, which is OUR panel, self-styled, for
+    // a note type with no CSS for either shape.
+    GLOSSARY             (R.string.anki_content_glossary,
+                          R.string.anki_content_glossary_desc),
+    GLOSSARY_PRIMARY     (R.string.anki_content_glossary_primary,
+                          R.string.anki_content_glossary_primary_desc),
 
     // Card-type state flags. Each emits literal "x" when its mode
     // condition fires (computed inside AnkiCardOutputBuilder), empty
@@ -134,6 +151,12 @@ data class CardOutputs(
     val frequency: String,
     val partOfSpeech: String,
     val wordsTable: String,
+    /** The user's typed note, as a field value ([notesFieldHtml]). */
+    val notes: String,
+    /** Every dictionary's definitions in Yomitan's markup. */
+    val glossary: String,
+    /** The first dictionary's definitions in Yomitan's markup. */
+    val glossaryPrimary: String,
     val pitchPosition: String,
     val frequencyValues: String,
     val frequencyStylized: String,
@@ -160,6 +183,9 @@ fun CardOutputs.valueFor(source: ContentSource): String = when (source) {
     ContentSource.FREQUENCY                   -> frequency
     ContentSource.PART_OF_SPEECH              -> partOfSpeech
     ContentSource.WORDS_TABLE                 -> wordsTable
+    ContentSource.NOTES                       -> notes
+    ContentSource.GLOSSARY                    -> glossary
+    ContentSource.GLOSSARY_PRIMARY            -> glossaryPrimary
     ContentSource.PITCH_POSITION              -> pitchPosition
     ContentSource.FREQUENCY_VALUES            -> frequencyValues
     ContentSource.FREQUENCY_STYLIZED          -> frequencyStylized

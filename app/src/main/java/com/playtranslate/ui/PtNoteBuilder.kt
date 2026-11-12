@@ -39,6 +39,8 @@ internal object PtNoteBuilder {
         imageFilename: String?,
         audioFilename: String?,
         audioCredit: String?,
+        /** The note the user typed on the sheet, raw; "" for one-tap. */
+        notes: String,
     ): PtNote.Word = PtNote.Word(
         expression = htmlEscape(word),
         reading = htmlEscape(reading),
@@ -58,6 +60,7 @@ internal object PtNoteBuilder {
         picture = pictureHtml(imageFilename),
         wordAudio = soundTag(audioFilename),
         audioCredit = creditHtml(audioCredit),
+        notes = notesFieldHtml(notes),
     )
 
     fun forSentence(
@@ -93,6 +96,9 @@ internal object PtNoteBuilder {
         /** dictId -> raw styles.css; scoped and inlined as <style> when a
          *  structured sense from that dictionary renders (Tier 2). */
         dictStyles: Map<String, String> = emptyMap(),
+        /** dictId -> the dictionary's own title, the `data-dictionary` of a
+         *  structured row ([CardGlossary]). */
+        dictTitles: Map<String, String> = emptyMap(),
     ): PtNote.Sentence {
         val firstHighlighted = cardData.words.firstOrNull {
             it.word in cardData.selectedWords
@@ -130,6 +136,7 @@ internal object PtNoteBuilder {
             renderMisc = renderMisc,
             structuredGlossaries = structuredGlossaries,
             dictStyles = dictStyles,
+            dictTitles = dictTitles,
         )
         return PtNote.Sentence(
             sentence = SentenceAnkiHtmlBuilder.buildSentencePlain(
@@ -153,6 +160,7 @@ internal object PtNoteBuilder {
             picture = pictureHtml(imageFilename),
             sentenceAudio = soundTag(audioFilename),
             audioCredit = creditHtml(audioCredit),
+            notes = notesFieldHtml(cardData.notes),
         )
     }
 

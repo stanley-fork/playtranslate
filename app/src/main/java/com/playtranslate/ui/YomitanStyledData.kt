@@ -30,12 +30,16 @@ class YomitanStyledData(
  * the sentence sheet's shape, where only the flattened form survived the
  * enrichment transport. Groups by consecutive dictId; the group label is
  * the header's source prefix (the part before " · "), per-sense pos is the
- * suffix. Non-imported rows are skipped.
+ * suffix. Non-imported rows are skipped. The first imported row always
+ * opens a group: its dictId can be null (a legacy or synthetic group), which
+ * is also what "no group yet" would compare equal to, and a run that never
+ * opened would keep no label.
  */
 internal fun importedGroupsFromSenses(
     senses: List<SenseDisplay>,
 ): List<com.playtranslate.model.ImportedSenseGroup> {
     val groups = mutableListOf<com.playtranslate.model.ImportedSenseGroup>()
+    var opened = false
     var curDict: String? = null
     var curSource = ""
     var curAccent: Int? = null
@@ -55,8 +59,9 @@ internal fun importedGroupsFromSenses(
         val header = s.pos.firstOrNull().orEmpty()
         val source = header.substringBefore(" · ")
         val pos = header.substringAfter(" · ", "")
-        if (s.dictId != curDict) {
+        if (!opened || s.dictId != curDict) {
             flush()
+            opened = true
             curDict = s.dictId
             curSource = source
             curAccent = s.accentColor
@@ -155,6 +160,46 @@ private suspend fun containedStyledFetch(
     // Class only: no message (it may carry a path), no content.
     android.util.Log.w(TAG, "fetch($sourceLanguage) failed, rendering flat: ${e.javaClass.simpleName}")
     null
+}
+
+/**
+ * Each of [dictIds]' own dictionary title (its index.json `title`), the
+ * value a card's `data-dictionary` carries ([CardGlossary]).
+ */
+internal suspend fun fetchDictionaryTitles(
+    ctx: Context,
+    sourceLanguage: String,
+    dictIds: Collection<String>,
+): Map<String, String> = containedTitles(sourceLanguage, dictIds) {
+    YomitanDataStore.termDictionaryTitles(ctx, sourceLanguage)
+}
+
+/**
+ * The titles [read] returns for [dictIds], with the two rules a send
+ * depends on. Empty ids are skipped, and with none left [read] is never
+ * called, so a send with no imported definition does not touch the store.
+ * And the read is contained like the styled fetch, for the same reason (the
+ * pipelines' one-tap hosts run detached with no handler): any failure but
+ * cancellation is an empty map, and a definition whose title is missing is
+ * tagged with its dictionary's label instead. A title must never cost the
+ * card.
+ */
+internal suspend fun containedTitles(
+    sourceLanguage: String,
+    dictIds: Collection<String>,
+    read: suspend () -> Map<String, String>,
+): Map<String, String> {
+    val wanted = dictIds.filterTo(mutableSetOf()) { it.isNotEmpty() }
+    if (wanted.isEmpty()) return emptyMap()
+    return try {
+        read().filterKeys { it in wanted }
+    } catch (e: CancellationException) {
+        throw e
+    } catch (e: Exception) {
+        // Class only: no message (it may carry a path), no content.
+        android.util.Log.w(TAG, "titles($sourceLanguage) failed, using labels: ${e.javaClass.simpleName}")
+        emptyMap()
+    }
 }
 
 /** Fetches the styled payload for [groups], or null when the styled path

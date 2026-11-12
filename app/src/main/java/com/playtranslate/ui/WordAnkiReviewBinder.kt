@@ -8,6 +8,7 @@ import android.util.TypedValue
 import android.view.Gravity
 import android.view.LayoutInflater
 import android.view.View
+import android.widget.EditText
 import android.widget.FrameLayout
 import android.widget.ImageView
 import android.widget.LinearLayout
@@ -133,6 +134,10 @@ class WordAnkiReviewBinder(
     private lateinit var wordContainer: LinearLayout
     private var definitionsCard: LinearLayout? = null
 
+    /** The word tab's Notes box ([addAnkiNotesSection]); its text is read at
+     *  send time. The sentence tab's is its content view's own. */
+    private var wordNotesField: EditText? = null
+
     /** Handle to the word-tab Audio card. The switch state is read at
      *  send time; the pill label is refreshed after a picker pick. */
     private var wordAudioHandle: AnkiAudioToggleHandle? = null
@@ -247,6 +252,7 @@ class WordAnkiReviewBinder(
         definitionsDoc = null
         definitionsPlaceholder = null
         definitionsCard = null
+        wordNotesField = null
         moreExamplesGroup = null
         moreExamplesBody = null
         wordReadingView = null
@@ -631,6 +637,12 @@ class WordAnkiReviewBinder(
         } else {
             definitionsPlaceholder = buildLoadingDefinitionsRow(fallbackDefinition).also { defCard.addView(it) }
         }
+
+        // ── Notes, under the definitions: the user's own note for this
+        //    card. "More examples" arrives later and inserts itself above
+        //    the screenshot group, so the tab reads Definitions, Notes,
+        //    More examples, Screenshot.
+        wordNotesField = addAnkiNotesSection(parent, R.id.etAnkiWordNotes)
 
         // ── Screenshot group (when present): follows the shared state. ──
         screenshot?.let { s ->
@@ -1373,6 +1385,7 @@ class WordAnkiReviewBinder(
             // opened is what ships.
             screenshot = screenshot?.attachment,
             includeWordAudio = wordAudioHandle?.switch?.isChecked == true,
+            notes = wordNotesField?.text?.toString().orEmpty(),
             // Multi-source selection (Commons-first → TTS) for the headword,
             // mirroring the sentence cell. Auto unless the user pinned a pick.
             wordSelection = wordSelection,
@@ -1381,9 +1394,11 @@ class WordAnkiReviewBinder(
             inlineMoreExamplesHtml = inlineMoreExamplesHtml,
             inlineExamplesHtml = buildExamplesHtml(inlineStyler),
         )
-        val result = ctx.sendWordCard(input, deckId, oversizePrompt = {
-            awaitOversizeConsent(ctx, host::presentAlert)
-        })
+        val result = ctx.sendWordCard(
+            input, deckId,
+            oversizePrompt = { awaitOversizeConsent(ctx, host::presentAlert) },
+            notesPrompt = { awaitNotesDropConsent(ctx, host::presentAlert) },
+        )
         // NeedsMapping presentation is the host's (the Fragment wrapper's
         // mapping dialog / the workspace's mapping page).
         if (result is AnkiSendResult.NeedsMapping) {
@@ -1465,27 +1480,18 @@ class WordAnkiReviewBinder(
         // A card saved mid-fill would ship without its words table, or
         // without its own word placed.
         wordsFillJob?.join()
-        val data = content.getCardData()
-        val input = SentenceSendInput(
-            original = data.source,
-            translation = data.target,
-            words = data.words,
-            selectedWords = data.selectedWords,
-            sourceLangId = data.sourceLangId,
-            screenshot = data.screenshot,
+        val input = content.getCardData().toSendInput(
             includeSentenceAudio = content.sentenceAudioEnabled,
-            targetWordAudioWords = data.targetWordAudioWords,
-            sentenceSelection = data.sentenceSelection,
-            wordSelections = data.wordSelections,
             // The word editor's sentence tab carries Tatoeba "more examples"
             // for the structured path. Built with inlineStyler since the
             // structured outputs have no surrounding <style> block.
             examplesHtml = buildExamplesHtml(inlineStyler),
-            readingOverride = data.readingOverride,
         )
-        val result = ctx.sendSentenceCard(input, deckId, oversizePrompt = {
-            awaitOversizeConsent(ctx, host::presentAlert)
-        })
+        val result = ctx.sendSentenceCard(
+            input, deckId,
+            oversizePrompt = { awaitOversizeConsent(ctx, host::presentAlert) },
+            notesPrompt = { awaitNotesDropConsent(ctx, host::presentAlert) },
+        )
         if (result is AnkiSendResult.NeedsMapping) {
             host.openFieldMapping(result.model, CardMode.SENTENCE)
         }

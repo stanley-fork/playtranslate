@@ -24,6 +24,16 @@ class WordCardDefinitionTest {
     private val header = "Definitions"
     private val noMisc: (List<String>) -> String? = { null }
 
+    /** The panel of this card's rows: the Definition field the word card
+     *  and the `DEFINITION` source ship. */
+    private fun WordCardDefinition.panelHtml(
+        styler: HtmlStyler,
+        styled: YomitanStyledData?,
+        header: String,
+        renderMisc: (List<String>) -> String?,
+        titles: Map<String, String> = emptyMap(),
+    ): String = glossary(styled, titles, CardGlossary.RAW_POS, renderMisc).panelHtml(styler, header)
+
     private fun entry(
         imported: List<ImportedSenseGroup> = emptyList(),
         senses: List<Sense> = emptyList(),
@@ -67,16 +77,22 @@ class WordCardDefinitionTest {
         )
         assertEquals(listOf(jitendex), def.importedGroups)
 
-        val html = def.panelHtml(classStyler, styled(mapOf("d1" to "li{color:red}")), header, noMisc)
+        val html = def.panelHtml(
+            classStyler, styled(mapOf("d1" to "li{color:red}")), header, noMisc,
+            titles = mapOf("d1" to "Jitendex.org [2025]"),
+        )
 
         assertTrue(html, html.contains("gl-sc"))
-        assertTrue(html, html.contains("data-dictionary=\"d1\""))
+        // The tag and the stylesheet's scope are the dictionary's title,
+        // never our id.
+        assertTrue(html, html.contains("data-dictionary=\"Jitendex.org [2025]\""))
         assertTrue(html, html.contains("<li"))
         assertFalse("structured sense must replace its flat text", html.contains("cat (flat)"))
         assertTrue("pack senses still render", html.contains("a cat"))
         assertTrue(html, html.contains("<style>"))
-        assertTrue(html, html.contains(".gl-sc[data-dictionary=\"d1\"] li"))
-        assertTrue("dictionary label rides the imported row", html.contains("Jitendex"))
+        assertTrue(html, html.contains(".gl-sc[data-dictionary=\"Jitendex.org [2025]\"] li"))
+        assertFalse(html, html.contains("d1"))
+        assertTrue("dictionary label rides the imported row", html.contains(">Jitendex · n</div>"))
     }
 
     @Test
@@ -98,7 +114,8 @@ class WordCardDefinitionTest {
         val def = WordCardDefinition(fallback = "1. cat\n2. kitten")
 
         assertEquals(
-            WordAnkiHtmlBuilder.wrapFlatDefinitionHtml("1. cat\n2. kitten", classStyler, header),
+            "<div class=\"gl-section\">Definitions</div><div class=\"gl-panel\">" +
+                "<div class=\"gl-gloss\" style=\"padding:14px 0;\">1. cat<br>2. kitten</div></div>",
             def.panelHtml(classStyler, null, header, noMisc),
         )
         assertTrue(def.importedGroups.isEmpty())
@@ -150,6 +167,67 @@ class WordCardDefinitionTest {
         assertFalse(html, html.contains("there is a kitten"))
         assertTrue("surviving sense numbers from 1", html.contains(">1</span>"))
         assertFalse(html, html.contains(">2</span>"))
+    }
+
+    // An example the editor removed is named by its sense's flat index and
+    // its own place among that sense's examples, before any was removed;
+    // the editor's translation of a kept one is named the same way.
+    // Mutations: keep a removed example; index the examples after removal,
+    // so the translation of example 2 lands on what is now example 1.
+    @Test
+    fun `an example removed in the editor stays off the card and the others keep their own translations`() {
+        val def = WordCardDefinition(
+            fallback = "fallback",
+            entry = entry(
+                senses = listOf(
+                    sense("a cat"),
+                    sense(
+                        "kitten",
+                        examples = listOf(
+                            Example("一つ目", "the first"),
+                            Example("二つ目", "the second"),
+                            Example("三つ目", "the third"),
+                        ),
+                    ),
+                ),
+            ),
+            removedExamples = setOf(1 to 1),
+            exampleTranslations = mapOf((1 to 2) to "la troisième"),
+        )
+
+        val row = def.glossary(null, emptyMap(), CardGlossary.RAW_POS, noMisc).items.last()
+
+        assertEquals(
+            listOf(Example("一つ目", "the first"), Example("三つ目", "la troisième")),
+            row.examples,
+        )
+    }
+
+    // The target-language rows carry their own examples and are curated
+    // by their place in sense order.
+    // Mutation: keep a removed example of a target-language row.
+    @Test
+    fun `a target-language row drops the example removed from it`() {
+        val e = entry(senses = listOf(sense("a cat")))
+        val native = com.playtranslate.language.DefinitionResult.Native(
+            response = com.playtranslate.model.DictionaryResponse(listOf(e)),
+            targetSenses = listOf(
+                com.playtranslate.language.TargetSense(
+                    0, listOf("nom"), listOf("chat"), "src",
+                    examples = listOf(Example("Le chat dort.", "The cat sleeps."), Example("Un chat.", "A cat.")),
+                ),
+            ),
+            source = "src",
+        )
+        val def = WordCardDefinition(
+            fallback = "fallback", entry = e, defResult = native, targetLang = "fr",
+            removedExamples = setOf(0 to 0),
+        )
+
+        val row = def.glossary(null, emptyMap(), CardGlossary.RAW_POS, noMisc).items.single()
+
+        assertEquals("chat", row.text)
+        assertEquals(listOf(Example("Un chat.", "A cat.")), row.examples)
     }
 
     @Test
@@ -244,11 +322,17 @@ class WordCardDefinitionTest {
             dictStyles = mapOf("d1" to "li{color:red}", "d2" to "li{color:blue}"),
         )
 
-        val html = def.panelHtml(classStyler, st, header, noMisc)
+        val html = def.panelHtml(
+            classStyler, st, header, noMisc,
+            titles = mapOf("d1" to "Jitendex.org", "d2" to "大辞林"),
+        )
 
-        assertTrue(html, html.contains("data-dictionary=\"d2\""))
-        assertTrue(html, html.contains(".gl-sc[data-dictionary=\"d2\"] li"))
-        assertFalse("neither a gl-sc block nor a style selector names d1", html.contains("data-dictionary=\"d1\""))
+        assertTrue(html, html.contains("data-dictionary=\"大辞林\""))
+        assertTrue(html, html.contains(".gl-sc[data-dictionary=\"大辞林\"] li"))
+        assertFalse(
+            "neither a gl-sc block nor a style selector names the removed dictionary",
+            html.contains("data-dictionary=\"Jitendex.org\""),
+        )
     }
 
     // Mutation: compute hasImportedRows from entry.importedSenses, so the removed row still counts and the card renders empty.
@@ -331,13 +415,29 @@ class WordCardDefinitionTest {
         )
     }
 
+    // Mutation: open a group only when the dictionary id differs from the
+    // last one, so a first row with no id never opens one and its label is "".
+    @Test
+    fun `a leading run of rows with no dictionary id keeps its label`() {
+        val rows = listOf(
+            SenseDisplay(pos = listOf("Legacy · x"), definition = "legacy def", misc = emptyList(), imported = true),
+            importedRow,
+        )
+
+        val groups = importedGroupsFromSenses(rows)
+        assertEquals(listOf("Legacy", "Jitendex"), groups.map { it.source })
+        assertEquals(listOf("", "d1"), groups.map { it.dictId })
+        val html = WordCardDefinition.fromSenses("猫", rows, fallback = "f").panelHtml(classStyler, null, header, noMisc)
+        assertTrue(html, html.contains(">Legacy · x</div>"))
+    }
+
     @Test
     fun `fromSenses with no rows is the flat fallback description`() {
         val def = WordCardDefinition.fromSenses("猫", emptyList(), fallback = "1. cat\n2. kitten")
 
         assertTrue(def.importedGroups.isEmpty())
         assertEquals(
-            WordAnkiHtmlBuilder.wrapFlatDefinitionHtml("1. cat\n2. kitten", inlineStyler, header),
+            WordCardDefinition(fallback = "1. cat\n2. kitten").panelHtml(inlineStyler, null, header, noMisc),
             def.panelHtml(inlineStyler, null, header, noMisc),
         )
     }

@@ -171,6 +171,11 @@ object YomitanDataStore {
         /** TERMS section's (dict id, group label) in display order — every
          *  dict with definitions for a word contributes a group. */
         val termDicts: List<Pair<String, String>>,
+        /** TERMS section's dict id to the dictionary's own title (its
+         *  index.json `title`, never the alias). A card tags a definition
+         *  with this: it is what Yomitan writes, and so what a note type
+         *  made for Yomitan styles by ([com.playtranslate.ui.CardGlossary]). */
+        val termDictTitles: Map<String, String>,
         /** User toggle: only the highest-priority TERMS dict with results
          *  contributes its group (see [TermMerge.merge]). */
         val termsSingleDictionary: Boolean,
@@ -460,6 +465,13 @@ object YomitanDataStore {
     suspend fun hasTermDictionaries(ctx: Context, sourceLanguage: String): Boolean =
         withContext(Dispatchers.IO) {
             ready(ctx, sourceLanguage).second.termDicts.isNotEmpty()
+        }
+
+    /** Each TERMS dictionary's own title by dict id, for [sourceLanguage].
+     *  Cheap after first call (capability cache). */
+    suspend fun termDictionaryTitles(ctx: Context, sourceLanguage: String): Map<String, String> =
+        withContext(Dispatchers.IO) {
+            ready(ctx, sourceLanguage).second.termDictTitles
         }
 
     /**
@@ -813,6 +825,8 @@ object YomitanDataStore {
                         .map { it.id to (it.alias ?: it.title) },
                     termDicts = ordered(YomitanCategory.TERMS)
                         .map { it.id to (it.alias ?: it.title) },
+                    termDictTitles = ordered(YomitanCategory.TERMS)
+                        .associate { it.id to it.title },
                     termsSingleDictionary = registry.termsSingleDictionary,
                     hasStructuredTerms = ordered(YomitanCategory.TERMS)
                         .map { it.id }

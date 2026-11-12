@@ -9,11 +9,15 @@ import android.graphics.drawable.GradientDrawable
 import androidx.core.animation.doOnEnd
 import androidx.core.graphics.ColorUtils
 import android.net.Uri
+import android.text.InputType
 import android.text.TextUtils
+import android.util.TypedValue
 import android.view.Gravity
 import android.view.View
 import android.view.ViewGroup
 import android.view.WindowManager
+import android.view.inputmethod.EditorInfo
+import android.widget.EditText
 import android.widget.FrameLayout
 import android.widget.ImageView
 import android.widget.LinearLayout
@@ -134,6 +138,65 @@ fun ankiGroupCard(parent: LinearLayout): LinearLayout {
     }
     parent.addView(card)
     return card
+}
+
+/** An editable text field of an Anki review sheet's card: multi-line,
+ *  on the card's own surface, no underline. The sentence sheet's Original
+ *  and Translation and both sheets' Notes are this field. */
+internal fun ankiEditField(ctx: Context, initial: String): EditText {
+    val density = ctx.resources.displayMetrics.density
+    return EditText(ctx).apply {
+        setText(initial)
+        setTextColor(ctx.themeColor(R.attr.ptText))
+        setHintTextColor(ctx.themeColor(R.attr.ptTextHint))
+        setTextSize(TypedValue.COMPLEX_UNIT_SP, 15f)
+        background = null
+        inputType = InputType.TYPE_CLASS_TEXT or
+            InputType.TYPE_TEXT_FLAG_MULTI_LINE or
+            InputType.TYPE_TEXT_FLAG_CAP_SENTENCES
+        setSingleLine(false)
+        isVerticalScrollBarEnabled = false
+        gravity = Gravity.TOP or Gravity.START
+        minLines = 1
+        setPadding((16 * density).toInt(), (12 * density).toInt(),
+            (16 * density).toInt(), (12 * density).toInt())
+        layoutParams = LinearLayout.LayoutParams(
+            LinearLayout.LayoutParams.MATCH_PARENT,
+            LinearLayout.LayoutParams.WRAP_CONTENT
+        )
+    }
+}
+
+/**
+ * The Notes group of an Anki review sheet, added at the end of [parent]:
+ * its header and a card holding one empty text field, where the user types
+ * a free-text note for this card. Returns the field; the host reads its
+ * text at send time and nothing else holds the note.
+ *
+ * [viewId] is a fixed id from ids.xml: Android restores a text field's
+ * typed text by view id, which is how the note survives the sheet being
+ * rebuilt, and the word sheet holds a sentence tab and a word tab at once,
+ * so each sheet's field has its own.
+ *
+ * Two things on this field that a plain [ankiEditField] lacks. The IME
+ * flags keep the keyboard from taking the whole screen in landscape, where
+ * these sheets are used over a game. And the click listener takes focus:
+ * a controller's A on a row is a click, which gives a bare EditText
+ * nothing to do (the Ask field's pattern, [AskSectionBinder]); focus is
+ * what the workspace's keyboard handling waits for.
+ */
+internal fun addAnkiNotesSection(parent: LinearLayout, viewId: Int): EditText {
+    val ctx = parent.context
+    ankiGroupHeader(parent, ctx.getString(R.string.anki_group_notes))
+    val field = ankiEditField(ctx, initial = "").apply {
+        id = viewId
+        hint = ctx.getString(R.string.anki_notes_hint)
+        imeOptions = imeOptions or
+            EditorInfo.IME_FLAG_NO_FULLSCREEN or EditorInfo.IME_FLAG_NO_EXTRACT_UI
+        setOnClickListener { requestFocus() }
+    }
+    ankiGroupCard(parent).addView(field)
+    return field
 }
 
 /** Adds a 1dp inset divider inside a group card. The default 16dp inset
@@ -1089,6 +1152,35 @@ suspend fun awaitOversizeConsent(
             .setMessage(ctx.getString(R.string.anki_card_too_large_prompt))
             .addButton(
                 ctx.getString(R.string.anki_card_too_large_simplify),
+                ctx.themeColor(R.attr.ptAccent),
+                ctx.themeColor(R.attr.ptAccentOn),
+            ) { finish(true) }
+            .addCancelButton(ctx.getString(R.string.btn_cancel)) { finish(false) }
+    )
+}
+
+/**
+ * Suspend bridge for [Context.dispatchSendToAnki]'s `notesPrompt`: an
+ * [OverlayAlert] saying the chosen card type has no field for the note the
+ * user typed, and asking whether to save the card without it. Returns true
+ * to save, false to abort. Same host terminal and the same resolution rules
+ * as [awaitOversizeConsent]: every path but the confirm button (Cancel,
+ * scrim tap, back press, a host teardown) resolves false, so the sheet
+ * stays open with the note still in it.
+ */
+suspend fun awaitNotesDropConsent(
+    ctx: Context,
+    presentAlert: (OverlayAlert.Builder) -> Unit,
+): Boolean = suspendCancellableCoroutine { cont ->
+    fun finish(proceed: Boolean) {
+        if (cont.isActive) cont.resume(proceed)
+    }
+    presentAlert(
+        OverlayAlert.Builder(ctx)
+            .setTitle(ctx.getString(R.string.anki_notes_no_field_title))
+            .setMessage(ctx.getString(R.string.anki_notes_no_field_message))
+            .addButton(
+                ctx.getString(R.string.anki_notes_no_field_save_anyway),
                 ctx.themeColor(R.attr.ptAccent),
                 ctx.themeColor(R.attr.ptAccentOn),
             ) { finish(true) }

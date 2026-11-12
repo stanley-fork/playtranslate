@@ -1379,6 +1379,20 @@
          which would wrongly blame AnkiDroid not running. -->
     <string name="anki_card_too_large_failed">This card is too big for <xliff:g id="brand_ankidroid" example="AnkiDroid">AnkiDroid</xliff:g> to accept, even with simplified definitions. Try removing some words or shortening the sentence.</string>
 
+    <!-- Title of the alert shown on Save when the user typed a note for the
+         card but the chosen card type has no field that takes it. -->
+    <string name="anki_notes_no_field_title">No field for your note</string>
+
+    <!-- Body of that alert. “Notes” is the content option the user can set a
+         card type's field to (anki_content_notes); keep the two the same word.
+         A “field” is one of the card type's Anki fields. -->
+    <string name="anki_notes_no_field_message">This card type has no field set to Notes, so your note can\'t be saved on the card. Save the card without it?</string>
+
+    <!-- Confirm button of that alert: saves the card without the note. The
+         other button is the standard Cancel, which keeps the editor open with
+         the note still in it. -->
+    <string name="anki_notes_no_field_save_anyway">Save anyway</string>
+
     <!-- Success toast for a card that was automatically simplified to fit
          (one-tap sends have no UI to ask first). Same surface as the
          media-shortfall toasts above. -->
@@ -1423,6 +1437,14 @@
     <!-- Group header — dictionary definitions of the words on the
          card. -->
     <string name="anki_group_definitions">Definitions</string>
+
+    <!-- Group header on the Anki card editor, above a box where the user
+         types their own free-text note for this one card. The note goes into
+         the card's Notes field. -->
+    <string name="anki_group_notes">Notes</string>
+
+    <!-- Placeholder text inside that Notes box while it is empty. -->
+    <string name="anki_notes_hint">Add a note to this card</string>
 
     <!-- Group header — screenshot group. -->
     <string name="anki_group_screenshot">Screenshot</string>
@@ -1703,6 +1725,23 @@
     <string name="anki_content_frequency_harmonic">Frequency sort number</string>
     <!-- Picker option description for “Frequency sort number”; rendered the same way as a plain number. -->
     <string name="anki_content_frequency_harmonic_desc">A single number for ordering cards by frequency, the harmonic mean of the word\'s dictionary frequencies (lower = more frequent). For <xliff:g id="brand_lapis" example="Lapis">Lapis</xliff:g>\'s “FreqSort” or <xliff:g id="brand_jpmn" example="JPMN">JPMN</xliff:g>\'s “FrequencySort”.</string>
+
+    <!-- The two “Yomitan format” options below appear in the same “Map field” picker. “Yomitan” is a browser dictionary extension and “Lapis” a community card template; both are brand names. “Yomitan format” means the HTML that Yomitan itself writes into a card, which card types made for Yomitan expect and style themselves. -->
+
+    <!-- Picker option label: every dictionary's definitions of the word, in Yomitan's HTML. -->
+    <string name="anki_content_glossary">Definitions (<xliff:g id="brand_yomitan" example="Yomitan">Yomitan</xliff:g> format)</string>
+    <!-- Picker option description for “Definitions (Yomitan format)”. “Glossary” is the name of a Lapis field, shown as written. -->
+    <string name="anki_content_glossary_desc">Every dictionary\'s definitions of the highlighted word, written the way <xliff:g id="brand_yomitan" example="Yomitan">Yomitan</xliff:g> writes them. For card types made for <xliff:g id="brand_yomitan2" example="Yomitan">Yomitan</xliff:g>, such as <xliff:g id="brand_lapis" example="Lapis">Lapis</xliff:g>\'s “Glossary”.</string>
+
+    <!-- Picker option label: the definitions from one dictionary only, in Yomitan's HTML. The “main dictionary” is the one highest in the user's own dictionary order that has the word. -->
+    <string name="anki_content_glossary_primary">Main dictionary (<xliff:g id="brand_yomitan" example="Yomitan">Yomitan</xliff:g> format)</string>
+    <!-- Picker option description for “Main dictionary (Yomitan format)”. “MainDefinition” is the name of a Lapis field, shown as written. -->
+    <string name="anki_content_glossary_primary_desc">Only the first dictionary in your order that has the highlighted word, written the way <xliff:g id="brand_yomitan" example="Yomitan">Yomitan</xliff:g> writes it. The built-in dictionary comes last. For <xliff:g id="brand_lapis" example="Lapis">Lapis</xliff:g>\'s “MainDefinition”.</string>
+
+    <!-- Picker option label: the free-text note the user types on the card editor (the box headed by anki_group_notes; keep the two the same word). -->
+    <string name="anki_content_notes">Notes</string>
+    <!-- Picker option description for “Notes”. -->
+    <string name="anki_content_notes_desc">The note you type on the card before saving it. Empty when you type none.</string>
 
     <!-- ═══════════════════════════════════════════════════════════════
          CARD-TYPE STATE FLAGS — Mustache section-gate fields.  The "(x)"

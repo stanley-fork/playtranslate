@@ -33,6 +33,7 @@ class SentenceSendInputHiddenTest {
         sourceLangId = SourceLangId.JA,
         screenshot = null,
         includeSentenceAudio = false,
+        notes = "a note",
         targetWordAudioWords = audio,
         wordSelections = selections,
     )

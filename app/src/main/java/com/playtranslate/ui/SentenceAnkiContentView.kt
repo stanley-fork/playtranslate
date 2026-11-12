@@ -174,6 +174,7 @@ class SentenceAnkiContentView(
     private lateinit var root: LinearLayout
     private lateinit var etOriginal: EditText
     private lateinit var etTranslation: EditText
+    private lateinit var etNotes: EditText
     private lateinit var wordsCard: LinearLayout
     private lateinit var wordsSlot: LinearLayout
     private lateinit var wordsHeaderTitle: TextView
@@ -537,6 +538,9 @@ class SentenceAnkiContentView(
         /** The card's own reading of its word's stretch of [source]
          *  ([SentenceSendInput.readingOverride]); null = the analysis's. */
         val readingOverride: ReadingOverride? = null,
+        /** The note the user typed for this card, raw; "" for none
+         *  ([SentenceSendInput.notes]). */
+        val notes: String = "",
     )
 
     fun getCardData(): CardData {
@@ -556,6 +560,7 @@ class SentenceAnkiContentView(
             sentenceSelection = sentenceSelection,
             wordSelections = enabledTargets.associateWith { wordSelections[it] ?: AudioSelection.Auto },
             readingOverride = readingOverride,
+            notes = etNotes.text.toString(),
         )
     }
 
@@ -1143,7 +1148,7 @@ class SentenceAnkiContentView(
         // beneath the edit field.
         ankiGroupHeader(root, ctx.getString(R.string.anki_group_original))
         val originalCard = ankiGroupCard(root)
-        etOriginal = buildEditField(initial = original).apply {
+        etOriginal = ankiEditField(ctx, initial = original).apply {
             id = R.id.etAnkiOriginal
         }
         committedOriginal = original
@@ -1233,7 +1238,7 @@ class SentenceAnkiContentView(
         // Translation — same trick with R.id.etAnkiTranslation.
         ankiGroupHeader(root, ctx.getString(R.string.anki_group_translation))
         val translationCard = ankiGroupCard(root)
-        etTranslation = buildEditField(initial = translation).apply {
+        etTranslation = ankiEditField(ctx, initial = translation).apply {
             id = R.id.etAnkiTranslation
             if (translation.isBlank()) {
                 hint = ctx.getString(R.string.status_translating)
@@ -1242,6 +1247,9 @@ class SentenceAnkiContentView(
         }
         attachTranslationTouchWatcher(etTranslation)
         translationCard.addView(buildEditableFrame(etTranslation))
+
+        // Notes, under the translation: the user's own note for this card.
+        etNotes = addAnkiNotesSection(root, R.id.etAnkiSentenceNotes)
 
         // Words on card. The host tells us whether a follow-up
         // `applyWords` call is coming (a lazy words fill: every host
@@ -1311,32 +1319,6 @@ class SentenceAnkiContentView(
             isClickable = false
         })
         return frame
-    }
-
-    /** Editable field used by both Original and Translation. Multi-line,
-     *  inherits the card's surface, no underline. */
-    private fun buildEditField(initial: String): EditText {
-        val density = ctx.resources.displayMetrics.density
-        return EditText(ctx).apply {
-            setText(initial)
-            setTextColor(ctx.themeColor(R.attr.ptText))
-            setHintTextColor(ctx.themeColor(R.attr.ptTextHint))
-            setTextSize(TypedValue.COMPLEX_UNIT_SP, 15f)
-            background = null
-            inputType = InputType.TYPE_CLASS_TEXT or
-                InputType.TYPE_TEXT_FLAG_MULTI_LINE or
-                InputType.TYPE_TEXT_FLAG_CAP_SENTENCES
-            setSingleLine(false)
-            isVerticalScrollBarEnabled = false
-            gravity = Gravity.TOP or Gravity.START
-            minLines = 1
-            setPadding((16 * density).toInt(), (12 * density).toInt(),
-                (16 * density).toInt(), (12 * density).toInt())
-            layoutParams = LinearLayout.LayoutParams(
-                LinearLayout.LayoutParams.MATCH_PARENT,
-                LinearLayout.LayoutParams.WRAP_CONTENT
-            )
-        }
     }
 
     private fun addWordsHelperRow(card: LinearLayout) {

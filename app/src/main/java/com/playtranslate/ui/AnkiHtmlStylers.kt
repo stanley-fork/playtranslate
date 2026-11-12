@@ -89,6 +89,15 @@ internal fun htmlEscape(s: String): String {
     return sb.toString()
 }
 
+/**
+ * The user's typed card note as a field value: trimmed, escaped, its line
+ * breaks as `<br>`, and nothing else, so the field stays plain text to edit
+ * in Anki. "" for a blank note, which leaves the field (and a template's
+ * `{{#Notes}}` section) empty.
+ */
+internal fun notesFieldHtml(notes: String): String =
+    htmlEscape(notes.trim()).replace(Regex("\\r\\n|\\r|\\n"), "<br>")
+
 internal fun StringBuilder.appendEscaped(c: Char): StringBuilder = when (c) {
     '&' -> append("&amp;")
     '<' -> append("&lt;")

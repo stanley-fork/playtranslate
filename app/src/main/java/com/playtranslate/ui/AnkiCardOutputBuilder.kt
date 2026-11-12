@@ -12,9 +12,9 @@ import com.playtranslate.model.FrequencyTag
  * because it depends on per-card curation state (`removedSenses`,
  * `removedExamples`, `removedTatoebaIdx`). Sentence-card definition is
  * described from the first highlighted word's transported senses
- * ([WordCardDefinition.fromSenses]) and rendered by the same panel
- * builder the word card uses, so a DEFINITION-mapped field reads the
- * same whichever mode sent the card.
+ * ([WordCardDefinition.fromSenses]) and drawn in the same panel layout
+ * the word card uses ([CardGlossary.panelHtml]), so a DEFINITION-mapped
+ * field reads the same whichever mode sent the card.
  */
 object AnkiCardOutputBuilder {
 
@@ -75,6 +75,9 @@ object AnkiCardOutputBuilder {
         /** dictId -> raw styles.css; scoped and inlined as <style> when a
          *  structured sense from that dictionary renders (Tier 2). */
         dictStyles: Map<String, String> = emptyMap(),
+        /** dictId -> the dictionary's own title, the `data-dictionary` of a
+         *  definition on the card ([CardGlossary]). */
+        dictTitles: Map<String, String> = emptyMap(),
     ): CardOutputs {
         val firstHighlighted = cardData.words.firstOrNull {
             it.word in cardData.selectedWords
@@ -116,10 +119,13 @@ object AnkiCardOutputBuilder {
             structured = structuredGlossaries,
             dictStyles = dictStyles,
         ).takeIf { structuredGlossaries.isNotEmpty() }
-        val definition = firstHighlighted?.let { w ->
+        // The word card's own part-of-speech rule (labels as stored), which
+        // is what keeps the field the same in both modes.
+        val glossary = firstHighlighted?.let { w ->
             WordCardDefinition.fromSenses(w.word, w.senses, fallback = w.meaning)
-                .panelHtml(inlineStyler, styled, definitionsHeader, renderMisc)
-        }.orEmpty()
+                .glossary(styled, dictTitles, CardGlossary.RAW_POS, renderMisc)
+        }
+        val definition = glossary?.panelHtml(inlineStyler, definitionsHeader).orEmpty()
         // starsString emits only ★ glyphs — safe by construction.
         val frequency = firstHighlighted?.let {
             SentenceAnkiHtmlBuilder.starsString(it.freqScore)
@@ -160,6 +166,7 @@ object AnkiCardOutputBuilder {
             renderMisc = renderMisc,
             structuredGlossaries = structuredGlossaries,
             dictStyles = dictStyles,
+            dictTitles = dictTitles,
         )
         // Mapped audio fields (`ExpressionAudio`, `WordAudio`, `Word Audio`
         // in Lapis/JPMN/Migaku) bind to `ContentSource.WORD_AUDIO`, which
@@ -188,6 +195,11 @@ object AnkiCardOutputBuilder {
             frequency = frequency,
             partOfSpeech = "",
             wordsTable = wordsHtml,
+            notes = notesFieldHtml(cardData.notes),
+            // The same rows as DEFINITION, in Yomitan's markup; "" when
+            // nothing is highlighted, as DEFINITION is.
+            glossary = glossary?.yomitanHtml(primaryOnly = false).orEmpty(),
+            glossaryPrimary = glossary?.yomitanHtml(primaryOnly = true).orEmpty(),
             // Yomitan pitch/frequency fields source from the first highlighted
             // word (the card's target word), matching how expression/reading/
             // definition above pick it. Empty when nothing is highlighted.
@@ -241,6 +253,13 @@ object AnkiCardOutputBuilder {
         audioFilename: String? = null,
         /** CC credit for a Commons recording, co-located with the word audio field. */
         audioCredit: String? = null,
+        /** The pipeline's Yomitan-markup rendering of the same
+         *  [WordCardDefinition], every dictionary and the first one alone
+         *  ([CardGlossary.yomitanHtml]). */
+        glossaryHtml: String = "",
+        glossaryPrimaryHtml: String = "",
+        /** The note the user typed on the sheet, raw; "" for one-tap. */
+        notes: String = "",
     ): CardOutputs = CardOutputs(
         // EXPRESSION: plain headword text — for fields rendered raw
         // via `{{Expression}}` (Lapis vocab-card front, Hint, etc.).
@@ -264,6 +283,9 @@ object AnkiCardOutputBuilder {
         frequency = SentenceAnkiHtmlBuilder.starsString(freqScore),
         partOfSpeech = htmlEscape(pos),
         wordsTable = "",
+        notes = notesFieldHtml(notes),
+        glossary = glossaryHtml,
+        glossaryPrimary = glossaryPrimaryHtml,
         // Yomitan pitch/frequency fields (JA). Empty for languages/words with
         // no pitch or frequency data, so the mapped field just stays blank.
         pitchPosition = AnkiFrequencyFormat.pitchPositions(pitch),

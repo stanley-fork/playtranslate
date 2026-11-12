@@ -20,9 +20,22 @@ object AnkiCardTypeMapper {
      * Lapis (donkuri/lapis). Per the canonical README, Lapis uses an
      * Expression/MainDefinition/Glossary schema (NOT Word/Glossary like
      * older docs sometimes claim). `ExpressionAudio` / `SentenceAudio`
-     * carry PT-synthesized TTS. `Glossary` is an alternative primary
-     * definition slot — user can swap to DEFINITION via the mapping
-     * dialog if they prefer it over `MainDefinition`.
+     * carry PT-synthesized TTS.
+     *
+     * Lapis is a note type made for Yomitan: its card script and its CSS
+     * read Yomitan's own markup (`.yomitan-glossary`,
+     * `li[data-dictionary="<title>"]`). So its two definition fields take
+     * the Yomitan-format sources, split the way its README maps them:
+     * `MainDefinition` is one dictionary (GLOSSARY_PRIMARY, the first in
+     * the user's order that has the word) and `Glossary` is all of them
+     * (GLOSSARY); Lapis pages between the two and hides the main
+     * dictionary on the second page. Our own panel (DEFINITION) in either
+     * field gives it nothing to read (checked 2026-11-11 against its back
+     * script).
+     *
+     * `MiscInfo` takes the user's typed note (2026-11-11): Lapis has no
+     * notes field, shows MiscInfo in its collapsed "Misc. info" block, and
+     * we fill it with nothing else.
      *
      * Flag wiring: `IsWordAndSentenceCard` fires for PT word sends
      * (the closest Lapis variant — word on front, sentence below as
@@ -41,7 +54,9 @@ object AnkiCardTypeMapper {
         "Expression"            to ContentSource.EXPRESSION,
         "ExpressionFurigana"    to ContentSource.EXPRESSION_FURIGANA,
         "ExpressionReading"     to ContentSource.READING,
-        "MainDefinition"        to ContentSource.DEFINITION,
+        "MainDefinition"        to ContentSource.GLOSSARY_PRIMARY,
+        "Glossary"              to ContentSource.GLOSSARY,
+        "MiscInfo"              to ContentSource.NOTES,
         "Sentence"              to ContentSource.SENTENCE,
         "SentenceFurigana"      to ContentSource.SENTENCE_FURIGANA,
         "Picture"               to ContentSource.PICTURE,
@@ -81,12 +96,19 @@ object AnkiCardTypeMapper {
      *                        rendered via `{{furigana:SentenceReading}}`
      *
      * `WordAudio` / `SentenceAudio` carry PT-synthesized TTS.
+     * `AdditionalNotes` takes the user's typed note.
+     *
+     * `PrimaryDefinition` stays on our panel: JPMN reads its OWN markup
+     * (`li[data-details]`, `dict-group__*` from its Yomitan templates), not
+     * Yomitan's default, so the Yomitan-format sources would give it no
+     * more than the panel does.
      */
     private val JPMN_DEFAULTS: Map<String, ContentSource> = mapOf(
         "Word"                    to ContentSource.EXPRESSION,
         "WordReading"             to ContentSource.EXPRESSION_FURIGANA,
         "WordReadingHiragana"     to ContentSource.READING,
         "PrimaryDefinition"       to ContentSource.DEFINITION,
+        "AdditionalNotes"         to ContentSource.NOTES,
         "Sentence"                to ContentSource.SENTENCE,
         "SentenceReading"         to ContentSource.SENTENCE_FURIGANA,
         "Picture"                 to ContentSource.PICTURE,
@@ -200,6 +222,52 @@ object AnkiCardTypeMapper {
         Triple("FrequencySort", ContentSource.NONE, ContentSource.FREQUENCY_HARMONIC),
         Triple("FrequenciesStylized", ContentSource.NONE, ContentSource.FREQUENCY_STYLIZED),
     )
+
+    /**
+     * One saved mapping brought up to the Yomitan-format definition
+     * sources and the Notes source (2026-11): what
+     * [com.playtranslate.Prefs.migrateAnkiGlossaryNotesFieldMappings] applies
+     * to every card type configured before they existed. Returns
+     * [mapping] itself when nothing applies.
+     *
+     * A saved mapping is authoritative once it exists, so without this a
+     * Lapis user keeps our panel in MainDefinition for good. Unlike the
+     * audio and pitch back-fills, these field names are not distinctive on
+     * their own ("Glossary" and "MiscInfo" are ordinary names for a field),
+     * so each rewrite is gated on its template's fingerprint, the same
+     * field pairs [defaultsForModel] recognises a renamed model by.
+     *
+     * Lapis's two definition fields move TOGETHER and only from the old
+     * automatic state, `MainDefinition` on DEFINITION with `Glossary`
+     * unmapped. Any other combination is the user's own arrangement and is
+     * left: rewriting one field alone can leave a card with Yomitan's
+     * markup on its first page and our panel as its second, worse than
+     * either.
+     *
+     * The limit it shares with the earlier back-fills: a field the user
+     * left on NONE on purpose cannot be told from one that was never
+     * mappable, so a deliberately empty Lapis `Glossary`, `MiscInfo` or
+     * JPMN `AdditionalNotes` is filled. They clear it again in the mapping
+     * dialog.
+     */
+    fun withGlossaryAndNotesSources(
+        mapping: Map<String, ContentSource>,
+    ): Map<String, ContentSource> {
+        val out = mapping.toMutableMap()
+        if ("MainDefinition" in mapping && "Expression" in mapping) {
+            if (mapping["MainDefinition"] == ContentSource.DEFINITION &&
+                mapping["Glossary"] == ContentSource.NONE
+            ) {
+                out["MainDefinition"] = ContentSource.GLOSSARY_PRIMARY
+                out["Glossary"] = ContentSource.GLOSSARY
+            }
+            if (mapping["MiscInfo"] == ContentSource.NONE) out["MiscInfo"] = ContentSource.NOTES
+        }
+        if ("PrimaryDefinition" in mapping && "Word" in mapping) {
+            if (mapping["AdditionalNotes"] == ContentSource.NONE) out["AdditionalNotes"] = ContentSource.NOTES
+        }
+        return if (out == mapping) mapping else out
+    }
 
     /**
      * Anki Basic-shape templates skip the per-field mapping system
@@ -370,6 +438,13 @@ object AnkiCardTypeMapper {
      * sends, and storing a mapping per model id would force a mode
      * commitment at picker time — see [isBasicShape] for the full
      * rationale.
+     *
+     * The user's typed note goes under the Back's content, after a blank
+     * line. Basic is the one note type where a note shares a field: it has
+     * two fields and no mapping, so there is nowhere else, and the
+     * alternative is asking on every Basic card with a note
+     * (2026-11-11; a mapped note type never mixes the note into a
+     * definition field).
      */
     fun assembleBasicNote(
         modelFieldNames: List<String>,
@@ -381,9 +456,16 @@ object AnkiCardTypeMapper {
                 CardMode.WORD     -> outputs.expression
                 CardMode.SENTENCE -> outputs.sentence
             }
-            "Back" -> when (mode) {
-                CardMode.WORD     -> outputs.definition
-                CardMode.SENTENCE -> outputs.sentenceTranslation
+            "Back" -> {
+                val back = when (mode) {
+                    CardMode.WORD     -> outputs.definition
+                    CardMode.SENTENCE -> outputs.sentenceTranslation
+                }
+                when {
+                    outputs.notes.isEmpty() -> back
+                    back.isEmpty() -> outputs.notes
+                    else -> back + "<br><br>" + outputs.notes
+                }
             }
             "Picture" -> outputs.picture
             else -> ""

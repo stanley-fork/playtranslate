@@ -36,16 +36,21 @@ object PtModels {
     )
 
     val WORD = Spec(
-        // Unversioned by decision (2026-08-13, pre-release: no one
-        // but the dev has these models): the clean name IS the brand. A
-        // future template fix, post-release, re-enters the rename contract
-        // (e.g. "PlayTranslate Word 2") — the never-rewrite-in-place rule
-        // itself still stands.
-        name = "PlayTranslate Word",
+        // The rename contract firing for the Word type (2026-11-11): the
+        // note gained a Notes field and its back a place to show it, and an
+        // existing model's fields and templates are never rewritten, so
+        // both reach a card only under a new name. "+" in the style
+        // [SENTENCE] set. The plain "PlayTranslate Word" keeps its notes
+        // and its rendering, and from here on is a retired name: pickable
+        // like any user-owned note type (see [SYNTHETIC_EXACT_NAMES]).
+        name = "PlayTranslate Word+",
+        // Notes is LAST on purpose: index 0 is the duplicate key, and
+        // [classifyStoredTemplate] reads index 1 to recognise the
+        // provider's auto-generated back.
         fields = listOf(
             "Expression", "Reading", "PitchPosition", "PartOfSpeech",
             "Definition", "Examples", "Frequency", "Picture",
-            "WordAudio", "AudioCredit",
+            "WordAudio", "AudioCredit", "Notes",
         ),
         css = PtCardTemplates.WORD_CSS,
         qfmt = PtCardTemplates.WORD_QFMT,
@@ -62,12 +67,17 @@ object PtModels {
         // type picker; a future Word fix should follow the same style.
         // It is inert in Anki search, and the model lookup is exact
         // string equality against the provider's list, never a query.
-        // The pre-"+" model keeps its notes and its old rendering, and
-        // stays hidden from the picker via [SYNTHETIC_EXACT_NAMES].
-        name = "PlayTranslate Sentence+",
+        // A superseded model keeps its notes and its old rendering, and
+        // is pickable from then on (see [SYNTHETIC_EXACT_NAMES]).
+        //
+        // Second firing (2026-11-11), one more "+": the Notes field and
+        // its place under the translation. "PlayTranslate Sentence+" joins
+        // "PlayTranslate Sentence" as a retired name.
+        name = "PlayTranslate Sentence++",
+        // Notes is LAST on purpose, as on [WORD].
         fields = listOf(
             "Sentence", "SentenceFurigana", "Translation", "TargetWord",
-            "WordsTable", "Picture", "SentenceAudio", "AudioCredit",
+            "WordsTable", "Picture", "SentenceAudio", "AudioCredit", "Notes",
         ),
         css = PtCardTemplates.SENTENCE_CSS,
         qfmt = PtCardTemplates.SENTENCE_QFMT,
@@ -100,13 +110,15 @@ object PtModels {
      *  "PlayTranslate Sentence Mining".
      *
      *  A RETIRED name deliberately does NOT belong here
-     *  (2026-09-27, when "PlayTranslate Sentence" was superseded): the
+     *  (2026-09-27, when "PlayTranslate Sentence" was superseded; since
+     *  2026-11-11 also "PlayTranslate Word" and "PlayTranslate Sentence+"): the
      *  rename already moved the default send away from that model, and a
      *  superseded model can carry the user's own added fields and
      *  template edits — [assemble] and [classifyStoredTemplate] exist to
      *  honour exactly those — so hiding it as well would leave them no
      *  way to send there at all. It stays pickable, as any other
-     *  user-owned note type is. The versioned prefixes above predate the
+     *  user-owned note type is, and like any other it is sent to through
+     *  a field mapping the user sets up (it has no preset). The versioned prefixes above predate the
      *  rule and stay hidden; those generations were retired while the
      *  models existed only on the dev device. */
     private val SYNTHETIC_EXACT_NAMES = setOf(WORD.name, SENTENCE.name)
@@ -215,6 +227,8 @@ sealed interface PtNote {
         val picture: String,
         val wordAudio: String,
         val audioCredit: String,
+        /** The user's typed note ([notesFieldHtml]); "" for none. */
+        val notes: String,
     ) : PtNote {
         override fun toValues(): Map<String, String> = mapOf(
             "Expression" to expression,
@@ -227,6 +241,7 @@ sealed interface PtNote {
             "Picture" to picture,
             "WordAudio" to wordAudio,
             "AudioCredit" to audioCredit,
+            "Notes" to notes,
         )
     }
 
@@ -239,6 +254,8 @@ sealed interface PtNote {
         val picture: String,
         val sentenceAudio: String,
         val audioCredit: String,
+        /** The user's typed note ([notesFieldHtml]); "" for none. */
+        val notes: String,
     ) : PtNote {
         override fun toValues(): Map<String, String> = mapOf(
             "Sentence" to sentence,
@@ -249,6 +266,7 @@ sealed interface PtNote {
             "Picture" to picture,
             "SentenceAudio" to sentenceAudio,
             "AudioCredit" to audioCredit,
+            "Notes" to notes,
         )
     }
 }

@@ -16,18 +16,59 @@ package com.playtranslate.ui
  */
 internal object AnkiCardCss {
 
-    /** The card markup's per-dictionary scope — matches the `.gl-sc`
-     *  wrapper both card builders emit. */
-    fun scopeFor(dictId: String): String =
-        ".gl-sc[data-dictionary=\"$dictId\"]"
+    /**
+     * The scope of a dictionary's stylesheet in OUR card markup (the word
+     * card's panel and the words table): the `.gl-sc` wrapper a structured
+     * glossary is drawn in, so the rules reach the dictionary's own content
+     * and none of the row around it (its number, its label).
+     * [dictionary] is the `data-dictionary` value, the dictionary's title.
+     */
+    fun ownScope(dictionary: String): String =
+        ".gl-sc[data-dictionary=\"${cssString(dictionary)}\"]"
 
-    /** One inline `<style>` block per dictionary with content, scoped.
-     *  Empty string when nothing applies. */
-    fun styleBlocks(dictIds: Collection<String>, dictStyles: Map<String, String>): String {
+    /**
+     * The scope in Yomitan's card markup: the list item of
+     * `.yomitan-glossary`, which is where Yomitan scopes it too
+     * ([CardGlossary.yomitanHtml]).
+     */
+    fun yomitanScope(dictionary: String): String =
+        ".yomitan-glossary [data-dictionary=\"${cssString(dictionary)}\"]"
+
+    /**
+     * [s] as the content of a double-quoted CSS string. A title is the
+     * importer's text: a backslash or a quote would end or bend the string,
+     * and a raw line break is an error that drops the whole rule, so each
+     * is written as its escape (a hex escape ends at the space after it).
+     * The `</` a title may carry is the neutralizer's, run over the whole
+     * block in [styleBlocks].
+     */
+    internal fun cssString(s: String): String {
+        val out = StringBuilder(s.length)
+        for (c in s) {
+            when (c) {
+                '\\' -> out.append("\\\\")
+                '"' -> out.append("\\\"")
+                '\n' -> out.append("\\a ")
+                '\r' -> out.append("\\d ")
+                '\u000C' -> out.append("\\c ")
+                else -> out.append(c)
+            }
+        }
+        return out.toString()
+    }
+
+    /**
+     * One inline `<style>` block per dictionary with a stylesheet, each
+     * rule prefixed with that dictionary's scope. [scopeByDictId] is the
+     * dictionaries to style, in order, each with its scope ([ownScope] or
+     * [yomitanScope]); [dictStyles] is dict id to raw styles.css. Empty
+     * string when nothing applies.
+     */
+    fun styleBlocks(scopeByDictId: Map<String, String>, dictStyles: Map<String, String>): String {
         val sb = StringBuilder()
-        for (dictId in dictIds.distinct()) {
+        for ((dictId, scope) in scopeByDictId) {
             val css = dictStyles[dictId]?.takeIf { it.isNotBlank() } ?: continue
-            val scoped = neutralizeRawTextBreakouts(scoped(css, scopeFor(dictId)))
+            val scoped = neutralizeRawTextBreakouts(scoped(css, scope))
             // Belt behind the neutralizer: no payload may carry the
             // raw-text terminator into the HTML boundary, ever.
             if (RAW_TEXT_TERMINATOR.containsMatchIn(scoped)) continue

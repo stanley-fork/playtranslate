@@ -335,25 +335,18 @@ class AnkiReviewBottomSheet : DialogFragment() {
         }
         // A card saved mid-fill used to ship without its words table.
         wordsFillJob?.join()
-        val data = content.getCardData()
-        val input = SentenceSendInput(
-            original = data.source,
-            translation = data.target,
-            words = data.words,
-            selectedWords = data.selectedWords,
-            sourceLangId = data.sourceLangId,
-            screenshot = data.screenshot,
-            includeSentenceAudio = content.sentenceAudioEnabled,
-            targetWordAudioWords = data.targetWordAudioWords,
-            sentenceSelection = data.sentenceSelection,
-            wordSelections = data.wordSelections,
-            readingOverride = data.readingOverride,
-        )
+        val input = content.getCardData().toSendInput(content.sentenceAudioEnabled)
         // Fragment receiver so NeedsMapping opens the mapping dialog
         // (Context.sendSentenceCard would skip it).
-        val result = sendSentenceCard(input, deckId, oversizePrompt = {
-            awaitOversizeConsent(requireContext()) { it.showInDialog(requireDialog()) }
-        })
+        val result = sendSentenceCard(
+            input, deckId,
+            oversizePrompt = {
+                awaitOversizeConsent(requireContext()) { it.showInDialog(requireDialog()) }
+            },
+            notesPrompt = {
+                awaitNotesDropConsent(requireContext()) { it.showInDialog(requireDialog()) }
+            },
+        )
         // The pipeline folds local synth failures into Success.audioDropped
         // / wordAudioDropped, so one resolver covers synth-fail, audio
         // upload-fail, and a screenshot AnkiDroid wouldn't take. Null =

@@ -301,6 +301,22 @@ internal object PtCardTemplates {
         "<span>Made with PlayTranslate</span></div>"
 
     /**
+     * The user's typed note (the Notes field). The field is the bare text
+     * ([notesFieldHtml]), so it stays plain to edit in Anki, and the block
+     * around it and its look are the template's. Left-aligned by rule, not
+     * by default: AnkiMobile centres the card body, and the sentence back's
+     * panel centres its own text. On the word back it stands under the
+     * definition panel behind a rule down its side; inside the sentence
+     * back's panel ([SENTENCE_LAYOUT_CSS]) it is one more row under the
+     * translation, at the same size (that rule sets none of its own).
+     * 0.9em is 18px at the 20px deck base: raised from the first try's 16px
+     * on 2026-11-11. The rest is first-try styling, not yet seen on a device.
+     */
+    private const val NOTES_CSS =
+        ".pt-notes{text-align:left;font-size:0.9em;line-height:1.5;color:var(--pt-secondary);" +
+            "margin:16px 4px 0;padding:2px 0 2px 12px;border-left:2px solid var(--pt-hairline);}"
+
+    /**
      * Everything both models need. [PitchAccentHtml.PITCH_CSS] is
      * spliced by reference (never copied) so the template CSS can't
      * drift from the Kotlin renderer that bakes `pa-*` markup into the
@@ -308,7 +324,7 @@ internal object PtCardTemplates {
      */
     private val SHARED_CSS =
         RESET_CSS + COLOR_CSS + DEFINITION_CSS + GLOSSARY_CSS + META_CSS + MEDIA_CSS + BRAND_CSS +
-            PitchAccentHtml.PITCH_CSS
+            NOTES_CSS + PitchAccentHtml.PITCH_CSS
 
     /**
      * Word-card layout. `.pt-rule` takes `currentColor`, so the accent
@@ -373,6 +389,10 @@ internal object PtCardTemplates {
         ".pt-translation{text-align:center;font-size:1.3em;font-weight:500;" +
             "line-height:1.4;border-top:1px solid var(--pt-hairline);" +
             "padding:14px 0 10px;margin:0;}" +
+        // The note as the panel's last row: the translation's hairline and
+        // rhythm, without the word back's side rule and outer margin.
+        ".pt-back-panel .pt-notes{margin:0;padding:12px 0 10px;border-left:0;" +
+            "border-top:1px solid var(--pt-hairline);}" +
         ".pt-words{text-align:left;margin:0;}" +
         // Overrides the shared 4px credit indent (same-specificity, later
         // in SENTENCE_CSS) so the credit lines up with the panels above.
@@ -698,8 +718,8 @@ internal object PtCardTemplates {
 
     /**
      * Word back, v002 order: picture, head row (word + reading on one
-     * baseline, audio at the right), meta chips, definition panel,
-     * more-examples rows, credit last. `#pt-word`, `#pt-reading`, and
+     * baseline, audio at the right), meta chips, definition panel, the
+     * user's note, more-examples rows, credit last. `#pt-word`, `#pt-reading`, and
      * `#pt-pitch-pos` keep their ids and relative order — [PITCH_JS]
      * mounts on them, and `#pt-reading` renders unconditionally (a
      * zero-height empty span is the script's stable mount point).
@@ -720,6 +740,7 @@ internal object PtCardTemplates {
         "<span id=\"pt-pitch-pos\" style=\"display:none\">{{PitchPosition}}</span>" +
         "{{#Frequency}}<div class=\"pt-meta gl-secondary\">{{Frequency}}</div>{{/Frequency}}" +
         "{{Definition}}" +
+        "{{#Notes}}<div class=\"pt-notes\">{{Notes}}</div>{{/Notes}}" +
         "{{Examples}}" +
         "{{#AudioCredit}}<div class=\"pt-credit\">{{AudioCredit}}</div>{{/AudioCredit}}" +
         "</div>" +
@@ -760,6 +781,7 @@ internal object PtCardTemplates {
         "<div class=\"pt-back-panel\">" +
         "<div class=\"pt-sentence pt-sentence-back\">$SENTENCE_BODY</div>" +
         "{{#Translation}}<div class=\"pt-translation\">{{Translation}}</div>{{/Translation}}" +
+        "{{#Notes}}<div class=\"pt-notes\">{{Notes}}</div>{{/Notes}}" +
         "</div>" +
         "{{#WordsTable}}<div class=\"pt-words\">{{WordsTable}}</div>{{/WordsTable}}" +
         "{{#AudioCredit}}<div class=\"pt-credit\">{{AudioCredit}}</div>{{/AudioCredit}}" +

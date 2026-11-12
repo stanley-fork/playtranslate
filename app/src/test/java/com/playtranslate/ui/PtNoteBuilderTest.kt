@@ -34,12 +34,13 @@ class PtNoteBuilderTest {
         imageFilename: String? = null,
         audioFilename: String? = null,
         audioCredit: String? = null,
+        notes: String = "",
     ) = PtNoteBuilder.forWord(
         word = word, reading = reading, pos = "noun",
         definitionHtml = definitionHtml, examplesHtml = examplesHtml,
         freqScore = freqScore, pitch = pitch, frequencies = frequencies,
         imageFilename = imageFilename, audioFilename = audioFilename,
-        audioCredit = audioCredit,
+        audioCredit = audioCredit, notes = notes,
     )
 
     private fun sentenceCard(
@@ -213,5 +214,24 @@ class PtNoteBuilderTest {
             wordAudioFilenames = emptyMap(), audioCredit = null,
         )
         assertEquals("[sound:s.ogg]", note.sentenceAudio)
+    }
+
+    // Mutations: drop the note from either note; ship it unescaped.
+    @Test fun `the typed note fills the Notes field of both note types as plain escaped text`() {
+        assertEquals("see &lt;ch. 3&gt;<br>again", word(notes = " see <ch. 3>\nagain ").notes)
+        assertEquals("", word().notes)
+        assertEquals("see &lt;ch. 3&gt;", word(notes = "see <ch. 3>").toValues()["Notes"])
+
+        val data = SentenceAnkiContentView.CardData(
+            source = "the cat sat", target = "t", words = emptyList(), selectedWords = emptySet(),
+            screenshot = null, sourceLangId = com.playtranslate.language.SourceLangId.EN,
+            notes = "a & b",
+        )
+        val sentence = PtNoteBuilder.forSentence(
+            data, imageFilename = null, audioFilename = null,
+            wordAudioFilenames = emptyMap(), audioCredit = null,
+        )
+        assertEquals("a &amp; b", sentence.notes)
+        assertEquals("a &amp; b", sentence.toValues()["Notes"])
     }
 }

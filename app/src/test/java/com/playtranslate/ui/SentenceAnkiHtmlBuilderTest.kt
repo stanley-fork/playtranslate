@@ -943,9 +943,12 @@ class SentenceAnkiHtmlBuilderTest {
                 7L to """[{"type":"structured-content","content":
                     {"tag":"ul","content":[{"tag":"li","content":"cat"}]}}]""",
             ),
+            dictTitles = mapOf("d1" to "Gauntlet Dictionary"),
         )
-        // Sense with a retained glossary: structured block, scoped.
-        assertTrue(html.contains("data-dictionary=\"d1\""))
+        // Sense with a retained glossary: structured block, tagged with its
+        // dictionary's title (never our id).
+        assertTrue(html.contains("data-dictionary=\"Gauntlet Dictionary\""))
+        assertTrue(!html.contains("d1"))
         assertTrue(html.contains("<li class=\"gloss-sc-li\">cat</li>"))
         // No dictStyles passed: no style blocks.
         assertTrue(!html.contains("<style>"))
@@ -978,9 +981,14 @@ class SentenceAnkiHtmlBuilderTest {
                 "d1" to "span[data-sc-class=\"tag\"] { color: red }",
                 "unused" to "div { color: blue }",
             ),
+            dictTitles = mapOf("d1" to "Gauntlet Dictionary"),
         )
-        // The rendering dictionary's CSS, scoped, ahead of the table…
-        assertTrue(html.contains("<style>.gl-sc[data-dictionary=\"d1\"] span[data-sc-class=\"tag\"]"))
+        // The rendering dictionary's CSS, scoped to its title, ahead of the table…
+        assertTrue(
+            html.startsWith(
+                "<style>.gl-sc[data-dictionary=\"Gauntlet Dictionary\"] span[data-sc-class=\"tag\"]",
+            ),
+        )
         // …and only for dictionaries that actually rendered.
         assertTrue(!html.contains("color: blue"))
     }
@@ -1004,5 +1012,66 @@ class SentenceAnkiHtmlBuilderTest {
         )
         assertTrue(html.contains("line1<br>line2"))
         assertTrue(!html.contains("gl-sc"))
+    }
+
+    // The words table's cells are the one card-definition loop in its cell
+    // layout ([CardGlossary.cellHtml], pinned there on exact strings). What
+    // is the TABLE's own: which cell is the target's, one stylesheet ahead
+    // of all the cells, and a sense with no text drawing no row.
+
+    // Mutations: pass every cell as a target (or none); number a blank row.
+    @Test
+    fun `only the target's cell is sized up and a sense with no text draws no row`() {
+        val senses = listOf(
+            SenseDisplay(pos = listOf("noun"), definition = "cat", misc = listOf("col")),
+            SenseDisplay(pos = listOf("noun"), definition = "", misc = emptyList()),
+            SenseDisplay(pos = listOf("noun"), definition = "kitten", misc = emptyList()),
+        )
+        val words = listOf(
+            SentenceAnkiHtmlBuilder.WordEntry("猫", "ねこ", "cat", senses = senses),
+            SentenceAnkiHtmlBuilder.WordEntry("犬", "いぬ", "dog", senses = senses),
+        )
+        val html = SentenceAnkiHtmlBuilder.buildWordsHtmlWith(
+            words, highlightedWords = setOf("猫"), styler = classStyler,
+            renderMisc = { it.joinToString(", ").ifEmpty { null } },
+        )
+        val (target, context) = html.split("<div data-pt-w=\"犬\"").let { it[0] to it[1] }
+
+        assertTrue(target, target.contains("<span class=\"gl-num gl-hint\" style=\"font-size:0.9em;\">1.</span>"))
+        assertTrue(target, target.contains("<span class=\"gl-dtext\" style=\"font-size:0.9em;\">cat</span>"))
+        assertTrue(target, target.contains("<div class=\"gl-misc gl-hint\" style=\"margin-left:25px;\">col</div>"))
+        assertTrue(context, context.contains("<span class=\"gl-num gl-hint\">1.</span><span class=\"gl-dtext\">cat</span>"))
+        assertFalse(context, context.contains("0.9em"))
+        // Two senses with text, two rows: the blank one is not "2." with nothing beside it.
+        assertTrue(context, context.contains("<span class=\"gl-num gl-hint\">2.</span><span class=\"gl-dtext\">kitten</span>"))
+        assertFalse(context, context.contains(">3.<"))
+    }
+
+    // Mutation: ship the stylesheet once per cell.
+    @Test
+    fun `two cells of one dictionary ship its stylesheet once, ahead of the table`() {
+        val sense = SenseDisplay(
+            pos = listOf("Gauntlet"), definition = "cat", misc = emptyList(),
+            imported = true, scRowid = 7L, dictId = "d1",
+        )
+        val words = listOf(
+            SentenceAnkiHtmlBuilder.WordEntry("猫", "ねこ", "cat", senses = listOf(sense)),
+            SentenceAnkiHtmlBuilder.WordEntry("犬", "いぬ", "dog", senses = listOf(sense)),
+        )
+        val html = SentenceAnkiHtmlBuilder.buildWordsHtmlWith(
+            words, highlightedWords = emptySet(), styler = classStyler,
+            structuredGlossaries = mapOf(
+                7L to """[{"type":"structured-content","content":{"tag":"span","content":"cat"}}]""",
+            ),
+            dictStyles = mapOf("d1" to "span { color: red }"),
+        )
+
+        assertEquals(1, Regex("<style>").findAll(html).count())
+        assertTrue(html, html.startsWith("<style>.gl-sc[data-dictionary=\"Gauntlet\"] span"))
+        assertEquals(
+            2,
+            Regex("<div class=\"gl-sc\" style=\"display:inline-block;vertical-align:top;\" data-dictionary=\"Gauntlet\">")
+                .findAll(html).count(),
+        )
     }
 }

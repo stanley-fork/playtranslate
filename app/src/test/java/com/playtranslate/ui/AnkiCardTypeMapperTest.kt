@@ -71,7 +71,16 @@ class AnkiCardTypeMapperTest {
         val mapping = AnkiCardTypeMapper.defaultsForModel(m, CardMode.SENTENCE)
         assertEquals(ContentSource.EXPRESSION,               mapping["Expression"])
         assertEquals(ContentSource.READING,                  mapping["ExpressionReading"])
-        assertEquals(ContentSource.DEFINITION,               mapping["MainDefinition"])
+        // Lapis is made for Yomitan: its two definition fields take the
+        // definitions in Yomitan's own markup, split the way its README
+        // maps them (one dictionary in MainDefinition, all of them in
+        // Glossary). Our own panel in either gives its card script and
+        // its per-dictionary CSS nothing to read.
+        assertEquals(ContentSource.GLOSSARY_PRIMARY,         mapping["MainDefinition"])
+        assertEquals(ContentSource.GLOSSARY,                 mapping["Glossary"])
+        // Lapis has no notes field; the user's note goes to MiscInfo,
+        // which nothing else of ours fills.
+        assertEquals(ContentSource.NOTES,                    mapping["MiscInfo"])
         assertEquals(ContentSource.SENTENCE,                 mapping["Sentence"])
         assertEquals(ContentSource.PICTURE,                  mapping["Picture"])
         assertEquals(ContentSource.FREQUENCY_VALUES,         mapping["Frequency"])
@@ -97,21 +106,20 @@ class AnkiCardTypeMapperTest {
         // from Yomitan data.
         assertEquals(ContentSource.PITCH_POSITION,    mapping["PitchPosition"])
         assertEquals(ContentSource.FREQUENCY_HARMONIC, mapping["FreqSort"])
-        // Alternative-definition slots, the OTHER state flags
-        // (IsClickCard / IsAudioCard), and PitchCategories — none of which
-        // we produce — stay null (treated as ContentSource.NONE by the dialog).
-        assertEquals(null, mapping["Glossary"])
+        // The OTHER state flags (IsClickCard / IsAudioCard), the text
+        // selection and PitchCategories — none of which we produce — stay
+        // null (treated as ContentSource.NONE by the dialog).
+        assertEquals(null, mapping["SelectionText"])
         assertEquals(null, mapping["IsClickCard"])
         assertEquals(null, mapping["IsAudioCard"])
         assertEquals(null, mapping["PitchCategories"])
-        assertEquals(null, mapping["MiscInfo"])
     }
 
     @Test fun `Lapis name matching is case-insensitive`() {
         val m = model("LAPIS-2024", LAPIS_FIELDS)
         val mapping = AnkiCardTypeMapper.defaultsForModel(m, CardMode.WORD)
         assertEquals(ContentSource.EXPRESSION, mapping["Expression"])
-        assertEquals(ContentSource.DEFINITION, mapping["MainDefinition"])
+        assertEquals(ContentSource.GLOSSARY_PRIMARY, mapping["MainDefinition"])
     }
 
     @Test fun `Lapis detected by MainDefinition+Expression fingerprint after rename`() {
@@ -120,10 +128,91 @@ class AnkiCardTypeMapperTest {
         val m = model("My Mining Cards", LAPIS_FIELDS)
         val mapping = AnkiCardTypeMapper.defaultsForModel(m, CardMode.SENTENCE)
         assertEquals(ContentSource.EXPRESSION, mapping["Expression"])
-        assertEquals(ContentSource.DEFINITION, mapping["MainDefinition"])
+        assertEquals(ContentSource.GLOSSARY_PRIMARY, mapping["MainDefinition"])
     }
 
     // ─── JPMN ────────────────────────────────────────────────────────────
+
+    // JPMN reads its own definition markup, not Yomitan's, so its
+    // definition field keeps our panel; its notes field takes the note.
+    // Mutations: give JPMN the Yomitan-format source; leave its note field unmapped.
+    @Test fun `JPMN keeps the panel in PrimaryDefinition and takes the note in AdditionalNotes`() {
+        val mapping = AnkiCardTypeMapper.defaultsForModel(model("JPMN", JPMN_FIELDS), CardMode.WORD)
+        assertEquals(ContentSource.DEFINITION, mapping["PrimaryDefinition"])
+        assertEquals(ContentSource.NOTES, mapping["AdditionalNotes"])
+        assertEquals(null, mapping["SecondaryDefinition"])
+    }
+
+    // Migaku has no notes field, and a note never rides in a definition
+    // field (2026-11-11), so nothing of Migaku's maps to it.
+    @Test fun `Migaku maps no field to Notes`() {
+        val mapping = AnkiCardTypeMapper.defaultsForModel(model("Migaku Japanese", MIGAKU_FIELDS), CardMode.WORD)
+        assertFalse(mapping.values.contains(ContentSource.NOTES))
+        assertEquals(ContentSource.DEFINITION, mapping["Definitions"])
+    }
+
+    // ─── Saved mappings brought up to the 2026-11 sources ────────────────
+
+    private fun lapisSaved(main: ContentSource, glossary: ContentSource?, misc: ContentSource? = ContentSource.NONE) =
+        buildMap {
+            put("Expression", ContentSource.EXPRESSION)
+            put("MainDefinition", main)
+            glossary?.let { put("Glossary", it) }
+            misc?.let { put("MiscInfo", it) }
+        }
+
+    // Mutations: rewrite MainDefinition alone; rewrite Glossary alone;
+    // rewrite the pair from a state the user arranged.
+    @Test fun `a saved Lapis mapping moves its two definition fields as a pair, from the old default only`() {
+        val moved = AnkiCardTypeMapper.withGlossaryAndNotesSources(
+            lapisSaved(ContentSource.DEFINITION, ContentSource.NONE),
+        )
+        assertEquals(ContentSource.GLOSSARY_PRIMARY, moved["MainDefinition"])
+        assertEquals(ContentSource.GLOSSARY, moved["Glossary"])
+
+        // The user put the panel in Glossary: both stay (one field alone
+        // would leave Yomitan's markup on page one and our panel on page two).
+        val both = lapisSaved(ContentSource.DEFINITION, ContentSource.DEFINITION)
+        assertEquals(both - "MiscInfo", AnkiCardTypeMapper.withGlossaryAndNotesSources(both) - "MiscInfo")
+        // The user cleared or changed MainDefinition: Glossary is not filled.
+        for (main in listOf(ContentSource.NONE, ContentSource.WORDS_TABLE)) {
+            val own = lapisSaved(main, ContentSource.NONE)
+            assertEquals(own - "MiscInfo", AnkiCardTypeMapper.withGlossaryAndNotesSources(own) - "MiscInfo")
+        }
+        // A trimmed Lapis with no Glossary field keeps everything in its panel.
+        val trimmed = lapisSaved(ContentSource.DEFINITION, glossary = null)
+        assertEquals(ContentSource.DEFINITION, AnkiCardTypeMapper.withGlossaryAndNotesSources(trimmed)["MainDefinition"])
+    }
+
+    // Mutations: fill a note field that holds something; fill it without
+    // the template's fingerprint.
+    @Test fun `a saved mapping's unmapped note field takes Notes, on its own template only`() {
+        assertEquals(
+            ContentSource.NOTES,
+            AnkiCardTypeMapper.withGlossaryAndNotesSources(
+                lapisSaved(ContentSource.WORDS_TABLE, ContentSource.NONE),
+            )["MiscInfo"],
+        )
+        val kept = lapisSaved(ContentSource.DEFINITION, ContentSource.NONE, misc = ContentSource.SENTENCE)
+        assertEquals(ContentSource.SENTENCE, AnkiCardTypeMapper.withGlossaryAndNotesSources(kept)["MiscInfo"])
+
+        val jpmn = mapOf(
+            "Word" to ContentSource.EXPRESSION, "PrimaryDefinition" to ContentSource.DEFINITION,
+            "AdditionalNotes" to ContentSource.NONE,
+        )
+        val movedJpmn = AnkiCardTypeMapper.withGlossaryAndNotesSources(jpmn)
+        assertEquals(ContentSource.NOTES, movedJpmn["AdditionalNotes"])
+        assertEquals("JPMN's definition field is not a Yomitan-format field", ContentSource.DEFINITION, movedJpmn["PrimaryDefinition"])
+
+        // The same field names on a note type that is neither: untouched,
+        // the very instance.
+        val custom = mapOf(
+            "Front" to ContentSource.EXPRESSION, "MainDefinition" to ContentSource.DEFINITION,
+            "Glossary" to ContentSource.NONE, "MiscInfo" to ContentSource.NONE,
+            "AdditionalNotes" to ContentSource.NONE,
+        )
+        assertTrue(AnkiCardTypeMapper.withGlossaryAndNotesSources(custom) === custom)
+    }
 
     @Test fun `JPMN canonical name picks JPMN defaults`() {
         val m = model("Japanese Mining Note", JPMN_FIELDS)
@@ -386,7 +475,7 @@ class AnkiCardTypeMapperTest {
         val flds = AnkiCardTypeMapper.assembleBasicNote(
             modelFieldNames = listOf("Front", "Back"),
             mode = CardMode.WORD,
-            outputs = sampleOutputs(),
+            outputs = sampleOutputs().copy(notes = ""),
         )
         assertEquals(listOf("expr", "<div>def</div>"), flds)
     }
@@ -395,9 +484,25 @@ class AnkiCardTypeMapperTest {
         val flds = AnkiCardTypeMapper.assembleBasicNote(
             modelFieldNames = listOf("Front", "Back"),
             mode = CardMode.SENTENCE,
-            outputs = sampleOutputs(),
+            outputs = sampleOutputs().copy(notes = ""),
         )
         assertEquals(listOf("sent", "trans"), flds)
+    }
+
+    // Basic has two fields and no mapping, so it is the one note type
+    // where the note shares a field: under the Back's content.
+    // Mutations: drop the note; put it on the Front; glue it to the Back
+    // with no gap; leave a gap above a note that stands alone.
+    @Test fun `assembleBasicNote puts the user's note under the Back in both modes`() {
+        fun basic(mode: CardMode, outputs: CardOutputs) =
+            AnkiCardTypeMapper.assembleBasicNote(listOf("Front", "Back"), mode, outputs)
+
+        assertEquals(listOf("expr", "<div>def</div><br><br>my note"), basic(CardMode.WORD, sampleOutputs()))
+        assertEquals(listOf("sent", "trans<br><br>my note"), basic(CardMode.SENTENCE, sampleOutputs()))
+        assertEquals(
+            listOf("sent", "my note"),
+            basic(CardMode.SENTENCE, sampleOutputs().copy(sentenceTranslation = "")),
+        )
     }
 
     @Test fun `assembleBasicNote 3-field includes Picture in both modes`() {
@@ -406,13 +511,13 @@ class AnkiCardTypeMapperTest {
             mode = CardMode.WORD,
             outputs = sampleOutputs(),
         )
-        assertEquals(listOf("expr", "<div>def</div>", "pic.jpg"), wordFlds)
+        assertEquals(listOf("expr", "<div>def</div><br><br>my note", "pic.jpg"), wordFlds)
         val sentenceFlds = AnkiCardTypeMapper.assembleBasicNote(
             modelFieldNames = listOf("Front", "Back", "Picture"),
             mode = CardMode.SENTENCE,
             outputs = sampleOutputs(),
         )
-        assertEquals(listOf("sent", "trans", "pic.jpg"), sentenceFlds)
+        assertEquals(listOf("sent", "trans<br><br>my note", "pic.jpg"), sentenceFlds)
     }
 
     // ─── Unknown ─────────────────────────────────────────────────────────
@@ -452,6 +557,9 @@ class AnkiCardTypeMapperTest {
         frequency = "★★★",
         partOfSpeech = "noun",
         wordsTable = "<table>words</table>",
+        notes = "my note",
+        glossary = "<div class=\"yomitan-glossary\">all</div>",
+        glossaryPrimary = "<div class=\"yomitan-glossary\">first</div>",
         pitchPosition = "0,2",
         frequencyValues = "<ul><li>★★★</li></ul>",
         frequencyStylized = "<div class=\"frequencies__group\"></div>",
@@ -750,14 +858,20 @@ class AnkiCardTypeMapperTest {
             sentenceWith(imported), imageFilename = null,
             definitionsHeader = "Definitions",
             structuredGlossaries = glossaries, dictStyles = css,
+            dictTitles = mapOf("d1" to "Jitendex.org [2025]"),
         )
 
         assertEquals(
             WordCardDefinition.fromSenses("猫", listOf(imported), fallback = "cat (Jitendex)")
-                .panelHtml(inlineStyler, YomitanStyledData(glossaries, css), "Definitions") { null },
+                .glossary(
+                    YomitanStyledData(glossaries, css), mapOf("d1" to "Jitendex.org [2025]"),
+                    CardGlossary.RAW_POS,
+                ) { null }
+                .panelHtml(inlineStyler, "Definitions"),
             outputs.definition,
         )
-        assertTrue(outputs.definition, outputs.definition.contains("data-dictionary=\"d1\""))
+        assertTrue(outputs.definition, outputs.definition.contains("data-dictionary=\"Jitendex.org [2025]\""))
+        assertFalse(outputs.definition, outputs.definition.contains("d1"))
         assertTrue(outputs.definition, outputs.definition.contains("<style>"))
         assertTrue(outputs.definition, outputs.definition.contains("Definitions"))
         assertFalse("flat transport text no longer ships", outputs.definition.contains("cat (Jitendex)"))
@@ -769,7 +883,9 @@ class AnkiCardTypeMapperTest {
             sentenceWith(meaning = "1. cat\n2. kitten"), imageFilename = null,
         )
         assertEquals(
-            WordAnkiHtmlBuilder.wrapFlatDefinitionHtml("1. cat\n2. kitten", inlineStyler, "Definitions"),
+            WordCardDefinition(fallback = "1. cat\n2. kitten")
+                .glossary(null, emptyMap(), CardGlossary.RAW_POS) { null }
+                .panelHtml(inlineStyler, "Definitions"),
             outputs.definition,
         )
     }
@@ -781,4 +897,159 @@ class AnkiCardTypeMapperTest {
         assertEquals("", AnkiCardOutputBuilder.forSentence(data, imageFilename = null).definition)
     }
 
+    // ─── The 2026-11 sources: Notes and the Yomitan-format definitions ───
+
+    // Mutation: route one of the three to another output.
+    @Test fun `assembleNote routes Notes and the two glossary sources`() {
+        val flds = AnkiCardTypeMapper.assembleNote(
+            modelFieldNames = listOf("MiscInfo", "MainDefinition", "Glossary"),
+            mapping = mapOf(
+                "MiscInfo" to ContentSource.NOTES,
+                "MainDefinition" to ContentSource.GLOSSARY_PRIMARY,
+                "Glossary" to ContentSource.GLOSSARY,
+            ),
+            outputs = sampleOutputs(),
+        )
+        assertEquals(
+            listOf(
+                "my note",
+                "<div class=\"yomitan-glossary\">first</div>",
+                "<div class=\"yomitan-glossary\">all</div>",
+            ),
+            flds,
+        )
+    }
+
+    // The sentence card's glossary sources are the highlighted word's
+    // rows, the ones DEFINITION draws as the panel, in Yomitan's markup.
+    // Mutations: fill them from the whole sentence; swap all and primary.
+    @Test fun `forSentence fills the glossary sources from the highlighted word, primary first dictionary only`() {
+        val imported = SenseDisplay(
+            pos = listOf("Jitendex · n"), definition = "cat (flat)", misc = emptyList(),
+            imported = true, scRowid = 7L, dictId = "d1",
+        )
+        val own = SenseDisplay(pos = listOf("noun"), definition = "cat", misc = emptyList())
+        val outputs = AnkiCardOutputBuilder.forSentence(
+            sentenceWith(imported, own), imageFilename = null,
+            structuredGlossaries = mapOf(7L to structuredCat),
+            dictStyles = mapOf("d1" to "li{color:red}"),
+            dictTitles = mapOf("d1" to "Jitendex.org [2025]"),
+        )
+
+        val item = "<li data-dictionary=\"Jitendex.org [2025]\"><i>(n, Jitendex)</i> " +
+            "<span class=\"structured-content\"><div class=\"gloss-item\">" +
+            "<ul class=\"gloss-sc-ul\"><li class=\"gloss-sc-li\">cat</li></ul></div></span></li>"
+        val style = "<style>.yomitan-glossary [data-dictionary=\"Jitendex.org [2025]\"] li{color:red;}</style>"
+        assertEquals(
+            "<div style=\"text-align: left;\" class=\"yomitan-glossary\"><ol>$item</ol></div>$style",
+            outputs.glossaryPrimary,
+        )
+        assertEquals(
+            "<div style=\"text-align: left;\" class=\"yomitan-glossary\"><ol>$item" +
+                "<li data-dictionary=\"PlayTranslate\"><i>(noun, PlayTranslate)</i> cat</li></ol></div>$style",
+            outputs.glossary,
+        )
+        // Nothing highlighted: empty, as DEFINITION is.
+        val none = AnkiCardOutputBuilder.forSentence(
+            sentenceWith(own).copy(selectedWords = emptySet()), imageFilename = null,
+        )
+        assertEquals("", none.glossary)
+        assertEquals("", none.glossaryPrimary)
+    }
+
+    // Mutations: ship the note raw; keep its outer whitespace; drop its
+    // line breaks; fill the field for a blank note.
+    @Test fun `the typed note is the Notes source in both modes, as plain escaped text`() {
+        val sentence = AnkiCardOutputBuilder.forSentence(
+            sentenceWith().copy(notes = "  line <one>\nline & two\r\n\n3  "), imageFilename = null,
+        )
+        assertEquals("line &lt;one&gt;<br>line &amp; two<br><br>3", sentence.notes)
+        assertEquals("", AnkiCardOutputBuilder.forSentence(sentenceWith().copy(notes = " \n "), imageFilename = null).notes)
+
+        val word = AnkiCardOutputBuilder.forWord(
+            word = "猫", reading = "ねこ", pos = "noun", definitionHtml = "<div>def</div>",
+            freqScore = 0, pitch = emptyList(), frequencies = emptyList(), imageFilename = null,
+            glossaryHtml = "ALL", glossaryPrimaryHtml = "FIRST", notes = "a <b> note",
+        )
+        assertEquals("a &lt;b&gt; note", word.notes)
+        assertEquals("ALL", word.glossary)
+        assertEquals("FIRST", word.glossaryPrimary)
+    }
+
+    // The pipeline rebuilds the sheet's card data from its input by hand,
+    // which is where a field gets left behind.
+    // Mutation: leave the note out of the rebuilt card data.
+    @Test fun `the pipeline's card data carries the note the sheet handed over`() {
+        val input = SentenceSendInput(
+            original = "猫が好き", translation = "I like cats", words = emptyList(),
+            selectedWords = emptySet(), sourceLangId = com.playtranslate.language.SourceLangId.JA,
+            screenshot = null, includeSentenceAudio = false, notes = "from chapter 3",
+        )
+        assertEquals("from chapter 3", input.toCardData().notes)
+    }
+
+    // The three hosts of the sentence editor copy the sheet's card into a
+    // send through this one function.
+    // Mutation: leave any one field of the card behind (the note first).
+    @Test fun `a sheet's card becomes the send input whole`() {
+        val entry = SentenceAnkiHtmlBuilder.WordEntry("猫", "ねこ", "cat")
+        val override = com.playtranslate.language.ReadingOverride("猫", "猫", "ねこ")
+        val shot = ScreenshotAttachment("/tmp/shot.jpg")
+        val pick = com.playtranslate.audio.AudioSelection.Auto
+        val data = SentenceAnkiContentView.CardData(
+            source = "猫が好き", target = "I like cats", words = listOf(entry),
+            selectedWords = setOf("猫"), screenshot = shot,
+            sourceLangId = com.playtranslate.language.SourceLangId.ZH,
+            targetWordAudioWords = setOf("猫"), sentenceSelection = pick,
+            wordSelections = mapOf("猫" to pick), readingOverride = override,
+            notes = "from chapter 3",
+        )
+
+        assertEquals(
+            SentenceSendInput(
+                original = "猫が好き", translation = "I like cats", words = listOf(entry),
+                selectedWords = setOf("猫"), sourceLangId = com.playtranslate.language.SourceLangId.ZH,
+                screenshot = shot, includeSentenceAudio = true, notes = "from chapter 3",
+                targetWordAudioWords = setOf("猫"), sentenceSelection = pick,
+                wordSelections = mapOf("猫" to pick), examplesHtml = "<div>ex</div>",
+                readingOverride = override,
+            ),
+            data.toSendInput(includeSentenceAudio = true, examplesHtml = "<div>ex</div>"),
+        )
+        assertEquals("", data.toSendInput(includeSentenceAudio = false).examplesHtml)
+        assertFalse(data.toSendInput(includeSentenceAudio = false).includeSentenceAudio)
+    }
+
+    // ─── Where a typed note lands, and when Save must ask ────────────────
+
+    // Mutations: count a stale mapping entry as a destination; count any
+    // mapped field; hold a note on an own model without the field.
+    @Test fun `a card type holds a note when the assembler has a field to write it to`() {
+        assertTrue(NotesDestination.ownModel(PtModels.WORD.fields))
+        assertTrue(NotesDestination.ownModel(PtModels.SENTENCE.fields))
+        // The user renamed or removed the field in Anki, or the model is
+        // a generation from before the field existed.
+        assertFalse(NotesDestination.ownModel(PtModels.WORD.fields - "Notes"))
+
+        assertTrue(NotesDestination.basic(listOf("Front", "Back")))
+        assertTrue(NotesDestination.basic(listOf("Front", "Back", "Picture")))
+
+        val lapis = AnkiCardTypeMapper.defaultsForModel(model("Lapis", LAPIS_FIELDS), CardMode.WORD)
+        assertTrue(NotesDestination.mapped(LAPIS_FIELDS, lapis))
+        val jpmn = AnkiCardTypeMapper.defaultsForModel(model("JPMN", JPMN_FIELDS), CardMode.WORD)
+        assertTrue(NotesDestination.mapped(JPMN_FIELDS, jpmn))
+        val migaku = AnkiCardTypeMapper.defaultsForModel(model("Migaku Japanese", MIGAKU_FIELDS), CardMode.WORD)
+        assertFalse(NotesDestination.mapped(MIGAKU_FIELDS, migaku))
+        // A mapping entry for a field the model no longer has is no destination.
+        assertFalse(NotesDestination.mapped(listOf("Word", "Meaning"), mapOf("OldNotes" to ContentSource.NOTES)))
+        assertTrue(NotesDestination.mapped(listOf("Word", "Extra"), mapOf("Extra" to ContentSource.NOTES)))
+    }
+
+    // Mutations: ask about a blank note; ask when the note has a place.
+    @Test fun `Save asks only for a typed note with nowhere to go`() {
+        assertTrue(notesNeedConsent(hasNotes = true, holdsNotes = false))
+        assertFalse(notesNeedConsent(hasNotes = true, holdsNotes = true))
+        assertFalse(notesNeedConsent(hasNotes = false, holdsNotes = false))
+        assertFalse(notesNeedConsent(hasNotes = false, holdsNotes = true))
+    }
 }

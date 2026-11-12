@@ -690,23 +690,12 @@ class AnkiSentenceEditorPage(
         }
         // A card saved mid-fill used to ship without its words table.
         wordsFillJob?.join()
-        val data = content.getCardData()
-        val input = SentenceSendInput(
-            original = data.source,
-            translation = data.target,
-            words = data.words,
-            selectedWords = data.selectedWords,
-            sourceLangId = data.sourceLangId,
-            screenshot = data.screenshot,
-            includeSentenceAudio = content.sentenceAudioEnabled,
-            targetWordAudioWords = data.targetWordAudioWords,
-            sentenceSelection = data.sentenceSelection,
-            wordSelections = data.wordSelections,
-            readingOverride = data.readingOverride,
+        val input = content.getCardData().toSendInput(content.sentenceAudioEnabled)
+        val result = ctx.sendSentenceCard(
+            input, deckId,
+            oversizePrompt = { awaitOversizeConsent(ctx) { it.showInParent(host.modalLayer) } },
+            notesPrompt = { awaitNotesDropConsent(ctx) { it.showInParent(host.modalLayer) } },
         )
-        val result = ctx.sendSentenceCard(input, deckId, oversizePrompt = {
-            awaitOversizeConsent(ctx) { it.showInParent(host.modalLayer) }
-        })
         if (result is AnkiSendResult.NeedsMapping) {
             host.push(
                 AnkiFieldMappingPage(

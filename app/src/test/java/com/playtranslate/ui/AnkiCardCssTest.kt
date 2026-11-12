@@ -98,7 +98,7 @@ class AnkiCardCssTest {
     @Test
     fun `styleBlocks emits one scoped style element per dictionary with css`() {
         val html = AnkiCardCss.styleBlocks(
-            listOf("d1", "d2", "d1"),
+            mapOf("d1" to AnkiCardCss.ownScope("d1"), "d2" to AnkiCardCss.ownScope("d2")),
             mapOf("d1" to "span { color: red }", "d2" to "  "),
         )
         assertEquals(1, Regex("<style>").findAll(html).count())
@@ -156,7 +156,7 @@ class AnkiCardCssTest {
     @Test
     fun `a style terminator inside dictionary css cannot escape the block`() {
         val html = AnkiCardCss.styleBlocks(
-            listOf("d1"),
+            mapOf("d1" to AnkiCardCss.ownScope("d1")),
             mapOf(
                 "d1" to "span::before { content: \"</style><script>alert(1)</script>\"; }" +
                     " em { color: blue }",
@@ -175,7 +175,7 @@ class AnkiCardCssTest {
     @Test
     fun `case variants of the terminator are neutralized too`() {
         val html = AnkiCardCss.styleBlocks(
-            listOf("d1"),
+            mapOf("d1" to AnkiCardCss.ownScope("d1")),
             mapOf("d1" to "span::after { content: \"</StYlE><b>x</b>\"; }"),
         )
         // The neutralizer removes every `</`, so no case variant of the
@@ -187,12 +187,44 @@ class AnkiCardCssTest {
     @Test
     fun `terminator smuggled outside a string cannot end the block early`() {
         val html = AnkiCardCss.styleBlocks(
-            listOf("d1"),
+            mapOf("d1" to AnkiCardCss.ownScope("d1")),
             mapOf("d1" to "</style><img src=x onerror=alert(1)> span { color: red }"),
         )
         // Whatever garbage the payload carried stays INSIDE the raw-text
         // element (inert there); the block closes exactly once, at the end.
         assertEquals(1, Regex("</style", RegexOption.IGNORE_CASE).findAll(html).count())
         assertTrue(html.endsWith("</style>"))
+    }
+
+    // ── Scopes by dictionary title ──────────────────────────────────────
+
+    // Mutations: drop one of the escapes; swap the two scopes.
+    @Test
+    fun `a title becomes a quoted attribute value in either scope`() {
+        assertEquals(".gl-sc[data-dictionary=\"Jitendex.org [2025]\"]", AnkiCardCss.ownScope("Jitendex.org [2025]"))
+        assertEquals(
+            ".yomitan-glossary [data-dictionary=\"Jitendex.org [2025]\"]",
+            AnkiCardCss.yomitanScope("Jitendex.org [2025]"),
+        )
+        assertEquals("a\\\\b", AnkiCardCss.cssString("a\\b"))
+        assertEquals("a\\\"b", AnkiCardCss.cssString("a\"b"))
+        // A hex escape ends at the space after it, so the next character
+        // cannot be read into it.
+        assertEquals("a\\a b\\d c\\c d", AnkiCardCss.cssString("a\nb\rc\u000Cd"))
+        assertEquals("明鏡国語辞典 第三版", AnkiCardCss.cssString("明鏡国語辞典 第三版"))
+    }
+
+    // Mutation: iterate the stylesheets instead of the dictionaries asked for.
+    @Test
+    fun `style blocks follow the dictionaries asked for, in order, each in its own scope`() {
+        val html = AnkiCardCss.styleBlocks(
+            linkedMapOf("d2" to AnkiCardCss.yomitanScope("B"), "d1" to AnkiCardCss.ownScope("A")),
+            mapOf("d1" to "i{color:red}", "d2" to "b{color:blue}", "d3" to "u{color:green}"),
+        )
+        assertEquals(
+            "<style>.yomitan-glossary [data-dictionary=\"B\"] b{color:blue;}</style>" +
+                "<style>.gl-sc[data-dictionary=\"A\"] i{color:red;}</style>",
+            html,
+        )
     }
 }

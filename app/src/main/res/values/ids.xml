@@ -10,6 +10,12 @@
          text across process death. -->
     <item name="etAnkiOriginal" type="id" />
     <item name="etAnkiTranslation" type="id" />
+    <!-- The same for the Notes box (addAnkiNotesSection). Two ids because the
+         word sheet holds a sentence tab and a word tab at once, each with a
+         Notes box of its own: a shared id would restore one tab's note into
+         the other. -->
+    <item name="etAnkiSentenceNotes" type="id" />
+    <item name="etAnkiWordNotes" type="id" />
 
     <!-- The results section headers' action views. SectionHeaderRow builds
          them in code from TranslationSectionBinder's HeaderActions, so their

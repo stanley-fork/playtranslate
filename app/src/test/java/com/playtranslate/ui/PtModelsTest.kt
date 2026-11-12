@@ -21,13 +21,13 @@ class PtModelsTest {
     private val wordNote = PtNote.Word(
         expression = "e", reading = "r", pitchPosition = "0,2",
         partOfSpeech = "p", definition = "d", examples = "x",
-        frequency = "f", picture = "i", wordAudio = "a", audioCredit = "c",
+        frequency = "f", picture = "i", wordAudio = "a", audioCredit = "c", notes = "n",
     )
 
     private val sentenceNote = PtNote.Sentence(
         sentence = "s", sentenceFurigana = "sf", translation = "t",
         targetWord = "tw", wordsTable = "wt", picture = "p",
-        sentenceAudio = "a", audioCredit = "c",
+        sentenceAudio = "a", audioCredit = "c", notes = "n",
     )
 
     // ── payload ↔ spec drift ─────────────────────────────────────────────
@@ -46,6 +46,40 @@ class PtModelsTest {
     @Test fun `sort fields are Expression and Sentence`() {
         assertEquals("Expression", PtModels.WORD.fields.first())
         assertEquals("Sentence", PtModels.SENTENCE.fields.first())
+    }
+
+    /** Notes is the last field of both: index 0 is the duplicate key and
+     *  index 1 is what [PtModels.classifyStoredTemplate] reads to tell the
+     *  provider's auto-generated back from ours. */
+    // Mutation: insert Notes anywhere but the end.
+    @Test fun `Notes is the last field of both note types`() {
+        for (spec in specs) {
+            assertEquals("Notes", spec.fields.last())
+            assertEquals(1, spec.fields.count { it == "Notes" })
+        }
+        assertEquals("Reading", PtModels.WORD.fields[1])
+        assertEquals("SentenceFurigana", PtModels.SENTENCE.fields[1])
+    }
+
+    /** The note is shown where the sheet asks for it: under the
+     *  definitions on the word back, under the translation inside the
+     *  sentence back's panel; never on a front, and only when there is one. */
+    // Mutations: show the note on a front; render the block unconditionally;
+    // move it out from under the definitions / the translation.
+    @Test fun `each back shows the note under its anchor and no front shows it`() {
+        val block = "{{#Notes}}<div class=\"pt-notes\">{{Notes}}</div>{{/Notes}}"
+        assertTrue(PtModels.WORD.afmt.contains("{{Definition}}$block{{Examples}}"))
+        assertTrue(
+            PtModels.SENTENCE.afmt.contains(
+                "{{#Translation}}<div class=\"pt-translation\">{{Translation}}</div>{{/Translation}}$block</div>",
+            ),
+        )
+        for (spec in specs) {
+            assertFalse(spec.qfmt.contains("Notes"))
+            assertEquals(1, Regex("\\{\\{Notes\\}\\}").findAll(spec.afmt).count())
+            assertTrue("${spec.name} css missing .pt-notes", spec.css.contains(".pt-notes{text-align:left;"))
+        }
+        assertTrue(PtModels.SENTENCE.css.contains(".pt-back-panel .pt-notes{"))
     }
 
     @Test fun `specFor maps modes to their models`() {
@@ -178,7 +212,7 @@ class PtModelsTest {
         "gl-secondary", "gl-hint", "gl-hl", "gl-hl-bg",
         "gl-sense", "gl-sense-n", "gl-sense-b", "gl-pos", "gl-gloss", "gl-misc",
         "gl-ex", "gl-ex-tr", "gl-section", "gl-panel", "gl-rows", "gl-row",
-        "gl-stars", "gl-chip", "gl-pill",
+        "gl-stars", "gl-chip", "gl-pill", "gl-sc",
     )
 
     /** Classes only the sentence card's words-table cells emit — the
@@ -243,7 +277,12 @@ class PtModelsTest {
         // took the default send away from it, so hiding it too would leave
         // no way to send there.
         assertFalse(PtModels.isSyntheticName("PlayTranslate Sentence"))
-        assertEquals("PlayTranslate Sentence+", PtModels.SENTENCE.name)
+        // The 2026-11 generation (the Notes field): one more "+" on each.
+        // Both names it superseded join the retired ones, pickable.
+        assertEquals("PlayTranslate Word+", PtModels.WORD.name)
+        assertEquals("PlayTranslate Sentence++", PtModels.SENTENCE.name)
+        assertFalse(PtModels.isSyntheticName("PlayTranslate Word"))
+        assertFalse(PtModels.isSyntheticName("PlayTranslate Sentence+"))
         assertFalse(PtModels.isSyntheticName("PlayTranslate Mining"))
         assertFalse(PtModels.isSyntheticName("PlayTranslate Sentence Mining"))
         assertFalse(PtModels.isSyntheticName("Lapis"))

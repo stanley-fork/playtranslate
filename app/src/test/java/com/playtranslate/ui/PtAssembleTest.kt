@@ -15,12 +15,12 @@ class PtAssembleTest {
     private val note = PtNote.Sentence(
         sentence = "SEN", sentenceFurigana = "FUR", translation = "TRA",
         targetWord = "TGT", wordsTable = "TAB", picture = "PIC",
-        sentenceAudio = "AUD", audioCredit = "CRE",
+        sentenceAudio = "AUD", audioCredit = "CRE", notes = "NOT",
     )
 
     @Test fun `canonical field list assembles in order`() {
         assertEquals(
-            listOf("SEN", "FUR", "TRA", "TGT", "TAB", "PIC", "AUD", "CRE"),
+            listOf("SEN", "FUR", "TRA", "TGT", "TAB", "PIC", "AUD", "CRE", "NOT"),
             PtModels.assemble(PtModels.SENTENCE.fields, note),
         )
     }
@@ -28,7 +28,7 @@ class PtAssembleTest {
     @Test fun `user-added field gets empty string`() {
         val fields = PtModels.SENTENCE.fields + "MyNotes"
         assertEquals(
-            listOf("SEN", "FUR", "TRA", "TGT", "TAB", "PIC", "AUD", "CRE", ""),
+            listOf("SEN", "FUR", "TRA", "TGT", "TAB", "PIC", "AUD", "CRE", "NOT", ""),
             PtModels.assemble(fields, note),
         )
     }

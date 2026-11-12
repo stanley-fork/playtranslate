@@ -73,6 +73,7 @@ class AnkiCardWordAudioCreditTest {
             freqScore = 0, pitch = emptyList(), frequencies = emptyList(),
             imageFilename = null, audioFilename = "cat.ogg",
             audioCredit = "Jane (CC BY-SA 4.0), via Wikimedia Commons",
+            notes = "",
         )
         assertEquals("[sound:cat.ogg]", note.wordAudio)
         assertTrue("credit lands in AudioCredit", note.audioCredit.contains("Jane"))

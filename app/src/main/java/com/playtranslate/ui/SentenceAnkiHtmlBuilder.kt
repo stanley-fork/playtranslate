@@ -460,9 +460,11 @@ object SentenceAnkiHtmlBuilder {
      * `.gl-w` row — no accent fill; the accent underline in the
      * sentence body is what marks targets. ALL senses render — the
      * card is archival, and nothing in the app knows which sense is
-     * the right one, so none may be dropped. When [WordEntry.senses]
-     * is empty, falls back to the flattened meaning lines (which carry
-     * their own baked numbering).
+     * the right one, so none may be dropped (a sense with no text is
+     * no row, as on the word card). The senses are the one
+     * card-definition loop in its cell layout ([CardGlossary.cellHtml]);
+     * with no row to draw, the cell falls back to the flattened meaning
+     * lines (which carry their own baked numbering).
      */
     internal fun buildWordsHtmlWith(
         words: List<WordEntry>,
@@ -474,7 +476,7 @@ object SentenceAnkiHtmlBuilder {
          *  Words absent from this map get no audio tag. */
         wordAudioFilenames: Map<String, String> = emptyMap(),
         /** When true, render each word's reading with its pitch-accent contour
-         *  (the legacy PT card back). Default false so the structured
+         *  (our own Sentence note type's back). Default false so the structured
          *  WORDS_TABLE path — which ships no pitch CSS and already gets pitch
          *  via the PitchPosition/PAOverride fields — emits no `pa-*` markup. */
         renderPitch: Boolean = false,
@@ -492,18 +494,24 @@ object SentenceAnkiHtmlBuilder {
         renderMisc: (List<String>) -> String? = { null },
         /** [SenseDisplay.scRowid] → structured glossary JSON, prefetched by
          *  the send pipeline. Senses with an entry render as real structure
-         *  (`.gl-sc`, GLOSSARY_CSS on the v005 model); everything else
-         *  keeps the flat row. Empty = today's rendering throughout. */
+         *  (`.gl-sc`, the note type's glossary CSS); everything else keeps
+         *  the flat row. Empty = flat rows throughout. */
         structuredGlossaries: Map<Long, String> = emptyMap(),
         /** dictId -> raw styles.css. Dictionaries whose structured senses
-         *  actually render get their CSS scoped
-         *  ([AnkiCardCss.scopeFor]) and inlined as a <style> block ahead
-         *  of the table — the Yomitan-standard card shape. */
+         *  actually render get their CSS scoped ([AnkiCardCss.ownScope])
+         *  and inlined as one <style> block each, ahead of the table. */
         dictStyles: Map<String, String> = emptyMap(),
+        /** dictId -> the dictionary's own title, the `data-dictionary` a
+         *  structured row carries and its CSS is scoped to; a dictionary
+         *  missing here is tagged with its label ([CardGlossary]). */
+        dictTitles: Map<String, String> = emptyMap(),
     ): String {
         if (words.isEmpty()) return ""
         val sb = StringBuilder()
-        val usedDictIds = mutableSetOf<String>()
+        val styled = YomitanStyledData(structuredGlossaries, dictStyles)
+            .takeIf { structuredGlossaries.isNotEmpty() }
+        // Dict id to title, in the order their structured rows first drew.
+        val styledDictionaries = LinkedHashMap<String, String>()
         var prevWasTarget = false
         words.forEach { entry ->
             val isTarget = entry.word in highlightedWords
@@ -514,7 +522,6 @@ object SentenceAnkiHtmlBuilder {
             // (An accent-coloured target headword was tried and rejected
             // on device — keep it text-coloured.)
             val titleSize = if (isTarget) "font-size:1.15em;" else ""
-            val defSize = if (isTarget) "font-size:0.9em;" else ""
             // The first context row after the target block drops its
             // hairline — the cells' surfaces already separate the groups.
             val cellExtra = if (!isTarget && prevWasTarget) "border-top:0;" else ""
@@ -577,71 +584,19 @@ object SentenceAnkiHtmlBuilder {
                 sb.append("</div>")
             }
 
-            // Senses: numbered rows, POS header only on change (the lens's
-            // rule: [DefinitionsDocument.contentHtml] keeps the same state).
-            // Caps were rejected by design review: every sense renders.
-            if (entry.senses.isNotEmpty()) {
-                var previousPos: List<String>? = null
-                entry.senses.forEachIndexed { i, sense ->
-                    if (sense.pos.isNotEmpty() && sense.pos != previousPos) {
-                        // Imported headers are display text (dictionary name ·
-                        // tags), never localized; caps come from the CSS
-                        // text-transform, not Kotlin.
-                        val label =
-                            if (sense.imported) sense.pos.joinToString(" · ")
-                            else localizePos(sense.pos)
-                        sb.append("<div ${styler("gl-pos-h gl-secondary", "")}>")
-                            .append(htmlEscape(label)).append("</div>")
-                        previousPos = sense.pos
-                    }
-                    val structuredHtml = sense.scRowid
-                        ?.let { structuredGlossaries[it] }
-                        ?.let {
-                            YomitanContentHtml.glossaryHtml(
-                                it, sense.dictId.orEmpty(), includeImages = false,
-                            )
-                        }
-                    sb.append("<div ${styler("gl-def", "")}>")
-                        .append("<span ${styler("gl-num gl-hint", defSize)}>")
-                        .append(i + 1).append(".</span>")
-                    if (structuredHtml != null) {
-                        // Structured glossary (the word card's shape) in the
-                        // sense body slot; block-level, so it sits beside
-                        // the number like the flat span does.
-                        sense.dictId?.let { usedDictIds.add(it) }
-                        sb.append("<div ${styler("gl-sc", "display:inline-block;vertical-align:top;")} data-dictionary=\"")
-                            .append(htmlEscape(sense.dictId.orEmpty()))
-                            .append("\">")
-                            .append(structuredHtml)
-                            .append("</div>")
-                    } else {
-                        sb.append("<span ${styler("gl-dtext", defSize)}>")
-                            // Imported flattened text carries real newlines
-                            // (sense groups, note lines); without <br> they
-                            // collapse to spaces in HTML and the definition
-                            // reads as one mashed run-on.
-                            .append(htmlEscape(sense.definition).replace("\n", "<br>"))
-                            .append("</span>")
-                    }
-                    sb.append("</div>")
-                    renderMisc(sense.misc)?.let { misc ->
-                        sb.append("<div ${styler("gl-misc gl-hint", "margin-left:25px;")}>")
-                            .append(htmlEscape(misc)).append("</div>")
-                    }
-                }
-            } else {
-                // No structured senses (no dictionary entry, or a pre-senses
-                // producer): today's flat meaning lines, already numbered.
-                entry.meaning.split("\n").filter { it.isNotBlank() }.forEach { line ->
-                    sb.append("<div ${styler("gl-dtext gl-secondary", defSize + "margin-top:6px;")}>")
-                        .append(htmlEscape(line)).append("</div>")
-                }
-            }
+            // The word's definitions: the one card-definition loop
+            // ([WordCardDefinition.glossary]) in the cell's layout. Caps
+            // were rejected by design review: every sense renders.
+            val glossary = WordCardDefinition
+                .fromSenses(entry.word, entry.senses, fallback = entry.meaning)
+                .glossary(styled, dictTitles, localizePos, renderMisc)
+            for ((dictId, title) in glossary.styledDictionaries()) styledDictionaries.putIfAbsent(dictId, title)
+            sb.append(glossary.cellHtml(styler, isTarget))
             sb.append("</div>")
         }
         // Tier 2: dictionaries whose structured senses actually rendered
         // carry their own styles.css, scoped per dictionary and inlined
-        // ahead of the table — the Yomitan-standard card shape.
-        return AnkiCardCss.styleBlocks(usedDictIds, dictStyles) + sb.toString()
+        // ahead of the table, once for all its cells.
+        return CardGlossary.ownStyleBlocks(styledDictionaries, dictStyles) + sb.toString()
     }
 }
