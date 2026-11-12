@@ -403,17 +403,26 @@ class TranslationResultViewModel(scope: CoroutineScope) : ViewModel(scope) {
      * fallback has no surfaces: null lets the one-tap helper await the
      * per-sentence cache, which is atomic. The pending rides the VM result
      * only: it is meaningful solely beside its own result's text.
+     *
+     * The words' explanations are [fallback]'s (this model holds none: a
+     * row's answer lives with its row, and is put into the context where
+     * the row is opened), and they stand only beside the text they were
+     * asked about ([explanationsAbout]): while the result's text is still
+     * [fallback]'s they ride along, and once it is another, as after an
+     * edit of the sentence, the context carries none.
      */
     fun sentenceContext(fallback: SentenceContext?): SentenceContext {
         val ready = _result.value as? ResultState.Ready
         val settledRows = (lookups.state.value as? WordLookupsState.Settled)?.rows
+        val original = ready?.result?.originalText ?: fallback?.original
         return SentenceContext(
-            original = ready?.result?.originalText ?: fallback?.original,
+            original = original,
             translation = ready?.result?.translatedText ?: fallback?.translation,
             wordResults = settledRows?.toLegacyMap() ?: fallback?.wordResults,
             surfaceForms = settledRows?.toSurfaceMap() ?: fallback?.surfaceForms,
             wordEnrichment = settledRows?.toEnrichmentMap() ?: fallback?.wordEnrichment,
             pending = ready?.result?.pendingTranslation,
+            explanations = fallback?.explanationsAbout(original).orEmpty(),
         )
     }
 }

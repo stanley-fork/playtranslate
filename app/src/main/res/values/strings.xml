@@ -1459,6 +1459,11 @@
     <!-- Placeholder text inside that Notes box while it is empty. -->
     <string name="anki_notes_hint">Add a note to this card</string>
 
+    <!-- contentDescription for the × button at the end of that Notes header,
+         shown while the box holds text: it empties the box, whether the
+         text was typed or filled in by the app. -->
+    <string name="cd_anki_notes_clear">Clear note</string>
+
     <!-- Group header — screenshot group. -->
     <string name="anki_group_screenshot">Screenshot</string>
 

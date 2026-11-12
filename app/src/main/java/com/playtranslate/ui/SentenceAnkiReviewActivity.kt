@@ -79,7 +79,9 @@ class SentenceAnkiReviewActivity : AppCompatActivity() {
         val audioAnchorMs = intent.getLongExtra(EXTRA_AUDIO_ANCHOR_MS, 0L).takeIf { it > 0 }
 
         showReviewSheet(sentence, translation, wordResults, surfaceForms,
-            wordEnrichment, screenshotPath, sourceLangId, pendingTranslation, audioAnchorMs)
+            wordEnrichment, screenshotPath, sourceLangId, pendingTranslation, audioAnchorMs,
+            // The note the card starts with ([putAnkiNotes] on the launch extras).
+            intent.extras?.getAnkiNotes().orEmpty())
     }
 
     private fun showReviewSheet(
@@ -92,6 +94,7 @@ class SentenceAnkiReviewActivity : AppCompatActivity() {
         sourceLangId: SourceLangId,
         pendingTranslation: com.playtranslate.model.PendingTranslation? = null,
         audioAnchorMs: Long? = null,
+        notes: String = "",
     ) {
         val sheet = AnkiReviewBottomSheet.newInstance(
             original = sentence,
@@ -103,6 +106,7 @@ class SentenceAnkiReviewActivity : AppCompatActivity() {
             sourceLangId = sourceLangId,
             pendingTranslation = pendingTranslation,
             audioAnchorMs = audioAnchorMs,
+            notes = notes,
         )
         sheet.onDismissListener = DialogInterface.OnDismissListener { finish() }
         sheet.show(supportFragmentManager, AnkiReviewBottomSheet.TAG)

@@ -106,6 +106,8 @@ class WordRowsBinderTest {
     private lateinit var root: View
     private lateinit var binder: WordRowsBinder
     private val tapped = mutableListOf<String>()
+    /** The answer each row tap in [tapped] handed the host. */
+    private val tappedExplanations = mutableListOf<String?>()
     /** [WordRowsBinder.onRowsWanted] invocations. */
     private var rowsWanted = 0
     /** [WordRowsBinder.Host.onAskNeedsLlm] invocations. */
@@ -141,7 +143,10 @@ class WordRowsBinderTest {
             override val isAlive: Boolean get() = true
             override val scope: CoroutineScope get() = this@WordRowsBinderTest.scope
             override val ttsAlertTarget: TtsAlertTarget get() = TtsAlertTarget.InActivity(activity)
-            override fun onWordTapped(row: RowState) { tapped += row.displayWord }
+            override fun onWordTapped(row: RowState, explanation: String?) {
+                tapped += row.displayWord
+                tappedExplanations += explanation
+            }
             override fun onAskNeedsLlm() { needsModel++ }
         },
     ).also { it.onRowsWanted = { rowsWanted++ } }
@@ -770,6 +775,69 @@ class WordRowsBinderTest {
         assertEquals("a released card asks nothing more", 3, cancelledRequests)
     }
 
+    // ── A row's answer, for an Anki card's note ─────────────────────────
+
+    // Mutations: hand a tap its neighbour's answer; count a question still
+    // out, a failure or a closed answer as an answer.
+    @Test
+    fun `a row tap hands the host the answer standing in the row, and nothing in any other state`() {
+        giveLlm()
+        binder.render(settledIn(sentence))
+        fun tapRow(word: String): String? {
+            tapOn(word, DefAction.OPEN)
+            assertEquals(word, tapped.last())
+            return tappedExplanations.last()
+        }
+
+        assertNull("nothing asked", tapRow("猫"))
+        tapOn("猫", DefAction.EXPLAIN)
+        assertNull("a question still out", tapRow("猫"))
+        answer("  the cat's ")
+        assertEquals("the cat's", tapRow("猫"))
+        assertNull("its neighbour's row has none", tapRow("魚"))
+
+        tapOn("魚", DefAction.EXPLAIN)
+        val r = reply
+        reply = CompletableDeferred()
+        r.completeExceptionally(java.io.IOException("no route"))
+        idle()
+        assertNull("a failure is no answer", tapRow("魚"))
+
+        tapOn("猫", DefAction.EXPLAIN_CLOSE)
+        assertNull("an answer put away", tapRow("猫"))
+    }
+
+    // Mutations: label a lone answer; drop the labels of several; order by
+    // when each was asked; keep an answer of the sentence before; name a
+    // word by the form it has in the text.
+    @Test
+    fun `the sentence card's note is one answer as it is and several each under its word, in the rows' order`() {
+        giveLlm()
+        // 食べる stands in the text as 食べた: its row is headed by the word.
+        val eat = row("食べる", "たべる", "to eat").copy(surface = "食べた")
+        binder.render(settledIn(sentence, rows[0], eat, rows[2]))
+        assertEquals("", sentenceCardNote(null, binder.explainedWords()))
+
+        tapOn("魚", DefAction.EXPLAIN)
+        assertEquals("a question still out is no note", "", sentenceCardNote(null, binder.explainedWords()))
+        answer("the fish's")
+        assertEquals("the fish's", sentenceCardNote(null, binder.explainedWords()))
+
+        tapOn("食べる", DefAction.EXPLAIN)
+        answer("the verb's")
+        assertEquals(
+            "the rows' order, not the order asked in, each under the word its row is headed by",
+            "食べる\nthe verb's\n\n魚\nthe fish's",
+            sentenceCardNote(null, binder.explainedWords()),
+        )
+
+        tapOn("魚", DefAction.EXPLAIN_CLOSE)
+        assertEquals("the verb's", sentenceCardNote(null, binder.explainedWords()))
+
+        binder.render(settledIn(otherSentence))
+        assertEquals("another sentence has none of these", "", sentenceCardNote(null, binder.explainedWords()))
+    }
+
     @Test
     fun `two rows are asked side by side and each shows its own answer`() {
         giveLlm()
@@ -1119,7 +1187,7 @@ class WordRowsBinderTest {
                 override val isAlive: Boolean get() = true
                 override val scope: CoroutineScope get() = this@WordRowsBinderTest.scope
                 override val ttsAlertTarget: TtsAlertTarget get() = TtsAlertTarget.InActivity(activity)
-                override fun onWordTapped(row: RowState) {}
+                override fun onWordTapped(row: RowState, explanation: String?) {}
                 override fun onAskNeedsLlm() {}
             },
         )

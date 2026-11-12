@@ -111,6 +111,11 @@ class WordAnkiReviewBinder(
 
         /** Close the hosting surface (a card was sent, or back). */
         fun dismiss()
+
+        /** A control of either tab took itself off the screen as it was
+         *  pressed ([SentenceAnkiContentView.Host.onControlGone], which the
+         *  sentence tab's content reaches through here too). */
+        fun onControlGone(next: View) {}
     }
 
     private var isSentenceMode = false
@@ -380,6 +385,10 @@ class WordAnkiReviewBinder(
                     wordsLoading = sentenceWords.isEmpty(),
                     audioAnchorMs = args.takeIf { it.containsKey(ARG_AUDIO_ANCHOR_MS) }
                         ?.getLong(ARG_AUDIO_ANCHOR_MS),
+                    // The opener's note is about this card's word, so the
+                    // sentence card for the word starts with it as the
+                    // word card does.
+                    notes = args.getAnkiNotes(),
                 )
             }
             contentArgs = cArgs
@@ -391,6 +400,11 @@ class WordAnkiReviewBinder(
             sentenceContainer.addView(contentRoot)
             content.buildInto(contentRoot, savedInstanceState)
             content.onOriginalCommitted = { newOriginal ->
+                // The word tab's note is the same answer the sentence tab
+                // just let go of, about the word in the sentence edited
+                // away: it follows the one rule, on this tab's box and
+                // this binder's args.
+                dropNoteOfEditedSentence(args, wordNotesField)
                 // Edited text is NOT the deferred capture's text — never pass
                 // the pending here (resolveAnkiTranslation's caller contract).
                 launchTranslationFill(newOriginal)
@@ -483,6 +497,8 @@ class WordAnkiReviewBinder(
 
         override fun openScreenshotCrop(state: AnkiScreenshotState) =
             host.openScreenshotCrop(state)
+
+        override fun onControlGone(next: View) = host.onControlGone(next)
     }
 
     private fun setMode(sentenceMode: Boolean) {
@@ -639,10 +655,11 @@ class WordAnkiReviewBinder(
         }
 
         // ── Notes, under the definitions: the user's own note for this
-        //    card. "More examples" arrives later and inserts itself above
-        //    the screenshot group, so the tab reads Definitions, Notes,
-        //    More examples, Screenshot.
-        wordNotesField = addAnkiNotesSection(parent, R.id.etAnkiWordNotes)
+        //    card, starting with what the opener had to say of the word
+        //    ([putAnkiNotes]). "More examples" arrives later and inserts
+        //    itself above the screenshot group, so the tab reads
+        //    Definitions, Notes, More examples, Screenshot.
+        wordNotesField = addAnkiNotesSection(parent, R.id.etAnkiWordNotes, args.getAnkiNotes(), host::onControlGone)
 
         // ── Screenshot group (when present): follows the shared state. ──
         screenshot?.let { s ->
@@ -1548,7 +1565,10 @@ class WordAnkiReviewBinder(
         /** The launch-state bundle both hosts build (the old
          *  [WordAnkiReviewSheet.newInstance] shape). [target] is the card's
          *  own word as its opener found it in the sentence ([CardTarget]),
-         *  read only alongside a sentence; null when the opener keys none. */
+         *  read only alongside a sentence; null when the opener keys none.
+         *  [notes] is the text both tabs' Notes boxes start with
+         *  ([putAnkiNotes]): what the opener's explain question about the
+         *  word brought, "" with none. */
         fun buildArgs(
             word: String,
             reading: String,
@@ -1564,8 +1584,10 @@ class WordAnkiReviewBinder(
             sentencePending: com.playtranslate.model.PendingTranslation? = null,
             audioAnchorMs: Long? = null,
             target: CardTarget? = null,
+            notes: String = "",
         ): Bundle = Bundle().apply {
             if (target != null) putCardTarget(target)
+            putAnkiNotes(notes)
             putString(ARG_WORD, word)
             putString(ARG_READING, reading)
             putString(ARG_POS, pos)

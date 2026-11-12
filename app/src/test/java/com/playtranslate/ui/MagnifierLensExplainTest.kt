@@ -162,6 +162,27 @@ class MagnifierLensExplainTest {
         assertEquals("the lens stays up", 0, dismissals)
     }
 
+    // Mutations: answer by the wrong row; keep an answer after the lens is
+    // gone; count a question still out as an answer.
+    @Test fun `the owner reads the answer standing in a row by the row's place, and none once the lens is dismissed`() {
+        giveLlm()
+        lens.setSplitDefinitions(cat, listOf(eat, fish))
+        idle()
+        assertNull("nothing asked", lens.explanationOf(null))
+
+        tap("食べる", DefAction.EXPLAIN)
+        assertNull("a question still out", lens.explanationOf(0))
+        answer(" It is the plain past. ")
+
+        assertEquals("the first secondary's", "It is the plain past.", lens.explanationOf(0))
+        assertNull("the tapped unit's row has none", lens.explanationOf(null))
+        assertNull("a row with no button has none", lens.explanationOf(1))
+        assertNull("no such row", lens.explanationOf(7))
+
+        lens.dismiss()
+        assertNull("the lens's answers went with it", lens.explanationOf(0))
+    }
+
     @Test fun `a rebind that adds sections keeps an answer and a question still out`() {
         giveLlm()
         lens.setSplitDefinitions(cat, listOf(eat), false, LensLoadMore(1))

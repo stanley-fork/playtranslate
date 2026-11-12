@@ -443,6 +443,9 @@ class AnkiEditorPage(private val args: Bundle) : WorkspacePage {
 
         override suspend fun awaitEnterSettled() = host.awaitEnterSettled()
 
+        // The workspace's cursor is its own: put it where the control says.
+        override fun onControlGone(next: View) = host.invalidateNav(prefer = next)
+
         override fun openAudioPicker(intent: Intent, onPicked: (AudioSelection) -> Unit) {
             host.push(
                 AudioPickerPage(
@@ -500,6 +503,8 @@ class AnkiSentenceEditorPage(
     private val sourceLangId: SourceLangId,
     private val pendingTranslation: com.playtranslate.model.PendingTranslation? = null,
     private val audioAnchorMs: Long? = null,
+    /** The text the Notes box starts with ([SentenceAnkiArgs.notes]). */
+    private val notes: String = "",
 ) : WorkspacePage {
 
     private var pageScope: CoroutineScope? = null
@@ -580,6 +585,7 @@ class AnkiSentenceEditorPage(
             sourceLangId = sourceLangId,
             wordsLoading = fillWords,
             audioAnchorMs = audioAnchorMs,
+            notes = notes,
         )
         val contentHost = view.findViewById<ViewGroup>(R.id.sentenceAnkiFragmentHost)
         val contentRoot = LayoutInflater.from(ctx)
@@ -661,6 +667,9 @@ class AnkiSentenceEditorPage(
         override val isAlive: Boolean get() = pageView != null
 
         override suspend fun awaitEnterSettled() = host.awaitEnterSettled()
+
+        // The workspace's cursor is its own: put it where the control says.
+        override fun onControlGone(next: View) = host.invalidateNav(prefer = next)
 
         override fun openAudioPicker(intent: Intent, onPicked: (AudioSelection) -> Unit) {
             host.push(

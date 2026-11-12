@@ -359,6 +359,13 @@ class MagnifierLens(
      *  lens would stand over the alert and take the first tap meant for it. */
     var onExplainNeedsModel: (() -> Unit)? = null
 
+    /** The answer standing in a row now ([WordRowList.explanationOf]): null
+     *  for the tapped unit's row, else the secondary's index, as the
+     *  callbacks above name a row. Null with no answer there, and once the
+     *  lens is dismissed, which puts its rows' answers away: an owner whose
+     *  action dismisses the lens reads this first. */
+    fun explanationOf(secondary: Int?): String? = lensView?.explanationOf(secondary)
+
     /** True when there's no [overlayHost] — the lens attaches directly to the
      *  activity window (TYPE_APPLICATION_PANEL) instead of going through a
      *  backend overlay host. Used by the in-app tap-a-word surface. */
@@ -1583,6 +1590,10 @@ class MagnifierLens(
             full = true,
             onLayout = ::onDocumentLayout,
         )
+
+        /** [MagnifierLens.explanationOf]. */
+        fun explanationOf(secondary: Int?): String? =
+            list.wordRows.firstOrNull { it.secondary == secondary }?.let(list::explanationOf)
 
         /** What the list shows: the last bind's sections, kept so the
          *  "Load more" footer can be redrawn ([setLoadMoreLoading]). */

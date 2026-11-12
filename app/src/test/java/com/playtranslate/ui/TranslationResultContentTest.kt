@@ -103,6 +103,8 @@ class TranslationResultContentTest {
         val tappedWords = mutableListOf<Triple<String, String?, String?>>()
         /** Each tap's detail key (lookupForm, lookupReading). */
         val tappedKeys = mutableListOf<Pair<String, String?>>()
+        /** Each tap's answer, as it stood in the tapped row. */
+        val tappedExplanations = mutableListOf<String?>()
         var clears = 0
         var completions = 0
         var ankiTaps = 0
@@ -124,9 +126,11 @@ class TranslationResultContentTest {
             surface: String?,
             lookupForm: String,
             lookupReading: String?,
+            explanation: String?,
         ) {
             tappedWords += Triple(word, reading, surface)
             tappedKeys += lookupForm to lookupReading
+            tappedExplanations += explanation
         }
         override fun onClear() { clears++ }
         override fun completeDeferredTranslation() { completions++ }
@@ -415,6 +419,66 @@ class TranslationResultContentTest {
         assertEquals(before + 1, host.interactions)
         assertEquals("nothing was asked", DefRow.Explain(), content.wordRows.shownRows.single().explain)
         assertTrue("and the word was not opened", host.tappedWords.isEmpty())
+    }
+
+    // Mutations: the page's note leaves the Ask answer out; keeps it for a
+    // sentence it was not asked about; takes a question still out for one.
+    @Test
+    fun `the note of a card of the sentence on show starts with the Ask section's answer, and with none once the answer is gone`() {
+        content.render(ResultState.Ready(result("猫が食べる。", "The cat eats.")))
+        idle()
+        assertEquals("nothing asked", "", content.sentenceCardNote())
+
+        vm.ask.restore(sentence("猫が食べる。"), answered("が marks the subject."))
+        idle()
+        assertEquals("が marks the subject.", content.sentenceCardNote())
+
+        // Another sentence on show ends the answer, and the note with it.
+        content.render(ResultState.Ready(result("犬がいる。", "There is a dog.")))
+        idle()
+        assertEquals("", content.sentenceCardNote())
+
+        vm.ask.ask(AskQuestion.Custom("Why が?"))
+        assertTrue("precondition: a question is out (${vm.ask.state.value})", vm.ask.state.value !is AskState.Answered)
+        assertEquals("a question still out, or one that failed, is no answer", "", content.sentenceCardNote())
+    }
+
+    // Mutation: the content drops the row's answer on its way to the host.
+    @Test
+    fun `a Words row's tap hands the host the answer standing in the row, for the word's card`() {
+        val llm = com.playtranslate.translation.FakeCompleterBackend(
+            id = "content-test-llm", priority = 0, displayName = "Test LLM",
+            answer = { _, _ -> "It is the plain form." },
+        )
+        TranslationBackendRegistry.addOnlineBackend(llm)
+        try {
+            content.render(ResultState.Ready(result("猫が食べる。", "The cat eats.")))
+            content.renderWordLookups(
+                WordLookupsState.Settled(
+                    rows = listOf(
+                        RowState(
+                            displayWord = "食べる", reading = "たべる", meaning = "to eat", senses = emptyList(),
+                            freqScore = 3, isCommon = true, surface = "食べる",
+                        ),
+                    ),
+                    tokenSpans = emptyList(), lookupToReading = emptyMap(),
+                    sentence = sentence("猫が食べる。"),
+                ),
+            )
+            idle()
+            content.wordRows.tapForTest(0, DefAction.OPEN)
+            assertEquals("nothing asked, nothing handed on", listOf<String?>(null), host.tappedExplanations)
+
+            content.wordRows.tapForTest(0, DefAction.EXPLAIN)
+            idle()
+            assertNotNull("precondition: the answer is in the row", content.wordRows.shownRows.single().explain?.answer)
+            content.wordRows.tapForTest(0, DefAction.OPEN)
+
+            assertEquals(listOf(null, "It is the plain form."), host.tappedExplanations)
+            assertEquals("and it is what a card of the sentence starts with", "It is the plain form.", content.sentenceCardNote())
+        } finally {
+            TranslationBackendRegistry.removeOnlineBackend(llm.id)
+        }
     }
 
     @Test

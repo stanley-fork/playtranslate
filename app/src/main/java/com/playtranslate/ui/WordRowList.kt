@@ -176,6 +176,25 @@ internal class WordRowList<T>(
 
     val isEmpty: Boolean get() = rows.isEmpty()
 
+    /**
+     * The answer standing in [row]'s row: what its explain question
+     * brought. Null with nothing asked, with a question still out, with one
+     * that failed or that the service would not answer, and once the user
+     * has put the answer away; an answer cut at the service's length limit
+     * is the text there is. [row] is one of [wordRows] as a host callback
+     * hands it, found by identity, so rows that are equal are still told
+     * apart.
+     */
+    fun explanationOf(row: T): String? {
+        val id = ids.getOrNull(rows.indexOfFirst { it === row }) ?: return null
+        return (explanations.state(id) as? AskState.Answered)?.text?.takeIf { it.isNotBlank() }
+    }
+
+    /** Every row with an answer standing in it ([explanationOf]), in drawn
+     *  order, with that answer. */
+    fun explainedRows(): List<Pair<T, String>> =
+        rows.mapNotNull { row -> explanationOf(row)?.let { row to it } }
+
     /** The user is about to see rows here (their lookup is running): start
      *  loading the page now. A no-op for a list that is not shown. Never
      *  call it inside a page's entrance animation: the first page of a

@@ -111,8 +111,11 @@ class WordRowsBinder(
 
         val ttsAlertTarget: TtsAlertTarget
 
-        /** A row body tap: open that word's detail. */
-        fun onWordTapped(row: RowState)
+        /** A row body tap: open that word's detail. [explanation] is the
+         *  answer standing in the row when it was tapped
+         *  ([WordRowList.explanationOf]), null with none: what a card made
+         *  for the word from its detail starts its note with. */
+        fun onWordTapped(row: RowState, explanation: String?)
 
         /** Any user interaction (live-mode hosts pause on it). */
         fun onInteraction() {}
@@ -139,7 +142,7 @@ class WordRowsBinder(
         ctx.getString(R.string.cd_toggle_words_visibility), pinned = true,
     )
 
-    private val list = wordRowList(
+    private val list: WordRowList<RowState> = wordRowList(
         ctx, container, host.scope,
         object : WordRowList.Host<RowState> {
             override val isAlive: Boolean get() = host.isAlive
@@ -151,7 +154,7 @@ class WordRowsBinder(
                 if (row.displayWord in HiddenWordsStore.snapshot(ctx, prefs.sourceLangId)) DefRow.Trailing.SHOW
                 else DefRow.Trailing.HIDE
 
-            override fun onOpen(row: RowState) = host.onWordTapped(row)
+            override fun onOpen(row: RowState) = host.onWordTapped(row, list.explanationOf(row))
 
             // The opposite of what the row was SHOWING when it was tapped.
             override fun onTrailing(row: RowState, shown: DefRow.Trailing) =
@@ -344,6 +347,14 @@ class WordRowsBinder(
     }
 
     val isEmpty: Boolean get() = list.isEmpty
+
+    /** The answers standing in this card's rows now, each with its row's
+     *  word, in the rows' order: the words' part of the note a card of
+     *  their sentence starts with ([sentenceCardNote]). A card hidden with
+     *  answers in its rows still has them, as it shows them again when it
+     *  is revealed. */
+    fun explainedWords(): List<ExplainedWord> =
+        list.explainedRows().map { (row, answer) -> ExplainedWord(row.displayWord, answer) }
 
     /** What a controller cursor can reach here, in visual order: the
      *  header's shown actions (its eye, which stays whether the card shows

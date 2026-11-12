@@ -123,6 +123,15 @@ class SentenceAnkiContentView(
          *  loads) can't drop entrance frames. Default: no hold. Callers
          *  re-check [isAlive] after. */
         suspend fun awaitEnterSettled() {}
+
+        /** A control of the editor took itself off the screen as it was
+         *  pressed (the Notes box's X, gone with the note): a host that
+         *  draws a controller's cursor of its own moves it to [next], the
+         *  view that stands for what was acted on (the Notes field), or
+         *  the cursor is left on nothing. Default: nothing to do, for a
+         *  host whose window keeps Android's focus, which the control
+         *  hands on itself. */
+        fun onControlGone(next: View) {}
     }
 
     private val words = mutableListOf<SentenceAnkiHtmlBuilder.WordEntry>()
@@ -1248,8 +1257,10 @@ class SentenceAnkiContentView(
         attachTranslationTouchWatcher(etTranslation)
         translationCard.addView(buildEditableFrame(etTranslation))
 
-        // Notes, under the translation: the user's own note for this card.
-        etNotes = addAnkiNotesSection(root, R.id.etAnkiSentenceNotes)
+        // Notes, under the translation: the user's own note for this card,
+        // starting with what the opener had to say of its words
+        // ([putAnkiNotes]), empty with nothing.
+        etNotes = addAnkiNotesSection(root, R.id.etAnkiSentenceNotes, args.getAnkiNotes(), host::onControlGone)
 
         // Words on card. The host tells us whether a follow-up
         // `applyWords` call is coming (a lazy words fill: every host
@@ -1632,6 +1643,10 @@ class SentenceAnkiContentView(
      * their own translation (`translationUserTouched` is false) —
      * preserving user-typed translation is the safer default; they can
      * clear it manually to see the auto-translation if they want it.
+     *
+     * The Notes box follows the same rule: a note still exactly as the
+     * opener left it goes with the sentence it was about, and one the
+     * user changed stays ([dropNoteOfEditedSentence]).
      */
     private fun onOriginalEditCommitted() {
         if (!::etOriginal.isInitialized) return
@@ -1650,6 +1665,10 @@ class SentenceAnkiContentView(
             etTranslation.setHintTextColor(ctx.themeColor(R.attr.ptTextMuted))
             args.putString(ARG_TRANSLATION, "")
         }
+
+        // Notes: the opener's, untouched, was about the sentence just
+        // edited away.
+        dropNoteOfEditedSentence(args, if (::etNotes.isInitialized) etNotes else null)
 
         // Words: every per-word piece of state is keyed by surface form,
         // so a new sentence invalidates all of it — selections, per-word
@@ -1835,7 +1854,10 @@ class SentenceAnkiContentView(
             sourceLangId: SourceLangId = SourceLangId.JA,
             wordsLoading: Boolean = false,
             audioAnchorMs: Long? = null,
+            /** The text the Notes box starts with ([putAnkiNotes]). */
+            notes: String = "",
         ): Bundle = Bundle().apply {
+            putAnkiNotes(notes)
             putString(ARG_ORIGINAL, japanese)
             putString(ARG_TRANSLATION, translation)
             putStringArray(ARG_WORDS, words.map { it.word }.toTypedArray())

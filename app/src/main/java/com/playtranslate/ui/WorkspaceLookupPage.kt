@@ -41,7 +41,9 @@ enum class LookupView { WORD, SENTENCE }
  * [TranslationResultViewModel.sentenceContext] with the lens's snapshot as
  * the fallback — so a translation that lands on the Sentence tab is on the
  * word's card too, and a lookup that never opened the Sentence tab still
- * carries whatever the drag flow cached.
+ * carries whatever the drag flow cached. The answer that stood in the
+ * opened row is part of that snapshot, so it reaches the word's card by
+ * the same read and only beside the sentence it was asked about.
  */
 class WorkspaceLookupPage internal constructor(
     private val args: LensDetailArgs,

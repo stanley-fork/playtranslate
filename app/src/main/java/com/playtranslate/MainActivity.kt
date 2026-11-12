@@ -501,6 +501,7 @@ class MainActivity :
         wordResults: Map<String, Triple<String, String, Int>>,
         lookupForm: String,
         lookupReading: String?,
+        explanation: String?,
     ) {
         pauseLiveMode()
         WordDetailBottomSheet.newInstance(
@@ -513,6 +514,7 @@ class MainActivity :
             sentenceWordResults = wordResults,
             lookupForm = lookupForm,
             lookupReading = lookupReading,
+            explanation = explanation,
             // A deferred result's pending rides ONLY when the sentence being
             // passed is that result's own original (resolveAnkiTranslation's
             // caller contract) — the sheet's Anki paths then complete it.

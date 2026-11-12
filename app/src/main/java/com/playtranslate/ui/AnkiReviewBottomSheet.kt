@@ -197,6 +197,7 @@ class AnkiReviewBottomSheet : DialogFragment() {
             wordsLoading = fillWords,
             audioAnchorMs = args.takeIf { it.containsKey(ARG_AUDIO_ANCHOR_MS) }
                 ?.getLong(ARG_AUDIO_ANCHOR_MS),
+            notes = args.getAnkiNotes(),
         )
         contentArgs = cArgs
         val host = view.findViewById<ViewGroup>(R.id.sentenceAnkiFragmentHost)
@@ -403,11 +404,16 @@ class AnkiReviewBottomSheet : DialogFragment() {
             sourceLangId: SourceLangId = SourceLangId.JA,
             pendingTranslation: com.playtranslate.model.PendingTranslation? = null,
             audioAnchorMs: Long? = null,
+            /** The text the Notes box starts with ([putAnkiNotes]): what
+             *  was answered about the sentence where the sheet is opened
+             *  from ([sentenceCardNote]), "" with none. */
+            notes: String = "",
         ): AnkiReviewBottomSheet {
             return AnkiReviewBottomSheet().apply {
                 val wordKeys = wordResults.keys.toTypedArray()
                 val transport = transportPayloadFor(wordKeys, wordResults, wordEnrichment)
                 arguments = Bundle().apply {
+                    putAnkiNotes(notes)
                     putString(ARG_ORIGINAL, original)
                     putString(ARG_TRANSLATION, translation)
                     // The launching result's deferred payload — the lazy fill

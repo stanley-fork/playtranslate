@@ -172,12 +172,14 @@ class WordAnkiReviewSheet : DialogFragment() {
             sentencePending: com.playtranslate.model.PendingTranslation? = null,
             audioAnchorMs: Long? = null,
             target: CardTarget? = null,
+            notes: String = "",
         ) = WordAnkiReviewSheet().apply {
             arguments = WordAnkiReviewBinder.buildArgs(
                 word, reading, pos, definition, screenshotPath,
                 freqScore, isCommon, sentenceOriginal, sentenceTranslation,
                 sentenceWordResults, sourceLangId, sentencePending, audioAnchorMs,
                 target = target,
+                notes = notes,
             )
         }
     }

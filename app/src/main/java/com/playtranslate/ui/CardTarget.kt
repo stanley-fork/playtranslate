@@ -27,6 +27,17 @@ data class CardTarget(
 )
 
 /**
+ * The [CardTarget] of a word as an opener hands it to the word's page: the
+ * text it was found as ([surface]), else its key [lookupForm], which is the
+ * text for an opener that had only the lemma. The page names its own word
+ * with this, and so does whoever says something of that word before the
+ * page exists (its answer in [SentenceContext.explanations]), so the two
+ * name it alike.
+ */
+fun pageCardTarget(surface: String?, lookupForm: String, lookupReading: String?): CardTarget =
+    CardTarget(surface ?: lookupForm, lookupForm, lookupReading)
+
+/**
  * A [CardTarget] resolved for one card: its words-table [row], shaped as the
  * sentence's own rows are, and the reading its surface takes on a card made
  * for it ([ReadingOverride]), null where the engine derives none.

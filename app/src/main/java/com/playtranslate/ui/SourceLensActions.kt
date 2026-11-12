@@ -47,13 +47,24 @@ data class LensActionContext(
     val lookupForm: String?,
     /** The reading that narrowed [lookupForm]'s lookup, null when none. */
     val lookupReading: String?,
+    /** What the explain question of the row acted on brought, when its
+     *  answer stood in the row at the tap ([WordRowList.explanationOf]);
+     *  null with none. The note a card made for [word] starts with: the
+     *  editable review's, here or from the detail the action opens, which
+     *  is handed it inside [sentence]'s context
+     *  ([SentenceContext.explanations]). For a lens's row
+     *  [SourceLensActions] reads it at the tap, whatever its provider
+     *  gave; a Words row's opener hands in its row's. */
+    val explanation: String? = null,
 )
 
 /**
  * What the lens's open-detail tap hands the workspace page it presents:
  * the looked-up unit, the sentence it sits in, and the sentence context
  * snapshot (cached translation + words, when the drag flow produced them)
- * that seeds the page's Anki card before its own Sentence tab runs.
+ * that seeds the page's Anki card before its own Sentence tab runs. The
+ * answer that stood in the opened row rides in that snapshot, under the
+ * word ([SentenceContext.explanations]).
  */
 data class LensDetailArgs(
     val word: String,
@@ -146,18 +157,22 @@ internal class SentenceDetailOpener(
         // A route that can't present (dual-screen coordinator posture) falls
         // through to the Activity launch.
         if (word != null) {
+            val lookupForm = cur.lookupForm ?: word
+            // The row's answer goes into the sentence's own context, under
+            // the word the page is opened on: the page's card reads its
+            // note where it reads its sentence.
             val snapshot = SentenceContext(
                 original = sentence,
                 translation = cachedTranslation,
                 wordResults = wordsPayload?.results ?: cachedWordResults,
                 surfaceForms = wordsPayload?.surfaces,
                 wordEnrichment = wordsPayload?.enrichment,
-            )
+            ).explaining(pageCardTarget(cur.surface, lookupForm, cur.lookupReading), cur.explanation)
             val args = LensDetailArgs(
                 word = word,
                 reading = reading,
                 surface = cur.surface,
-                lookupForm = cur.lookupForm ?: word,
+                lookupForm = lookupForm,
                 lookupReading = cur.lookupReading,
                 sentence = sentence,
                 screenshotPath = cur.screenshotPath,
@@ -197,6 +212,11 @@ internal class SentenceDetailOpener(
                 putExtra(TranslationResultActivity.EXTRA_DRAG_READING, reading)
             }
             cur.surface?.let { putExtra(TranslationResultActivity.EXTRA_DRAG_SURFACE, it) }
+            if (word != null) {
+                cur.explanation?.let {
+                    putExtra(TranslationResultActivity.EXTRA_DRAG_EXPLANATION, ankiNoteCapped(it))
+                }
+            }
             cachedTranslation?.let {
                 putExtra(TranslationResultActivity.EXTRA_DRAG_SENTENCE_TRANSLATION, it)
             }
@@ -232,7 +252,9 @@ internal class SentenceDetailOpener(
  * onOpenTap / onAnkiTap / onAnkiLongPress; [current] supplies the tapped
  * unit's word/entry/sentence/screenshot and [currentSecondary] a secondary
  * row's at the moment of the tap — read ONCE up front in each handler,
- * before [MagnifierLens.dismiss] nulls the source's word/entry state.
+ * before [MagnifierLens.dismiss] nulls the source's word/entry state. The
+ * answer standing in the row is read with them ([contextOf]), for the same
+ * reason: the dismissal puts the lens's answers away.
  */
 class SourceLensActions(
     private val context: Context,
@@ -288,18 +310,21 @@ class SourceLensActions(
         // the route can present it, else TranslationResultActivity (sentence +
         // its Sentence/Word toggle). A row's Anki button: tap opens the
         // editable review; held is the headless one-tap shortcut.
-        lens.onOpenTap = { openSentenceInApp(current()) }
+        lens.onOpenTap = { contextOf(null)?.let { openSentenceInApp(it) } }
         lens.onAnkiTap = { secondary -> contextOf(secondary)?.let { openAnkiReviewForLens(it) } }
         lens.onAnkiLongPress = { secondary -> contextOf(secondary)?.let { oneTapFromLens(it) } }
-        currentSecondary?.let { secondary ->
-            lens.onSecondaryOpenTap = { i -> secondary(i)?.let { openSentenceInApp(it) } }
+        if (currentSecondary != null) {
+            lens.onSecondaryOpenTap = { i -> contextOf(i)?.let { openSentenceInApp(it) } }
         }
     }
 
     /** The context of a row: the tapped unit's ([current]), or a
-     *  secondary's by index; null when there is no such secondary now. */
+     *  secondary's by index, with the answer standing in that row of the
+     *  lens now ([LensActionContext.explanation]); null when there is no
+     *  such secondary now. */
     private fun contextOf(secondary: Int?): LensActionContext? =
-        if (secondary == null) current() else currentSecondary?.invoke(secondary)
+        (if (secondary == null) current() else currentSecondary?.invoke(secondary))
+            ?.copy(explanation = lens.explanationOf(secondary))
 
     private data class LensAnkiSnapshot(
         val word: String,
@@ -319,6 +344,9 @@ class SourceLensActions(
         val sentenceWordResults: Map<String, Triple<String, String, Int>>?,
         val sourceLangCode: String,
         val audioAnchorMs: Long?,
+        /** The text the editor's Notes boxes start with
+         *  ([LensActionContext.explanation]); "" with none. */
+        val notes: String,
     )
 
     private fun openSentenceInApp(cur: LensActionContext) =
@@ -360,6 +388,7 @@ class SourceLensActions(
                         sentenceWordResults = snap.sentenceWordResults,
                         sourceLangId = Prefs(context).sourceLangId,
                         audioAnchorMs = snap.audioAnchorMs,
+                        notes = snap.notes,
                     ),
                 )
             }
@@ -475,6 +504,7 @@ class SourceLensActions(
             sentenceWordResults = sentenceWordResults,
             sourceLangCode = Prefs(context).sourceLangId.code,
             audioAnchorMs = cur.audioAnchorMs,
+            notes = cur.explanation.orEmpty(),
         )
     }
 
@@ -501,6 +531,8 @@ class SourceLensActions(
             snap.audioAnchorMs?.let {
                 putExtra(WordAnkiReviewActivity.EXTRA_AUDIO_ANCHOR_MS, it)
             }
+            // AnkiPermissionActivity forwards every extra.
+            putExtras(android.os.Bundle().apply { putAnkiNotes(snap.notes) })
         }
         val targetDisplay = PlayTranslateApplication.foregroundDisplayId() ?: displayId
         val opts = android.app.ActivityOptions.makeBasic()

@@ -1054,6 +1054,181 @@ class CaptureSheetAskWordsTest {
         assertEquals(listOf(CaptureResultOverlay.DismissReason.PAGE), dismissals)
     }
 
+    // ── A row's answer, for an Anki card's note ─────────────────────────
+
+    // Mutations: drop the answer on the way to the page; hand a row its
+    // neighbour's.
+    @Test fun `a Words row opened with an answer standing in it carries the answer to the word's page, and a row with none carries none`() {
+        giveLlm()
+        val o = open(screen, result(text(2), text(2)), askHidden = true, wordsHidden = false) {
+            it.onNavigateToDetail = { _, _ -> }
+        }
+        showRows(o, words, lookupSentence(o))
+        o.wordRows.tapForTest(0, DefAction.EXPLAIN)
+        settle()
+        answer("It names the animal.")
+
+        o.wordRows.tapForTest(0, DefAction.OPEN)
+        settle()
+        val explained = shadowOf(ctx as Application).nextStartedActivity
+        assertEquals("fox", explained?.getStringExtra(TranslationResultActivity.EXTRA_DRAG_WORD))
+        assertEquals("It names the animal.", explained?.getStringExtra(TranslationResultActivity.EXTRA_DRAG_EXPLANATION))
+
+        o.wordRows.tapForTest(1, DefAction.OPEN)
+        settle()
+        val plain = shadowOf(ctx as Application).nextStartedActivity
+        assertEquals("dog", plain?.getStringExtra(TranslationResultActivity.EXTRA_DRAG_WORD))
+        assertFalse("no answer in that row", plain!!.hasExtra(TranslationResultActivity.EXTRA_DRAG_EXPLANATION))
+    }
+
+    // Mutations: send the sentence card no note; send it one answer when
+    // two stand; order them by when they were asked.
+    @Test fun `the sheet's sentence card starts its note with its explained words' answers, each under its word`() {
+        giveLlm()
+        shadowOf(ctx.packageManager).installPackage(
+            android.content.pm.PackageInfo().apply { packageName = "com.ichi2.anki" },
+        )
+        val o = open(screen, result(text(2), text(2)), askHidden = true, wordsHidden = false)
+        showRows(o, words, lookupSentence(o))
+        o.wordRows.tapForTest(1, DefAction.EXPLAIN)
+        settle()
+        answer("It is the one jumped over.")
+        o.wordRows.tapForTest(0, DefAction.EXPLAIN)
+        settle()
+        answer("It names the animal.")
+
+        tap(o.v(R.id.btnAnkiOriginal))
+
+        // The AnkiDroid permission is not held here, so the card goes
+        // through the trampoline, whose extras rebuild the editor's args.
+        val launched = shadowOf(ctx as Application).nextStartedActivity
+        assertEquals(AnkiPermissionActivity::class.java.name, launched?.component?.className)
+        assertEquals(text(2), launched?.getStringExtra(SentenceAnkiReviewActivity.EXTRA_SENTENCE))
+        assertEquals(
+            "fox\nIt names the animal.\n\ndog\nIt is the one jumped over.",
+            launched!!.extras!!.getAnkiNotes(),
+        )
+    }
+
+    // Mutations: the sheet's sentence card leaves the Ask section's answer
+    // out; heads a lone answer with its question; puts it after the words.
+    @Test fun `the sheet's sentence card starts its note with the Ask answer, as it is alone and ahead of its explained words under its question`() {
+        giveLlm()
+        shadowOf(ctx.packageManager).installPackage(
+            android.content.pm.PackageInfo().apply { packageName = "com.ichi2.anki" },
+        )
+        val alone = open(screen, result(text(2), text(2)), askHidden = false, wordsHidden = false)
+        tap(chips(alone)[0])
+        answer("It is about a fox.")
+        val question = (alone.askSession.state.value as AskState.Answered).question.title
+
+        tap(alone.v(R.id.btnAnkiOriginal))
+
+        val first = shadowOf(ctx as Application).nextStartedActivity
+        assertEquals(AnkiPermissionActivity::class.java.name, first?.component?.className)
+        assertEquals("It is about a fox.", first!!.extras!!.getAnkiNotes())
+        close(alone)
+
+        val both = open(screen, result(text(2), text(2)), askHidden = false, wordsHidden = false)
+        showRows(both, words, lookupSentence(both))
+        both.wordRows.tapForTest(1, DefAction.EXPLAIN)
+        settle()
+        answer("It is the one jumped over.")
+        tap(chips(both)[0])
+        answer("It is about a fox.")
+
+        tap(both.v(R.id.btnAnkiOriginal))
+
+        val second = shadowOf(ctx as Application).nextStartedActivity
+        assertEquals(
+            "$question\nIt is about a fox.\n\ndog\nIt is the one jumped over.",
+            second!!.extras!!.getAnkiNotes(),
+        )
+    }
+
+    // Mutations: an answer of any length goes into the launch; the cut
+    // falls somewhere other than the limit.
+    @Test fun `answers too long for a launch are cut at the limit on their way into it, to the card and to a word's page`() {
+        giveLlm()
+        shadowOf(ctx.packageManager).installPackage(
+            android.content.pm.PackageInfo().apply { packageName = "com.ichi2.anki" },
+        )
+        val long = "a".repeat(ANKI_NOTE_MAX_CHARS + 2_000)
+        val o = open(screen, result(text(2), text(2)), askHidden = true, wordsHidden = false) {
+            it.onNavigateToDetail = { _, _ -> }
+        }
+        showRows(o, words, lookupSentence(o))
+        o.wordRows.tapForTest(0, DefAction.EXPLAIN)
+        settle()
+        answer(long)
+        o.wordRows.tapForTest(1, DefAction.EXPLAIN)
+        settle()
+        answer(long)
+
+        // To the word's page: the one answer, cut.
+        o.wordRows.tapForTest(0, DefAction.OPEN)
+        settle()
+        val page = shadowOf(ctx as Application).nextStartedActivity
+        assertEquals(
+            "a".repeat(ANKI_NOTE_MAX_CHARS) + "…",
+            page?.getStringExtra(TranslationResultActivity.EXTRA_DRAG_EXPLANATION),
+        )
+
+        // To the sentence card: both answers under their words, the whole cut.
+        tap(o.v(R.id.btnAnkiOriginal))
+        val card = shadowOf(ctx as Application).nextStartedActivity
+        assertEquals(AnkiPermissionActivity::class.java.name, card?.component?.className)
+        val notes = card!!.extras!!.getAnkiNotes()
+        assertEquals(ANKI_NOTE_MAX_CHARS + 1, notes.length)
+        assertTrue(notes.startsWith("fox\naaa"))
+        assertTrue(notes.endsWith("a…"))
+    }
+
+    // Mutation: the lens's actions do not read the row's answer.
+    @Test fun `a word opened from the sheet's lens carries the answer standing in its lens row`() {
+        giveLlm()
+        val o = open(screen, result(text(2), text(2)), askHidden = true, wordsHidden = false) {
+            it.onNavigateToDetail = { _, _ -> }
+        }
+        val the = com.playtranslate.language.TokenSpan("The", "the")
+        val quick = com.playtranslate.language.TokenSpan("quick", "quick")
+        o.lookupsRenderer.render(
+            WordLookupsState.Analyzed(
+                tokenSpans = listOf(the, quick),
+                annotation = com.playtranslate.language.SentenceAnnotation(
+                    text(2), com.playtranslate.language.SourceLangId.EN, 0,
+                    listOf(
+                        com.playtranslate.language.AnnotatedSpan(0, 3, "The", lookupForm = "the", lookupHint = ""),
+                        com.playtranslate.language.AnnotatedSpan(4, 9, "quick", lookupForm = "quick", lookupHint = ""),
+                    ),
+                ),
+                phrases = emptyList(),
+            ),
+        )
+        settle()
+        val sourceLens: SourceTextLens = o.field("sourceLens")
+        sourceLens.onTapAtOffset(5)
+        val deadline = System.currentTimeMillis() + 3000
+        while (!sourceLens.isShowing && System.currentTimeMillis() < deadline) {
+            shadowOf(Looper.getMainLooper()).idle()
+            Thread.sleep(5)
+        }
+        assertTrue("precondition: the lens came up over the word", sourceLens.isShowing)
+        val lens: MagnifierLens = sourceLens.field("lens")
+        val row = lens.shownRowsForTest().filterIsInstance<DefRow.Word>().first()
+        lens.tapRowForTest(row.id, DefAction.EXPLAIN)
+        settle()
+        answer("It describes the fox.")
+        assertEquals("precondition: the answer stands in the lens's row", "It describes the fox.", lens.explanationOf(null))
+
+        lens.tapRowForTest(row.id, DefAction.OPEN)
+        settle()
+
+        val page = shadowOf(ctx as Application).nextStartedActivity
+        assertEquals(TranslationResultActivity::class.java.name, page?.component?.className)
+        assertEquals("It describes the fox.", page?.getStringExtra(TranslationResultActivity.EXTRA_DRAG_EXPLANATION))
+    }
+
     @Test fun `the sheet caches its sentence's translation whether Words is shown or hidden, and a blank translation caches nothing`() {
         for (wordsHidden in listOf(false, true)) {
             LastSentenceCache.clear()

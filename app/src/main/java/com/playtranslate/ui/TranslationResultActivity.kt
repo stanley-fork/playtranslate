@@ -240,6 +240,7 @@ class TranslationResultActivity :
         wordResults: Map<String, Triple<String, String, Int>>,
         lookupForm: String,
         lookupReading: String?,
+        explanation: String?,
     ) {
         WordDetailBottomSheet.newInstance(
             word,
@@ -251,6 +252,7 @@ class TranslationResultActivity :
             sentenceWordResults = wordResults,
             lookupForm = lookupForm,
             lookupReading = lookupReading,
+            explanation = explanation,
         ).show(supportFragmentManager, WordDetailBottomSheet.TAG)
     }
 
@@ -350,17 +352,15 @@ class TranslationResultActivity :
     /** Embedded [WordDetailBottomSheet] reads this at Anki-button tap
      *  time. Prefer the VM's settled values; fall back to launch-time
      *  intent extras during the loading window so a fast Anki tap still
-     *  carries the prefetched sentence-word context. */
+     *  carries the prefetched sentence-word context. The answer the
+     *  opener's row held about the opened word is one of the launch
+     *  sentence's values ([launchSentenceContext]): the model keeps it
+     *  only while the sentence is still that one, so after an edit of the
+     *  sentence the word's card starts with no note. */
     override fun currentSentenceContext(): SentenceContext =
         // VM first, launch-time extras second (symmetric across the text
         // fields — see TranslationResultViewModel.sentenceContext).
-        vm.sentenceContext(
-            SentenceContext(
-                original = intent.getStringExtra(EXTRA_SENTENCE_TEXT),
-                translation = intentSeededTranslation,
-                wordResults = intentSeededWordResults,
-            ),
-        )
+        vm.sentenceContext(launchSentenceContext(intent, intentSeededTranslation, intentSeededWordResults))
 
     // ── Lifecycle ─────────────────────────────────────────────────────────
 
@@ -515,11 +515,12 @@ class TranslationResultActivity :
         }
 
         // Mount the embedded word detail fragment once. Sentence context
-        // (original / translation / wordResults) is supplied by this
-        // activity via [SentenceContextProvider] at Anki-tap time, so
-        // those args are intentionally omitted — the embedded sheet
-        // queries [currentSentenceContext] which prefers VM state and
-        // falls back to launch-time intent extras. On config change,
+        // (original / translation / wordResults, and the opener's answer
+        // about the word) is supplied by this activity via
+        // [SentenceContextProvider] at Anki-tap time, so those args are
+        // intentionally omitted — the embedded sheet queries
+        // [currentSentenceContext] which prefers VM state and falls back
+        // to launch-time intent extras. On config change,
         // FragmentManager restores it automatically — guard the add()
         // so we don't double-add.
         if (savedInstanceState == null) {
@@ -789,6 +790,42 @@ class TranslationResultActivity :
         /** The text the lens's word was found as, for the embedded word
          *  page's conjugation line; absent when the lens had only a lemma. */
         const val EXTRA_DRAG_SURFACE = "extra_drag_surface"
+        /** What the lens's explain question about its word brought, for the
+         *  embedded word page's Anki card; absent with no answer. Read
+         *  into the launch sentence's context ([launchSentenceContext]),
+         *  never handed to the page by itself. */
+        const val EXTRA_DRAG_EXPLANATION = "extra_drag_explanation"
+
+        /**
+         * The sentence a launch [intent] opens this screen with, as a
+         * context: its text ([EXTRA_SENTENCE_TEXT]), the [translation] and
+         * [wordResults] the launch seeded, and the answer the opener's row
+         * held about the launch word ([EXTRA_DRAG_EXPLANATION]), under
+         * that word as the embedded page names its own ([pageCardTarget],
+         * from the three extras the page is opened with). What stands
+         * under the model's live values ([currentSentenceContext]). An
+         * answer with no key beside it is none: one is written only with
+         * its word's key.
+         */
+        internal fun launchSentenceContext(
+            intent: Intent,
+            translation: String?,
+            wordResults: Map<String, Triple<String, String, Int>>?,
+        ): SentenceContext {
+            val launch = SentenceContext(
+                original = intent.getStringExtra(EXTRA_SENTENCE_TEXT),
+                translation = translation,
+                wordResults = wordResults,
+            )
+            val lookupForm = intent.getStringExtra(EXTRA_DRAG_LOOKUP_FORM) ?: return launch
+            return launch.explaining(
+                pageCardTarget(
+                    intent.getStringExtra(EXTRA_DRAG_SURFACE), lookupForm,
+                    intent.getStringExtra(EXTRA_DRAG_LOOKUP_READING),
+                ),
+                intent.getStringExtra(EXTRA_DRAG_EXPLANATION),
+            )
+        }
         /** The key the embedded word page resolves its entry with
          *  ([WordDetailBinder.Args.lookupForm]); written with
          *  [EXTRA_DRAG_WORD], which is its display. */

@@ -58,14 +58,18 @@ class WorkspaceWordDetailPage(
      *  when the launching surface has no capture (drag flow). */
     internal val audioAnchorMs: Long? = null,
     /** Sentence-context snapshot from the launching surface — taken at open
-     *  time, which is correct over the game: the capture is frozen. */
+     *  time, which is correct over the game: the capture is frozen. What
+     *  the opener's explain question about [word] brought rides in it,
+     *  under the word ([SentenceContext.explanations]). */
     internal val sentenceContext: () -> SentenceContext? = { null },
 ) : WorkspacePage {
 
     /** The page a Words or Other matches cell opens: a word found inside
      *  this page's word, so in the same sentence, carrying this page's
      *  sentence (its provider, live where this page's is), screenshot and
-     *  audio anchor for its Anki card. */
+     *  audio anchor for its Anki card. An explanation in that sentence's
+     *  context is under this page's word, so the opened page's card,
+     *  which is for another, finds none. */
     internal fun nested(
         word: String,
         reading: String?,
@@ -208,6 +212,7 @@ class WorkspaceWordDetailPage(
                             sentencePending = args.sentencePending,
                             audioAnchorMs = audioAnchorMs,
                             target = args.target,
+                            notes = args.notes,
                         ),
                     ),
                 )
@@ -294,8 +299,12 @@ class WorkspaceWordDetailPage(
             audioAnchorMs?.let {
                 putExtra(WordAnkiReviewActivity.EXTRA_AUDIO_ANCHOR_MS, it)
             }
-            // The card's own word; AnkiPermissionActivity forwards every extra.
-            putExtras(Bundle().apply { putCardTarget(args.target) })
+            // The card's own word and the note it starts with;
+            // AnkiPermissionActivity forwards every extra.
+            putExtras(Bundle().apply {
+                putCardTarget(args.target)
+                putAnkiNotes(args.notes)
+            })
         }
         val targetDisplay = PlayTranslateApplication.foregroundDisplayId() ?: host.displayId
         val opts = android.app.ActivityOptions.makeBasic()

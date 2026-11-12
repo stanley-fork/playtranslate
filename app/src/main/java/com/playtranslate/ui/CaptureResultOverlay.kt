@@ -1010,7 +1010,7 @@ class CaptureResultOverlay(
                 override val isAlive: Boolean get() = !dismissed
                 override val scope: CoroutineScope get() = this@CaptureResultOverlay.scope
                 override val ttsAlertTarget: TtsAlertTarget get() = alertTarget
-                override fun onWordTapped(row: RowState) = openWordRow(row)
+                override fun onWordTapped(row: RowState, explanation: String?) = openWordRow(row, explanation)
                 override fun onAskNeedsLlm() = showAskNeedsLlm()
             },
         )
@@ -2556,8 +2556,9 @@ class CaptureResultOverlay(
 
     /** A Words row's tap: open that word's detail, by the path and with the
      *  sheet's same reaction as the lens's open tap ([SentenceDetailOpener],
-     *  [onWordPageLaunched]). */
-    private fun openWordRow(row: RowState) {
+     *  [onWordPageLaunched]). [explanation] is the answer that stood in the
+     *  row, for the word page's Anki card ([LensActionContext.explanation]). */
+    private fun openWordRow(row: RowState, explanation: String?) {
         val result = lastResult ?: return
         dismissWordLens()
         SentenceDetailOpener(
@@ -2576,6 +2577,7 @@ class CaptureResultOverlay(
                 audioAnchorMs = result.createdAtMs.takeIf { it > 0 },
                 lookupForm = row.lookupForm,
                 lookupReading = row.lookupReading,
+                explanation = explanation,
             ),
         )
     }
@@ -2731,6 +2733,7 @@ class CaptureResultOverlay(
         pendingTranslation = result.pendingTranslation,
         audioAnchorMs = result.createdAtMs.takeIf { it > 0 },
         words = LastSentenceCache.snapshotFor(result.originalText),
+        notes = sentenceCardNote(finishedAnswer(), wordRows?.explainedWords().orEmpty()),
     )
 
     // Long-press = headless one-tap send of the captured sentence. The send

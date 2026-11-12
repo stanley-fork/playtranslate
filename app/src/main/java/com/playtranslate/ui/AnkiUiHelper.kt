@@ -19,6 +19,7 @@ import android.view.WindowManager
 import android.view.inputmethod.EditorInfo
 import android.widget.EditText
 import android.widget.FrameLayout
+import android.widget.ImageButton
 import android.widget.ImageView
 import android.widget.LinearLayout
 import android.widget.ProgressBar
@@ -105,12 +106,13 @@ internal fun Context.pickerSelectedRowBackground(
     }
 }
 
-/** Inflates a settings-style group header into [parent]. [suffix] sits as
- *  the right-aligned trailing slot (10sp, ptTextHint) and is hidden when null. */
-fun ankiGroupHeader(parent: LinearLayout, title: String, suffix: String? = null) {
+/** Inflates a settings-style group header into [parent] and returns it.
+ *  [suffix] sits as the right-aligned trailing slot (10sp, ptTextHint) and
+ *  is hidden when null. */
+fun ankiGroupHeader(parent: LinearLayout, title: String, suffix: String? = null): LinearLayout {
     val ctx = parent.context
     val header = android.view.LayoutInflater.from(ctx)
-        .inflate(R.layout.settings_group_header, parent, false)
+        .inflate(R.layout.settings_group_header, parent, false) as LinearLayout
     // As written: the header style capitalizes it in the UI's language
     // (textAllCaps); a root-locale uppercase here would lose Turkish İ.
     header.findViewById<TextView>(R.id.tvGroupTitle).text = title
@@ -123,6 +125,7 @@ fun ankiGroupHeader(parent: LinearLayout, title: String, suffix: String? = null)
         badge.isGone = true
     }
     parent.addView(header)
+    return header
 }
 
 /** Adds a flat design-system group card ([PtGroupCard]) to [parent] and
@@ -169,14 +172,26 @@ internal fun ankiEditField(ctx: Context, initial: String): EditText {
 
 /**
  * The Notes group of an Anki review sheet, added at the end of [parent]:
- * its header and a card holding one empty text field, where the user types
- * a free-text note for this card. Returns the field; the host reads its
- * text at send time and nothing else holds the note.
+ * its header and a card holding one text field, where the user types a
+ * free-text note for this card. The field starts with [initial]: empty, or
+ * what the card's opener had to say of its word (an explain question's
+ * answer, [getAnkiNotes]), which is the user's to edit or delete
+ * like anything typed there. Returns the field; the host reads its text at
+ * send time and nothing else holds the note.
+ *
+ * The header ends in an X that empties the field ([addNotesClearButton]),
+ * there while the field holds any text: a note the opener put there and
+ * the user does not want goes in one press, where selecting it all is slow
+ * with a controller over a game. [onCleared] hears of a press with the
+ * field, after it is empty and the X is gone
+ * ([SentenceAnkiContentView.Host.onControlGone]).
  *
  * [viewId] is a fixed id from ids.xml: Android restores a text field's
  * typed text by view id, which is how the note survives the sheet being
  * rebuilt, and the word sheet holds a sentence tab and a word tab at once,
- * so each sheet's field has its own.
+ * so each sheet's field has its own. That restore comes after this build
+ * and replaces [initial], so a rebuilt sheet shows what the field held,
+ * an emptied field included, and never the opener's text again.
  *
  * Two things on this field that a plain [ankiEditField] lacks. The IME
  * flags keep the keyboard from taking the whole screen in landscape, where
@@ -185,10 +200,15 @@ internal fun ankiEditField(ctx: Context, initial: String): EditText {
  * nothing to do (the Ask field's pattern, [AskSectionBinder]); focus is
  * what the workspace's keyboard handling waits for.
  */
-internal fun addAnkiNotesSection(parent: LinearLayout, viewId: Int): EditText {
+internal fun addAnkiNotesSection(
+    parent: LinearLayout,
+    viewId: Int,
+    initial: String = "",
+    onCleared: (field: View) -> Unit = {},
+): EditText {
     val ctx = parent.context
-    ankiGroupHeader(parent, ctx.getString(R.string.anki_group_notes))
-    val field = ankiEditField(ctx, initial = "").apply {
+    val header = ankiGroupHeader(parent, ctx.getString(R.string.anki_group_notes))
+    val field = ankiEditField(ctx, initial = initial).apply {
         id = viewId
         hint = ctx.getString(R.string.anki_notes_hint)
         imeOptions = imeOptions or
@@ -196,7 +216,68 @@ internal fun addAnkiNotesSection(parent: LinearLayout, viewId: Int): EditText {
         setOnClickListener { requestFocus() }
     }
     ankiGroupCard(parent).addView(field)
+    addNotesClearButton(header, field, onCleared)
     return field
+}
+
+/**
+ * The X at the end of the Notes [header]: a press empties [field]. It is
+ * on screen only while the field holds text (any text, typed or put there
+ * by the opener; there is no asking first), and keeps its place while it
+ * is not, so the header never moves. The Ask answer's X in size and tint,
+ * its glyph drawn at 18dp beside the header's small capitals.
+ *
+ * The button is taller than the header's line of text, so it stands over
+ * the header's own padding (the negative margins, with the header's clip
+ * to its padding off) and counts 12dp toward the header's height, under
+ * the 13dp a line of its 11sp title is at its shortest: the header is as
+ * tall as every other group's.
+ *
+ * A press with the X gone leaves a controller's place on nothing. Where
+ * the window keeps Android's focus (the dialog sheets) the focus the X
+ * held goes to the field; a host that draws its own cursor is told
+ * through [onCleared].
+ */
+private fun addNotesClearButton(header: LinearLayout, field: EditText, onCleared: (field: View) -> Unit) {
+    val ctx = header.context
+    val density = ctx.resources.displayMetrics.density
+    fun dp(value: Int) = (value * density).toInt()
+    header.clipToPadding = false
+    header.addView(View(ctx), LinearLayout.LayoutParams(0, 0, 1f))
+    val clear = ImageButton(ctx).apply {
+        setImageResource(R.drawable.ic_close)
+        imageTintList = ColorStateList.valueOf(ctx.themeColor(R.attr.ptTextMuted))
+        scaleType = ImageView.ScaleType.FIT_CENTER
+        setPadding(dp(9), dp(7), dp(9), dp(7))
+        background = TypedValue().let { ripple ->
+            ctx.theme.resolveAttribute(android.R.attr.selectableItemBackgroundBorderless, ripple, true)
+            androidx.core.content.ContextCompat.getDrawable(ctx, ripple.resourceId)
+        }
+        contentDescription = ctx.getString(R.string.cd_anki_notes_clear)
+    }
+    clear.setOnClickListener {
+        val hadFocus = clear.isFocused
+        // Emptying the field takes the X off the screen (the watcher below).
+        field.setText("")
+        if (hadFocus) field.requestFocus()
+        onCleared(field)
+    }
+    header.addView(
+        clear,
+        LinearLayout.LayoutParams(dp(36), dp(32)).apply {
+            topMargin = dp(-10)
+            bottomMargin = dp(-10)
+        },
+    )
+    fun sync() {
+        clear.visibility = if (field.text.isNullOrEmpty()) View.INVISIBLE else View.VISIBLE
+    }
+    field.addTextChangedListener(object : android.text.TextWatcher {
+        override fun beforeTextChanged(s: CharSequence?, start: Int, count: Int, after: Int) {}
+        override fun onTextChanged(s: CharSequence?, start: Int, before: Int, count: Int) {}
+        override fun afterTextChanged(s: android.text.Editable?) = sync()
+    })
+    sync()
 }
 
 /** Adds a 1dp inset divider inside a group card. The default 16dp inset

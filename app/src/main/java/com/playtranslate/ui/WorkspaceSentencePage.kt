@@ -123,14 +123,31 @@ class WorkspaceSentencePage(
      *  lens's snapshot as the fallback. */
     private fun liveSentenceContext(): SentenceContext = vm.sentenceContext(args.sentenceContext)
 
+    /**
+     * The sentence provider of a word page this page opens now. [opened]
+     * is this page's sentence as it stands at the open, holding what was
+     * answered about the opened word there; the page's card reads the
+     * live state over it at each tap, as [liveSentenceContext] does over
+     * the lens's snapshot, so a translation that lands later is on the
+     * card, and the answer stays only beside the sentence it was asked
+     * about ([TranslationResultViewModel.sentenceContext]).
+     */
+    private fun wordPageSentence(opened: SentenceContext): () -> SentenceContext =
+        { vm.sentenceContext(opened) }
+
+    /** A Words row's tap: [explanation] is the answer that stood in the
+     *  row, about its word in the sentence on show. */
     private fun pushWordPage(
         word: String,
         reading: String?,
         surface: String?,
         lookupForm: String,
         lookupReading: String?,
+        explanation: String?,
     ) {
         val host = hostRef ?: return
+        val opened = liveSentenceContext()
+            .explaining(pageCardTarget(surface, lookupForm, lookupReading), explanation)
         host.push(
             WorkspaceWordDetailPage(
                 word = word,
@@ -140,7 +157,7 @@ class WorkspaceSentencePage(
                 lookupReading = lookupReading,
                 screenshotPath = args.screenshotPath,
                 audioAnchorMs = args.audioAnchorMs,
-                sentenceContext = { liveSentenceContext() },
+                sentenceContext = wordPageSentence(opened),
             ),
         )
     }
@@ -185,6 +202,13 @@ class WorkspaceSentencePage(
                 showAnkiNotInstalled = { showAnkiNotInstalledDialog(ctx, host.modalLayer) },
                 route = WorkspaceRoute.PushInto(host),
                 detailPage = { a ->
+                    // The opener's snapshot holds the row's answer, about
+                    // its own sentence: it joins this page's only where
+                    // that is the sentence on show.
+                    val now = liveSentenceContext()
+                    val opened = now.copy(
+                        explanations = now.explanations + a.sentenceContext.explanationsAbout(now.original),
+                    )
                     WorkspaceWordDetailPage(
                         word = a.word,
                         reading = a.reading,
@@ -193,7 +217,7 @@ class WorkspaceSentencePage(
                         lookupReading = a.lookupReading,
                         screenshotPath = a.screenshotPath,
                         audioAnchorMs = a.audioAnchorMs,
-                        sentenceContext = { liveSentenceContext() },
+                        sentenceContext = wordPageSentence(opened),
                     )
                 },
                 currentSecondary = if (secondaries.isEmpty()) null else { i ->
@@ -208,7 +232,8 @@ class WorkspaceSentencePage(
             surface: String?,
             lookupForm: String,
             lookupReading: String?,
-        ) = pushWordPage(word, reading, surface, lookupForm, lookupReading)
+            explanation: String?,
+        ) = pushWordPage(word, reading, surface, lookupForm, lookupReading, explanation)
 
         override fun onChangeLanguage(isSource: Boolean) {
             host.push(if (isSource) SourceListPage() else TargetListPage())
@@ -259,6 +284,7 @@ class WorkspaceSentencePage(
                     annotation = settled.annotation,
                 )
             },
+            notes = content?.sentenceCardNote().orEmpty(),
         )
     }
 

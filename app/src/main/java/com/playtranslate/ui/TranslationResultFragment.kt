@@ -66,7 +66,10 @@ class TranslationResultFragment : Fragment() {
          *  the detail header's conjugation line; null for a lemma.
          *  [lookupForm] and [lookupReading] are the key the detail page
          *  resolves with ([WordDetailBinder.Args.lookupForm]); a caller with
-         *  no key of its own leaves them at [word] and [reading]. */
+         *  no key of its own leaves them at [word] and [reading].
+         *  [explanation] is the answer that stood in the tapped row, for the
+         *  detail's Anki card ([WordDetailBinder.Args.explanation]); null
+         *  with none. */
         fun onWordTapped(
             word: String,
             reading: String?,
@@ -77,6 +80,7 @@ class TranslationResultFragment : Fragment() {
             wordResults: Map<String, Triple<String, String, Int>>,
             lookupForm: String = word,
             lookupReading: String? = reading,
+            explanation: String? = null,
         )
         fun onInteraction()
         fun getAnkiPermissionLauncher(): androidx.activity.result.ActivityResultLauncher<String>?
@@ -493,9 +497,13 @@ class TranslationResultFragment : Fragment() {
         pos: String,
         definition: String,
         freqScore: Int,
+        notes: String,
     ) {
         val ready = currentReady()
         val intent = Intent(activity, AnkiPermissionActivity::class.java).apply {
+            // The note the card starts with; AnkiPermissionActivity
+            // forwards every extra.
+            putExtras(Bundle().apply { putAnkiNotes(notes) })
             putExtra(WordAnkiReviewActivity.EXTRA_WORD, word)
             putExtra(WordAnkiReviewActivity.EXTRA_READING, reading)
             putExtra(WordAnkiReviewActivity.EXTRA_POS, pos)
@@ -520,12 +528,15 @@ class TranslationResultFragment : Fragment() {
      *  installation gate here, permission gate handled by the launched
      *  [AnkiPermissionActivity]. Sentence context comes from the current
      *  VM result so the card carries the source sentence + translation +
-     *  screenshot. */
+     *  screenshot. [notes] is the answer that stood in the row at the tap
+     *  ([MagnifierLens.explanationOf]), which the card's note starts with;
+     *  "" with none. */
     private fun launchWordAnki(
         activity: Activity,
         word: String,
         reading: String?,
         entry: com.playtranslate.model.DictionaryEntry?,
+        notes: String,
     ) {
         val ankiManager = AnkiManager(activity)
         if (!ankiManager.isAnkiDroidInstalled()) {
@@ -538,6 +549,7 @@ class TranslationResultFragment : Fragment() {
             activity, word,
             reading = reading?.takeIf { it != word } ?: "",
             pos = pos, definition = definition, freqScore = entry?.freqScore ?: 0,
+            notes = notes,
         )
     }
 
@@ -653,20 +665,23 @@ class TranslationResultFragment : Fragment() {
         reading: String?,
         entry: com.playtranslate.model.DictionaryEntry?,
         entries: List<com.playtranslate.model.DictionaryEntry>,
+        /** For the review this falls back to ([launchWordAnki]); the
+         *  headless send itself carries no note. */
+        notes: String,
     ) {
         val ankiManager = AnkiManager(activity)
         if (!ankiManager.isAnkiDroidInstalled() || !ankiManager.hasPermission()) {
-            launchWordAnki(activity, word, reading, entry)
+            launchWordAnki(activity, word, reading, entry, notes)
             return
         }
         if (prefs.ankiDeckId < 0L) {
-            launchWordAnki(activity, word, reading, entry)
+            launchWordAnki(activity, word, reading, entry, notes)
             return
         }
         if (entry == null) {
             // No resolved entry — fall back so the user sees the error
             // path from inside the sheet rather than silently failing.
-            launchWordAnki(activity, word, reading, entry)
+            launchWordAnki(activity, word, reading, entry, notes)
             return
         }
         val (pos, definition) = entry.ankiPosAndDefinition()
@@ -743,7 +758,7 @@ class TranslationResultFragment : Fragment() {
                         // Re-launch the Activity so the user can configure
                         // the mapping inside the sheet (dialog needs
                         // Fragment infrastructure).
-                        launchWordAnki(activity, word, reading, entry)
+                        launchWordAnki(activity, word, reading, entry, notes)
                     }
                     // Unreachable: one-tap passes no oversizePrompt.
                     is AnkiSendResult.Declined -> Unit
@@ -787,6 +802,10 @@ class TranslationResultFragment : Fragment() {
                 val audioAnchorMs = audioAnchorMsFor(result)
                 val singleRow = (vm.wordLookups.value as? WordLookupsState.Settled)
                     ?.singleWordRow(getDisplayedOriginalText())
+                // What was answered about this sentence on the page, for
+                // the card's note: the Ask section's answer and the Words
+                // card's explained words.
+                val notes = content.sentenceCardNote()
                 if (singleRow != null) {
                     WordAnkiReviewSheet.newInstance(
                         word = singleRow.displayWord,
@@ -797,6 +816,7 @@ class TranslationResultFragment : Fragment() {
                         freqScore = singleRow.freqScore,
                         isCommon = singleRow.isCommon,
                         sourceLangId = prefs.sourceLangId,
+                        notes = notes,
                     ).show(childFragmentManager, WordAnkiReviewSheet.TAG)
                 } else {
                     AnkiReviewBottomSheet.newInstance(
@@ -810,6 +830,7 @@ class TranslationResultFragment : Fragment() {
                         // idempotent and the second batch is cache-served.
                         pendingTranslation = result.pendingTranslation,
                         audioAnchorMs = audioAnchorMs,
+                        notes = notes,
                     ).show(childFragmentManager, AnkiReviewBottomSheet.TAG)
                 }
             }
@@ -829,7 +850,9 @@ class TranslationResultFragment : Fragment() {
         /** The unit of a row: the tapped one, or a secondary by index. */
         fun unitOf(secondary: Int?): SourceWordLookup.Resolved? =
             if (secondary == null) resolved else secondaries.getOrNull(secondary)
-        fun openDetail(unit: SourceWordLookup.Resolved) {
+        // The answer standing in a row is read at the tap, before the lens
+        // is dismissed and its rows' answers go with it.
+        fun openDetail(unit: SourceWordLookup.Resolved, explanation: String?) {
             dismissWordPopup()
             host?.onInteraction()
             val ready = currentReady()
@@ -839,11 +862,11 @@ class TranslationResultFragment : Fragment() {
                 ready?.originalText,
                 ready?.translatedText,
                 currentSettledRows()?.toLegacyMap() ?: emptyMap(),
-                unit.lookupForm, unit.lookupReading,
+                unit.lookupForm, unit.lookupReading, explanation,
             )
         }
         if (displayEntry != null) {
-            lens.onOpenTap = { openDetail(resolved) }
+            lens.onOpenTap = { openDetail(resolved, lens.explanationOf(null)) }
         }
         if (secondaries.isNotEmpty()) {
             // Secondary-section drill-in (containing phrase, member words or
@@ -851,19 +874,25 @@ class TranslationResultFragment : Fragment() {
             // The sheet looks the unit up again under the unit's own key,
             // and a multi-word key round-trips unchanged.
             lens.onSecondaryOpenTap = { i ->
-                secondaries.getOrNull(i)?.let { sec -> openDetail(sec) }
+                secondaries.getOrNull(i)?.let { sec -> openDetail(sec, lens.explanationOf(i)) }
             }
         }
         lens.onAnkiTap = { secondary ->
             unitOf(secondary)?.let { unit ->
                 host?.onInteraction()
-                launchWordAnki(activity, unit.word, unit.reading, unit.entry)
+                launchWordAnki(
+                    activity, unit.word, unit.reading, unit.entry,
+                    notes = lens.explanationOf(secondary).orEmpty(),
+                )
             }
         }
         lens.onAnkiLongPress = { secondary ->
             unitOf(secondary)?.let { unit ->
                 host?.onInteraction()
-                oneTapWordFromPopup(activity, unit.word, unit.reading, unit.entry, unit.entries)
+                oneTapWordFromPopup(
+                    activity, unit.word, unit.reading, unit.entry, unit.entries,
+                    notes = lens.explanationOf(secondary).orEmpty(),
+                )
             }
         }
     }
@@ -922,6 +951,7 @@ class TranslationResultFragment : Fragment() {
             surface: String?,
             lookupForm: String,
             lookupReading: String?,
+            explanation: String?,
         ) {
             val ready = currentReady()
             host?.onWordTapped(
@@ -930,7 +960,7 @@ class TranslationResultFragment : Fragment() {
                 ready?.originalText,
                 ready?.translatedText,
                 currentSettledRows()?.toLegacyMap() ?: emptyMap(),
-                lookupForm, lookupReading,
+                lookupForm, lookupReading, explanation,
             )
         }
 

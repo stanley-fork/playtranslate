@@ -56,8 +56,10 @@ class WordAnkiReviewActivity : AppCompatActivity() {
             sentenceOriginal, sentenceTranslation, cachedWordResults, sourceLangId,
             sentencePending, audioAnchorMs,
             // The card's own word, when the opener keyed one ([putCardTarget]
-            // on the launch extras).
-            intent.extras?.getCardTarget())
+            // on the launch extras), and the note it starts with
+            // ([putAnkiNotes] on the same).
+            intent.extras?.getCardTarget(),
+            intent.extras?.getAnkiNotes().orEmpty())
     }
 
     private fun showReviewSheet(
@@ -69,6 +71,7 @@ class WordAnkiReviewActivity : AppCompatActivity() {
         sentencePending: com.playtranslate.model.PendingTranslation? = null,
         audioAnchorMs: Long? = null,
         target: CardTarget? = null,
+        notes: String = "",
     ) {
         val sheet = WordAnkiReviewSheet.newInstance(
             word, reading, pos, definition, screenshotPath,
@@ -80,6 +83,7 @@ class WordAnkiReviewActivity : AppCompatActivity() {
             sentencePending = sentencePending,
             audioAnchorMs = audioAnchorMs,
             target = target,
+            notes = notes,
         )
         sheet.onDismissListener = DialogInterface.OnDismissListener { finish() }
         sheet.show(supportFragmentManager, WordAnkiReviewSheet.TAG)

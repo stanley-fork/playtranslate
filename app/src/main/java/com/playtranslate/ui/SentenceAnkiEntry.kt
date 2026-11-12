@@ -2,6 +2,7 @@ package com.playtranslate.ui
 
 import android.content.Context
 import android.content.Intent
+import android.os.Bundle
 import android.widget.Toast
 import com.playtranslate.AnkiManager
 import com.playtranslate.PlayTranslateApplication
@@ -29,6 +30,12 @@ data class SentenceAnkiArgs(
      *  trim view opens at the line's own moment. Null without a capture. */
     val audioAnchorMs: Long?,
     val words: LastSentenceCache.WordsPayload?,
+    /** The text the editor's Notes box starts with: what was answered about
+     *  the sentence on the surface that opens it, its Ask section's answer
+     *  and its words' explain answers ([sentenceCardNote]), "" with none.
+     *  The editor's alone: a one-tap send has no box to start and sends no
+     *  note. */
+    val notes: String,
 )
 
 /**
@@ -85,6 +92,7 @@ fun presentSentenceAnkiReview(
                 sourceLangId = args.sourceLangId,
                 pendingTranslation = args.pendingTranslation,
                 audioAnchorMs = args.audioAnchorMs,
+                notes = args.notes,
             )
         }
         if (opened) return true
@@ -118,6 +126,7 @@ fun launchSentenceAnkiTrampoline(app: Context, displayId: Int, args: SentenceAnk
         args.audioAnchorMs?.let {
             putExtra(SentenceAnkiReviewActivity.EXTRA_AUDIO_ANCHOR_MS, it)
         }
+        putExtras(Bundle().apply { putAnkiNotes(args.notes) })
         args.words?.let { snap ->
             val keys = snap.results.keys.toTypedArray()
             // Size-gated pair: normally senses ride EXTRA_ENRICHMENT and

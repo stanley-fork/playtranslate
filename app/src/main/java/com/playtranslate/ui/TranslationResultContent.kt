@@ -14,6 +14,7 @@ import com.playtranslate.ocr.registry.OcrModelManager
 import com.playtranslate.Prefs
 import com.playtranslate.OverlayMode
 import com.playtranslate.R
+import com.playtranslate.ask.AskState
 import com.playtranslate.deferredCompletionNeeded
 import com.playtranslate.model.OcrProvenance
 import com.playtranslate.model.TranslationResult
@@ -93,13 +94,19 @@ class TranslationResultContent(
          *  row's occurrence text, for the detail header's conjugation line;
          *  [lookupForm] and [lookupReading] the key the row was resolved
          *  under, which the detail page resolves with
-         *  ([WordDetailBinder.Args.lookupForm]). */
+         *  ([WordDetailBinder.Args.lookupForm]); [explanation] the answer
+         *  that stood in the row, about the word in the sentence on show:
+         *  the host hands it to the detail page as part of that sentence
+         *  (its launch sentence's [WordDetailBinder.Args.explanation], or
+         *  its context's [SentenceContext.explanations]), which is where
+         *  the page's Anki card reads its note. */
         fun onWordTapped(
             word: String,
             reading: String?,
             surface: String?,
             lookupForm: String,
             lookupReading: String?,
+            explanation: String?,
         )
 
         /** Any user interaction (live-mode hosts pause on it). */
@@ -193,6 +200,13 @@ class TranslationResultContent(
     val ask: AskSectionBinder
     private val lookupsRenderer: WordLookupsRenderer
 
+    /** The note a card of the sentence on show starts with
+     *  ([sentenceCardNote]): the Ask section's answer, when one stands
+     *  (the session's, which is bound to the sentence on show), and the
+     *  answers standing in the Words card's rows; "" with none. */
+    fun sentenceCardNote(): String =
+        sentenceCardNote(vm.ask.state.value as? AskState.Answered, wordRows.explainedWords())
+
     /** Bumped on every [render]; see the class doc's reveal rule. */
     private var renderGeneration = 0
 
@@ -228,10 +242,10 @@ class TranslationResultContent(
                 override val scope: CoroutineScope get() = host.scope
                 override val ttsAlertTarget: TtsAlertTarget get() = host.ttsAlertTarget
                 override fun onInteraction() = host.onInteraction()
-                override fun onWordTapped(row: RowState) =
+                override fun onWordTapped(row: RowState, explanation: String?) =
                     host.onWordTapped(
                         row.displayWord, row.reading.ifEmpty { null }, row.surface,
-                        row.lookupForm, row.lookupReading,
+                        row.lookupForm, row.lookupReading, explanation,
                     )
                 override fun onAskNeedsLlm() = host.onAskNeedsLlm()
             },

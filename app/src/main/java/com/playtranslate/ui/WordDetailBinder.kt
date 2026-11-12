@@ -123,13 +123,30 @@ class WordDetailBinder(
          *  headwords follow [reading], what the opener showed. Defaults to
          *  [reading] for an opener with no key of its own. */
         val lookupReading: String? = reading,
-    )
+        /** What the opener's explain question about [word] in
+         *  [sentenceOriginal] brought, where the page was opened from a row
+         *  with that answer standing in it ([WordRowList.explanationOf]);
+         *  null with none. One of the launch sentence's fields, like the
+         *  four above: it reaches a card through [pageSentence], under the
+         *  page's own word ([target]), and so only while the page's
+         *  sentence is still the one it was asked about. An opener that
+         *  hands the page a context of its own puts the answer there
+         *  instead ([SentenceContext.explanations]). */
+        val explanation: String? = null,
+    ) {
+        /** The page's own word as a card names it ([pageCardTarget]). */
+        val target: CardTarget get() = pageCardTarget(surface, lookupForm, lookupReading)
+    }
 
     /** Everything the editable word review needs — the host decides HOW to
      *  present it (child DialogFragment, or the Anki activity trampoline
      *  until the workspace grows its own editor page). [target] is [word] as
      *  it was found in the sentence, which the review's sentence card places
-     *  among the sentence's words ([withCardTarget]). */
+     *  among the sentence's words ([withCardTarget]). [notes] is the text
+     *  the review's Notes boxes start with ([putAnkiNotes]): what the
+     *  page's sentence holds about [target]
+     *  ([SentenceContext.explanations]), "" with nothing. Made by
+     *  [wordAnkiArgs], which reads the sentence and the note together. */
     data class WordAnkiArgs(
         val word: String,
         val reading: String,
@@ -144,6 +161,7 @@ class WordDetailBinder(
         val sourceLangId: SourceLangId,
         val sentencePending: com.playtranslate.model.PendingTranslation?,
         val target: CardTarget,
+        val notes: String,
     )
 
     interface Ui {
@@ -229,14 +247,66 @@ class WordDetailBinder(
          * ([resolveAnkiTranslation]'s caller contract). Surfaces and
          * enrichment are left out: they pair only with the words of the
          * host's own atomic snapshot, which the one-tap reads from [host].
+         *
+         * The words' explanations are both sources', each side's only when
+         * the sentence the page ends up with is the one that side's were
+         * asked about ([explanationsAbout]): [host]'s, and the answer the
+         * page was opened with ([Args.explanation], about the page's own
+         * word in [Args.sentenceOriginal]). A card reads its note from
+         * here and nowhere else, so it never has one sentence and an
+         * answer about another.
          */
-        internal fun pageSentence(host: SentenceContext?, args: Args?): SentenceContext =
-            SentenceContext(
-                original = host?.original ?: args?.sentenceOriginal,
+        internal fun pageSentence(host: SentenceContext?, args: Args?): SentenceContext {
+            val original = host?.original ?: args?.sentenceOriginal
+            val launch = args?.let {
+                SentenceContext(it.sentenceOriginal, null, null).explaining(it.target, it.explanation)
+            }
+            return SentenceContext(
+                original = original,
                 translation = host?.translation ?: args?.sentenceTranslation,
                 wordResults = host?.wordResults ?: args?.sentenceWordResults,
                 pending = if (host != null) host.pending else args?.sentencePending,
+                explanations = host?.explanationsAbout(original).orEmpty() +
+                    launch?.explanationsAbout(original).orEmpty(),
             )
+        }
+
+        /**
+         * The editable review of one word on [sentence], [target] being
+         * the word as it was found there. The card's sentence and its note
+         * are read from the one context, the note being what that context
+         * holds about [target] ([SentenceContext.explanations]), so no
+         * card is made with one sentence and a note about another. Both
+         * reviews a page opens are made here: its own word's and a cell's
+         * ([rowAnkiArgs]).
+         */
+        internal fun wordAnkiArgs(
+            sentence: SentenceContext,
+            target: CardTarget,
+            word: String,
+            reading: String,
+            pos: String,
+            definition: String,
+            screenshotPath: String?,
+            freqScore: Int,
+            isCommon: Boolean,
+            sourceLangId: SourceLangId,
+        ): WordAnkiArgs = WordAnkiArgs(
+            word = word,
+            reading = reading,
+            pos = pos,
+            definition = definition,
+            screenshotPath = screenshotPath,
+            freqScore = freqScore,
+            isCommon = isCommon,
+            sentenceOriginal = sentence.original,
+            sentenceTranslation = sentence.translation,
+            sentenceWordResults = sentence.wordResults,
+            sourceLangId = sourceLangId,
+            sentencePending = sentence.pending,
+            target = target,
+            notes = sentence.explanations[target].orEmpty(),
+        )
 
         /**
          * The editable review for [row], a cell of the page's Words or Other
@@ -245,13 +315,17 @@ class WordDetailBinder(
          * word, so inside the same sentence. The row as it was found is the
          * card's [CardTarget], so its sentence card is for this word even
          * where the sentence's analysis chose another there (弾く in 弾けた).
+         * Its note is what [sentence] holds about that word, which is
+         * nothing where only the page's own word was explained.
          */
         internal fun rowAnkiArgs(
             row: RowState,
             sentence: SentenceContext,
             screenshotPath: String?,
             sourceLangId: SourceLangId,
-        ): WordAnkiArgs = WordAnkiArgs(
+        ): WordAnkiArgs = wordAnkiArgs(
+            sentence,
+            target = CardTarget(row.surface, row.lookupForm, row.lookupReading),
             word = row.displayWord,
             reading = row.reading.takeIf { it.isNotEmpty() && it != row.displayWord } ?: "",
             pos = row.ankiPos,
@@ -259,12 +333,7 @@ class WordDetailBinder(
             screenshotPath = screenshotPath,
             freqScore = row.freqScore,
             isCommon = row.isCommon,
-            sentenceOriginal = sentence.original,
-            sentenceTranslation = sentence.translation,
-            sentenceWordResults = sentence.wordResults,
             sourceLangId = sourceLangId,
-            sentencePending = sentence.pending,
-            target = CardTarget(row.surface, row.lookupForm, row.lookupReading),
         )
     }
 
@@ -733,11 +802,12 @@ class WordDetailBinder(
      *  the opener found it as, else its key [lookupForm], which is the text
      *  for an opener that had only the lemma. */
     private fun pageTarget(lookupForm: String): CardTarget =
-        CardTarget(args?.surface ?: lookupForm, lookupForm, args?.lookupReading)
+        pageCardTarget(args?.surface, lookupForm, args?.lookupReading)
 
     /** The editable review for the page's own word, on the page's sentence
-     *  ([pageSentence]). The card's word is the display [word]; its fields
-     *  come from the headword [lookupForm] names. */
+     *  ([pageSentence]), its note what that sentence holds about the word.
+     *  The card's word is the display [word]; its fields come from the
+     *  headword [lookupForm] names. */
     private fun ankiReviewArgs(
         word: String,
         lookupForm: String,
@@ -746,8 +816,9 @@ class WordDetailBinder(
         defResult: DefinitionResult?,
     ): WordAnkiArgs {
         val (reading, pos, definition) = buildAnkiWordFields(entry, defResult, lookupForm)
-        val sentence = pageSentence(ui.sentenceContext(), args)
-        return WordAnkiArgs(
+        return wordAnkiArgs(
+            pageSentence(ui.sentenceContext(), args),
+            target = pageTarget(lookupForm),
             word = word,
             reading = reading,
             pos = pos,
@@ -755,12 +826,7 @@ class WordDetailBinder(
             screenshotPath = screenshotPath,
             freqScore = entry.freqScore,
             isCommon = entry.isCommon == true,
-            sentenceOriginal = sentence.original,
-            sentenceTranslation = sentence.translation,
-            sentenceWordResults = sentence.wordResults,
             sourceLangId = Prefs(ctx.applicationContext).sourceLangId,
-            sentencePending = sentence.pending,
-            target = pageTarget(lookupForm),
         )
     }
 
